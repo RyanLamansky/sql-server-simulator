@@ -34,7 +34,7 @@ partial class Simulation
         var (loginLink, withoutLogin) = ParseCreateUserSource(context);
         if (bare)
             loginLink = name;
-        var (defaultSchema, _) = ParsePrincipalWithOptions(context, acceptsName: false, acceptsNullSchema: false, out _, out var defaultLanguage);
+        var options = ParsePrincipalWithOptions(context, CreateUserOptions);
         if (context.Batch.IsSkipping)
             return true;
         context.CurrentDatabase.RejectWriteWhenReadOnly();
@@ -43,6 +43,17 @@ partial class Simulation
         // Server 2025).
         if (!PermissionEnforcement.HoldsDatabasePermission(context.Batch, context.CurrentDatabase, "CREATE USER"))
             throw SimulatedSqlException.UserDoesNotHavePermission();
+        // A database that isn't contained holds no password user, and a user
+        // with a login authenticates through it (probed 2026-10-21 against
+        // SQL Server 2025).
+        if (options.Password)
+        {
+            throw bare ? SimulatedSqlException.PasswordUserOutsideContainedDatabase()
+                : withoutLogin ? SimulatedSqlException.PasswordForUserWithoutLogin()
+                : SimulatedSqlException.ParameterForNonAuthenticatingUser("PASSWORD");
+        }
+        if (options.Sid && !withoutLogin)
+            throw SimulatedSqlException.SidForLoginMappedUser();
         // guest can't be mapped (Msg 15062); a bare CREATE USER's missing
         // login is reported ahead of a taken name (probed 2026-10-04 against
         // SQL Server 2025).
@@ -78,8 +89,8 @@ partial class Simulation
         // A user of a database that isn't contained authenticates through its
         // login, if any, so it takes no language (probed 2026-10-21 against
         // SQL Server 2025).
-        if (defaultLanguage)
-            throw SimulatedSqlException.DefaultLanguageForNonAuthenticatingUser();
+        if (options.DefaultLanguage)
+            throw SimulatedSqlException.ParameterForNonAuthenticatingUser("DEFAULT_LANGUAGE");
         var id = context.CurrentDatabase.AllocatePrincipalId();
         RecordSecurityUndo(context, context.CurrentDatabase);
         context.CurrentDatabase.Principals[name] = new DatabasePrincipal(
@@ -87,7 +98,7 @@ partial class Simulation
             loginName: loginLink,
             securityIdentifierString: withoutLogin ? DeriveSyntheticUserSid(name) : null)
         {
-            DefaultSchemaName = defaultSchema,
+            DefaultSchemaName = options.DefaultSchema,
             LoginPrincipalId = loginLink is not null && context.Simulation.TryResolveServerPrincipalId(loginLink, out var linkedId) ? linkedId : 0,
             LoginSid = loginLink is null ? null : LoginSid(context.Simulation, loginLink),
         };
@@ -143,58 +154,153 @@ partial class Simulation
         return (null, false);
     }
 
-    /// <summary>
-    /// Reads a user's or role's <c>WITH option = value [, …]</c> list, handing
-    /// back the <c>DEFAULT_SCHEMA</c> and <c>NAME</c> values; every other
-    /// option (<c>LOGIN</c>, <c>PASSWORD</c>, <c>LANGUAGE</c>, <c>SID</c>, …)
-    /// is read and discarded. No-op when the cursor isn't on <c>WITH</c>;
-    /// otherwise the cursor ends on the first token past the list.
-    /// </summary>
-    private static (string? DefaultSchema, string? NewName) ParsePrincipalWithOptions(ParserContext context, bool acceptsName = true) =>
-        ParsePrincipalWithOptions(context, acceptsName, acceptsNullSchema: false, out _, out _);
+    /// <summary>The <c>WITH</c> options a user's or role's statement takes, as flags.</summary>
+    [Flags]
+    private enum PrincipalOption
+    {
+        None = 0,
+        AllowEncryptedValueModifications = 1,
+        DefaultLanguage = 2,
+        DefaultSchema = 4,
+        Login = 8,
+        Name = 16,
+        Password = 32,
+        Sid = 64,
+    }
+
+    /// <summary>The options <c>CREATE USER</c> takes.</summary>
+    private const PrincipalOption CreateUserOptions = PrincipalOption.AllowEncryptedValueModifications | PrincipalOption.DefaultLanguage
+        | PrincipalOption.DefaultSchema | PrincipalOption.Password | PrincipalOption.Sid;
+
+    /// <summary>The options <c>ALTER USER</c> takes.</summary>
+    private const PrincipalOption AlterUserOptions = PrincipalOption.AllowEncryptedValueModifications | PrincipalOption.DefaultLanguage
+        | PrincipalOption.DefaultSchema | PrincipalOption.Login | PrincipalOption.Name | PrincipalOption.Password;
+
+    /// <summary>A user's or role's <c>WITH</c> list as written.</summary>
+    private struct PrincipalOptions
+    {
+        public string? DefaultSchema;
+
+        /// <summary>The <c>DEFAULT_SCHEMA</c> word as written when its value is <c>NULL</c>, which <c>ALTER USER</c> refuses only as it runs.</summary>
+        public string? NullSchemaOption;
+
+        public string? NewName;
+
+        public string? Login;
+
+        public bool Password;
+
+        public bool DefaultLanguage;
+
+        public bool Sid;
+    }
 
     /// <summary>
-    /// <see cref="ParsePrincipalWithOptions(ParserContext, bool)"/>, setting
-    /// <paramref name="nullSchemaOption"/> to the <c>DEFAULT_SCHEMA</c> word as
-    /// written when its value is <c>NULL</c> and <paramref name="acceptsNullSchema"/>
-    /// — <c>ALTER USER</c>'s, which refuses it only as it runs; elsewhere it is
-    /// a syntax error near <c>NULL</c> — and <paramref name="defaultLanguage"/>
-    /// to whether a <c>DEFAULT_LANGUAGE</c> is given.
+    /// Reads a user's or role's <c>WITH option = value [, …]</c> list, each
+    /// option one <paramref name="takes"/> names, once: an option the
+    /// statement doesn't take, or one given twice, is Msg 102 near the option
+    /// or the second value (probed 2026-10-21 against SQL Server 2025).
+    /// <c>ALTER USER</c>'s <c>DEFAULT_SCHEMA = NULL</c> parses
+    /// (<see cref="PrincipalOptions.NullSchemaOption"/>); elsewhere it is a
+    /// syntax error near <c>NULL</c>. No-op when the cursor isn't on
+    /// <c>WITH</c>; otherwise the cursor ends on the first token past the list.
     /// </summary>
-    private static (string? DefaultSchema, string? NewName) ParsePrincipalWithOptions(ParserContext context, bool acceptsName, bool acceptsNullSchema, out string? nullSchemaOption, out bool defaultLanguage)
+    private static PrincipalOptions ParsePrincipalWithOptions(ParserContext context, PrincipalOption takes)
     {
-        nullSchemaOption = null;
-        defaultLanguage = false;
+        var options = default(PrincipalOptions);
         if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
-            return (null, null);
-        string? defaultSchema = null, newName = null;
+            return options;
+        var given = PrincipalOption.None;
         do
         {
-            // CREATE USER takes no NAME option: Msg 102 near it (probed
-            // 2026-10-06 against SQL Server 2025).
-            if (context.GetNextRequired() is StringToken { Span: var named } && !acceptsName && named.Equals("NAME", StringComparison.OrdinalIgnoreCase))
+            if (context.GetNextRequired() is not StringToken optionToken)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            if (context.Token is not StringToken option || context.GetNextRequired() is not Operator { Character: '=' })
+            var option = PrincipalOptionNamed(optionToken.Span);
+            if ((option & takes) == 0)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (context.GetNextRequired() is not Operator { Character: '=' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             var value = context.GetNextRequired();
-            if (option.Span.Equals("DEFAULT_SCHEMA", StringComparison.OrdinalIgnoreCase))
+            if ((given & option) != 0)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            given |= option;
+            switch (option)
             {
-                if (value is ReservedKeyword { Keyword: Keyword.Null } && acceptsNullSchema)
-                    nullSchemaOption = option.Source.ToString();
-                else
-                    defaultSchema = value is Name schemaName ? schemaName.Value : throw SimulatedSqlException.SyntaxErrorNear(context);
-            }
-            else if (option.Span.Equals("NAME", StringComparison.OrdinalIgnoreCase))
-            {
-                newName = value is Name nameValue ? nameValue.Value : throw SimulatedSqlException.SyntaxErrorNear(context);
-            }
-            else if (option.Span.Equals("DEFAULT_LANGUAGE", StringComparison.OrdinalIgnoreCase))
-            {
-                defaultLanguage = true;
+                case PrincipalOption.AllowEncryptedValueModifications:
+                    if (value is not (StringToken or ReservedKeyword))
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    break;
+                case PrincipalOption.DefaultLanguage:
+                    if (value is not (Name or Numeric))
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    options.DefaultLanguage = true;
+                    break;
+                case PrincipalOption.DefaultSchema:
+                    if (value is ReservedKeyword { Keyword: Keyword.Null } && takes == AlterUserOptions)
+                        options.NullSchemaOption = optionToken.Source.ToString();
+                    else
+                        options.DefaultSchema = value is Name schemaName ? schemaName.Value : throw SimulatedSqlException.SyntaxErrorNear(context);
+                    break;
+                case PrincipalOption.Login:
+                    // A value that names nothing is the syntax error at LOGIN.
+                    options.Login = value is Name loginName ? loginName.Value : throw SimulatedSqlException.SyntaxErrorNear(optionToken);
+                    break;
+                case PrincipalOption.Name:
+                    options.NewName = value is Name nameValue ? nameValue.Value : throw SimulatedSqlException.SyntaxErrorNear(context);
+                    break;
+                case PrincipalOption.Password:
+                    if (value is not Literal { Value.Type.Category: SqlTypeCategory.String })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    options.Password = true;
+                    // ALTER USER's OLD_PASSWORD follows its PASSWORD with no comma.
+                    if (takes == AlterUserOptions)
+                    {
+                        var afterPassword = context.SaveCheckpoint();
+                        if (context.GetNextOptional() is StringToken { Span: var next } && next.Equals("OLD_PASSWORD", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (context.GetNextRequired() is not Operator { Character: '=' })
+                                throw SimulatedSqlException.SyntaxErrorNear(context);
+                            if (context.GetNextRequired() is not Literal { Value.Type.Category: SqlTypeCategory.String })
+                                throw SimulatedSqlException.SyntaxErrorNear(context);
+                        }
+                        else
+                        {
+                            context.RestoreCheckpoint(afterPassword);
+                        }
+                    }
+                    break;
+                case PrincipalOption.Sid:
+                    // A SID that isn't a binary literal is the syntax error at SID.
+                    if (value is not Literal { Value.Type: VarbinarySqlType })
+                        throw SimulatedSqlException.SyntaxErrorNear(optionToken);
+                    options.Sid = true;
+                    break;
+                default:
+                    break;
             }
         }
         while (context.GetNextOptional() is Operator { Character: ',' });
-        return (defaultSchema, newName);
+        return options;
+    }
+
+    /// <summary>The <see cref="PrincipalOption"/> <paramref name="word"/> names, case aside, or <see cref="PrincipalOption.None"/>.</summary>
+    private static PrincipalOption PrincipalOptionNamed(ReadOnlySpan<char> word)
+    {
+        Span<char> folded = stackalloc char[36];
+        if (word.Length > folded.Length)
+            return PrincipalOption.None;
+        folded = folded[..word.ToUpperInvariant(folded)];
+        return folded switch
+        {
+            "ALLOW_ENCRYPTED_VALUE_MODIFICATIONS" => PrincipalOption.AllowEncryptedValueModifications,
+            "DEFAULT_LANGUAGE" => PrincipalOption.DefaultLanguage,
+            "DEFAULT_SCHEMA" => PrincipalOption.DefaultSchema,
+            "LOGIN" => PrincipalOption.Login,
+            "NAME" => PrincipalOption.Name,
+            "PASSWORD" => PrincipalOption.Password,
+            "SID" => PrincipalOption.Sid,
+            _ => PrincipalOption.None,
+        };
     }
 
     /// <summary>
@@ -212,7 +318,7 @@ partial class Simulation
         context.MoveNextRequired();
         if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        var (defaultSchema, newName) = ParsePrincipalWithOptions(context, acceptsName: true, acceptsNullSchema: true, out var nullSchemaOption, out var defaultLanguage);
+        var options = ParsePrincipalWithOptions(context, AlterUserOptions);
         if (context.Batch.IsSkipping)
             return true;
 
@@ -231,17 +337,50 @@ partial class Simulation
         // DEFAULT_SCHEMA = NULL parses, and is refused as the statement runs
         // with a severity-16 Msg 102 naming the option (probed 2026-10-06
         // against SQL Server 2025).
-        if (nullSchemaOption is not null)
+        if (options.NullSchemaOption is { } nullSchemaOption)
             throw SimulatedSqlException.NullDefaultSchemaRefused(nullSchemaOption);
-        if (defaultLanguage)
-            throw SimulatedSqlException.DefaultLanguageForNonAuthenticatingUser();
+        if (options.DefaultLanguage)
+            throw SimulatedSqlException.ParameterForNonAuthenticatingUser("DEFAULT_LANGUAGE");
+        if (options.Password)
+            throw SimulatedSqlException.ParameterForNonAuthenticatingUser("PASSWORD");
+        if (options.Login is { } login)
+            RequireRemappableLogin(context, user, login);
         RecordSecurityUndo(context, database);
-        if (newName is not null)
+        if (options.NewName is { } newName)
             RenamePrincipal(database, user, newName);
-        if (defaultSchema is not null)
+        if (options.DefaultSchema is { } defaultSchema)
             user.DefaultSchemaName = defaultSchema;
+        if (options.Login is { } remapped)
+        {
+            user.LoginName = remapped;
+            user.LoginPrincipalId = context.Simulation.TryResolveServerPrincipalId(remapped, out var loginId) ? loginId : 0;
+            user.LoginSid = LoginSid(context.Simulation, remapped);
+        }
         RecordDdlEvent(context, "ALTER_USER", null, user.Name, "SQL USER", principalElements: PrincipalEventElements(database, database.Principals[user.Name]));
         return true;
+    }
+
+    /// <summary>
+    /// Refuses <c>ALTER USER … WITH LOGIN = <paramref name="login"/></c> where
+    /// real does (probed 2026-10-21 against SQL Server 2025): <c>sa</c> is Msg
+    /// 15150 naming it, a user no login maps Msg 33016, a login the server
+    /// doesn't have Msg 15401, and one another user of the database maps Msg
+    /// 33018; naming the user's own login changes nothing.
+    /// </summary>
+    private static void RequireRemappableLogin(ParserContext context, DatabasePrincipal user, string login)
+    {
+        if (BuiltInToken.Comparer.Equals(login, "sa"))
+            throw SimulatedSqlException.CannotAlterDatabaseOwnerUser(login, state: 5);
+        if (user.LoginName is null)
+            throw SimulatedSqlException.UserCannotBeRemapped();
+        if (!context.Simulation.TryResolveServerPrincipalId(login, out _) && !context.Simulation.Logins.ContainsKey(login))
+            throw SimulatedSqlException.WindowsPrincipalNotFound(login, level: 16, state: 2);
+        var database = context.CurrentDatabase;
+        foreach (var other in database.Principals.EnumerateValues())
+        {
+            if (!ReferenceEquals(other, user) && other.LoginName is { } linked && database.Collation.Equals(linked, login))
+                throw SimulatedSqlException.LoginAlreadyMappedInDatabase(login);
+        }
     }
 
     /// <summary>
@@ -524,7 +663,7 @@ partial class Simulation
         // WITH NAME = newname renames the role; a taken name is Msg 15023.
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
         {
-            var (_, newName) = ParsePrincipalWithOptions(context);
+            var newName = ParsePrincipalWithOptions(context, PrincipalOption.Name).NewName;
             if (context.Batch.IsSkipping || newName is null)
                 return true;
             context.CurrentDatabase.RejectWriteWhenReadOnly();

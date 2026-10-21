@@ -67,7 +67,7 @@ partial class Simulation
             }
         }
         var password = ParsePasswordClauseHere(context, required: true, out var passwordStart, out var passwordEnd);
-        var options = ConsumeLoginOptions(context, takesSid: true);
+        var options = ConsumeLoginOptions(context, creating: true, afterPassword: true);
         if (context.Batch.IsSkipping)
             return true;
         RecordServerSecurityUndo(context.Batch);
@@ -103,6 +103,8 @@ partial class Simulation
         var checkPolicy = options.CheckPolicy ?? true;
         if (options.CheckExpiration == true && !checkPolicy)
             throw SimulatedSqlException.CheckExpirationNeedsPolicy();
+        if (options.MustChange && options.CheckExpiration != true)
+            throw SimulatedSqlException.MustChangeNeedsExpiration();
         if (checkPolicy)
             ValidateLoginPassword(name, password);
         int? credentialId = options.Credential is { } credential ? simulation.ResolveCredentialId(credential) : null;
@@ -240,12 +242,23 @@ partial class Simulation
     {
         context.MoveNextRequired();
         var name = ParseLoginName(context);
-        var password = ParseLoginPasswordClause(context, required: false, out var passwordStart, out var passwordEnd);
-        bool? disable = password is null && context.Token is UnquotedString { Value: var word }
-            ? word.Equals("DISABLE", StringComparison.OrdinalIgnoreCase) ? true
-                : word.Equals("ENABLE", StringComparison.OrdinalIgnoreCase) ? false : null
-            : null;
-        var options = ConsumeLoginOptions(context);
+        context.MoveNextRequired();
+        var withList = context.Token is ReservedKeyword { Keyword: Keyword.With };
+        var password = ParsePasswordClauseHere(context, required: false, out var passwordStart, out var passwordEnd);
+        bool? disable = null;
+        if (!withList)
+        {
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Add or Keyword.Drop })
+                throw new NotSupportedException("ALTER LOGIN … ADD / DROP CREDENTIAL, the extensible-key-management credentials a login holds beside its mapped one, isn't modeled.");
+            if (context.Token is not UnquotedString { Value: var word })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            disable = word.Equals("DISABLE", StringComparison.OrdinalIgnoreCase)
+                || (word.Equals("ENABLE", StringComparison.OrdinalIgnoreCase) ? false : throw SimulatedSqlException.SyntaxErrorNear(context));
+            context.MoveNextOptional();
+        }
+        var options = ConsumeLoginOptions(context, creating: false, afterPassword: password is not null, listStartsHere: withList && password is null);
+        if (options.NewName is not null && !context.Batch.IsSkipping)
+            throw new NotSupportedException("ALTER LOGIN … WITH NAME, renaming a login, isn't modeled.");
         if (context.Batch.IsSkipping)
             return true;
         RecordServerSecurityUndo(context.Batch);
@@ -306,6 +319,8 @@ partial class Simulation
         var policyChecked = options.CheckPolicy ?? existing.IsPolicyChecked;
         if ((options.CheckExpiration ?? existing.IsExpirationChecked) && !policyChecked)
             throw SimulatedSqlException.CheckExpirationNeedsPolicy();
+        if (options.MustChange && !(options.CheckExpiration ?? existing.IsExpirationChecked))
+            throw SimulatedSqlException.MustChangeNeedsExpiration();
         if (password is not null && password.Length > PasswordHash.MaxClearTextChars)
             throw SimulatedSqlException.PasswordEncryptionInvalidValue();
         if (password is not null && policyChecked)
@@ -372,7 +387,7 @@ partial class Simulation
     }
 
     /// <summary>The options of a <c>CREATE LOGIN</c> / <c>ALTER LOGIN</c> the simulator keeps, null for one not written.</summary>
-    private readonly struct LoginOptions(string? defaultDatabase, string? defaultLanguage, bool? checkPolicy, bool? checkExpiration, string? oldPassword, string? credential, bool noCredential, byte[]? sid)
+    private readonly struct LoginOptions(string? defaultDatabase, string? defaultLanguage, bool? checkPolicy, bool? checkExpiration, string? oldPassword, string? credential, bool noCredential, byte[]? sid, bool mustChange, string? newName)
     {
         /// <summary>The binary literal a <c>SID =</c> gives, before its checks.</summary>
         public readonly byte[]? Sid = sid;
@@ -388,91 +403,173 @@ partial class Simulation
         public readonly string? DefaultLanguage = defaultLanguage;
         public readonly bool? CheckPolicy = checkPolicy;
         public readonly bool? CheckExpiration = checkExpiration;
+
+        /// <summary>The password's <c>MUST_CHANGE</c>, which needs <c>CHECK_EXPIRATION</c> on.</summary>
+        public readonly bool MustChange = mustChange;
+
+        /// <summary><c>ALTER LOGIN</c>'s <c>NAME = new</c>.</summary>
+        public readonly string? NewName = newName;
     }
 
     /// <summary>
-    /// Reads the rest of a <c>CREATE LOGIN</c> / <c>ALTER LOGIN</c> statement, keeping
-    /// the <c>DEFAULT_DATABASE</c> and <c>DEFAULT_LANGUAGE</c> values as written, the
-    /// <c>CHECK_POLICY</c> / <c>CHECK_EXPIRATION</c> switches and the <c>CREDENTIAL</c> /
-    /// <c>NO CREDENTIAL</c> mapping, and discarding every other option.
+    /// Reads the rest of a <c>CREATE LOGIN</c> (<paramref name="creating"/>) /
+    /// <c>ALTER LOGIN</c> statement: the modifiers a password takes with no
+    /// comma before them, after <paramref name="afterPassword"/> — <c>HASHED</c>
+    /// and <c>MUST_CHANGE</c> creating, <c>OLD_PASSWORD</c>, <c>MUST_CHANGE</c>
+    /// and <c>UNLOCK</c> altering — then the comma list of options, which an
+    /// <c>ALTER LOGIN … WITH</c> naming no password starts at once
+    /// (<paramref name="listStartsHere"/>). Each option is one the statement
+    /// takes, given once, with a value of its kind, as real's grammar has it
+    /// (probed 2026-10-21 against SQL Server 2025): anything else is Msg 102,
+    /// near the second value of a repeated option, near the option word of a
+    /// switch that isn't ON or OFF, and near the value of an unknown option
+    /// when that is a number, the option otherwise. The cursor ends on the
+    /// first token past what it read.
     /// </summary>
-    private static LoginOptions ConsumeLoginOptions(ParserContext context, bool takesSid = false)
+    private static LoginOptions ConsumeLoginOptions(ParserContext context, bool creating, bool afterPassword, bool listStartsHere = false)
     {
-        string? database = null, language = null, oldPassword = null, credential = null;
+        string? database = null, language = null, oldPassword = null, credential = null, newName = null;
         byte[]? sid = null;
         bool? checkPolicy = null, checkExpiration = null;
-        var noCredential = false;
-        while (!IsStatementBoundary(context.Token))
+        bool noCredential = false, mustChange = false;
+        if (afterPassword)
         {
-            if (context.Token is UnquotedString { Value: var option })
+            while (context.Token is UnquotedString { Value: var modifier })
             {
-                if (option.Equals("CREDENTIAL", StringComparison.OrdinalIgnoreCase))
+                if (modifier.Equals("MUST_CHANGE", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (context.GetNextOptional() is not Operator { Character: '=' })
-                        continue;
-                    if (context.GetNextOptional() is Name credentialName)
-                    {
-                        credential = credentialName.Value;
-                        context.MoveNextOptional();
-                    }
-                    continue;
+                    mustChange = true;
                 }
+                else if (creating && modifier.Equals("HASHED", StringComparison.OrdinalIgnoreCase))
+                {
+                    // A clear-text password is no hash (probed 2026-10-21 against SQL Server 2025).
+                    throw SimulatedSqlException.PasswordParameterInvalid();
+                }
+                else if (!creating && modifier.Equals("OLD_PASSWORD", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (context.GetNextRequired() is not Operator { Character: '=' })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    if (context.GetNextRequired() is not Literal { Value: var old } || !SqlType.IsStringCategory(old.Type))
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    oldPassword = old.AsString;
+                }
+                else if (creating || !modifier.Equals("UNLOCK", StringComparison.OrdinalIgnoreCase))
+                {
+                    break;
+                }
+                context.MoveNextOptional();
+            }
+            if (context.Token is not Operator { Character: ',' })
+                return new LoginOptions(database, language, checkPolicy, checkExpiration, oldPassword, credential, noCredential, sid, mustChange, newName);
+            context.MoveNextRequired();
+        }
+        else if (!listStartsHere)
+        {
+            return new LoginOptions(database, language, checkPolicy, checkExpiration, oldPassword, credential, noCredential, sid, mustChange, newName);
+        }
+
+        var given = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        while (true)
+        {
+            if (context.Token is not UnquotedString { Value: var option } optionToken)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (option.Equals("NO", StringComparison.OrdinalIgnoreCase))
+            {
+                if (creating || context.GetNextRequired() is not UnquotedString { Span: var noWhat } || !noWhat.Equals("CREDENTIAL", StringComparison.OrdinalIgnoreCase))
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (!given.Add("CREDENTIAL"))
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                noCredential = true;
+            }
+            else if (option.Equals("SID", StringComparison.OrdinalIgnoreCase))
+            {
                 // SID takes a binary literal, once, and only from CREATE LOGIN:
                 // anything else is a syntax error at it (probed 2026-10-16
                 // against SQL Server 2025).
-                if (option.Equals("SID", StringComparison.OrdinalIgnoreCase))
+                if (!creating)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (context.GetNextOptional() is not Operator { Character: '=' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (context.GetNextOptional() is not Literal { Value: { IsNull: false } literal } || literal.Type is not VarbinarySqlType)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                // A second SID is named by its bytes read as UTF-16, a
+                // zero character shown as a period.
+                if (sid is not null)
+                    throw SimulatedSqlException.SyntaxErrorNear(System.Text.Encoding.Unicode.GetString(literal.AsBytes).Replace('\0', '.'), 1);
+                sid = literal.AsBytes;
+            }
+            else
+            {
+                if (context.GetNextRequired() is not Operator { Character: '=' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                var value = context.GetNextRequired();
+                if (LoginOptionNamed(option, creating) is not { } kind)
+                    throw SimulatedSqlException.SyntaxErrorNear(value is Numeric ? value : optionToken);
+                // Named as a word, a keyword value included.
+                if (!given.Add(kind))
+                    throw SimulatedSqlException.SyntaxErrorNear(context.Token);
+                if (kind is "CHECK_EXPIRATION" or "CHECK_POLICY")
                 {
-                    if (!takesSid)
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                    if (context.GetNextOptional() is not Operator { Character: '=' })
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                    if (context.GetNextOptional() is not Literal { Value: { IsNull: false } literal } || literal.Type is not VarbinarySqlType)
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                    // A second SID is named by its bytes read as UTF-16, a
-                    // zero character shown as a period.
-                    if (sid is not null)
-                        throw SimulatedSqlException.SyntaxErrorNear(System.Text.Encoding.Unicode.GetString(literal.AsBytes).Replace('\0', '.'), 1);
-                    sid = literal.AsBytes;
-                    context.MoveNextOptional();
-                    continue;
-                }
-                if (option.Equals("NO", StringComparison.OrdinalIgnoreCase)
-                    && context.GetNextOptional() is UnquotedString { Span: var noWhat } && noWhat.Equals("CREDENTIAL", StringComparison.OrdinalIgnoreCase))
-                {
-                    noCredential = true;
-                    context.MoveNextOptional();
-                    continue;
-                }
-                var isDatabase = option.Equals("DEFAULT_DATABASE", StringComparison.OrdinalIgnoreCase);
-                var isLanguage = option.Equals("DEFAULT_LANGUAGE", StringComparison.OrdinalIgnoreCase);
-                var isPolicy = option.Equals("CHECK_POLICY", StringComparison.OrdinalIgnoreCase);
-                var isExpiration = option.Equals("CHECK_EXPIRATION", StringComparison.OrdinalIgnoreCase);
-                var isOldPassword = option.Equals("OLD_PASSWORD", StringComparison.OrdinalIgnoreCase);
-                if ((isDatabase || isLanguage || isPolicy || isExpiration || isOldPassword) && context.GetNextOptional() is Operator { Character: '=' })
-                {
-                    var value = context.GetNextOptional();
-                    var written = value switch
+                    var on = value switch
                     {
-                        Literal { Value: var literal } => literal.AsString,
-                        Name name => name.Value,
-                        ReservedKeyword keyword => keyword.Source.ToString(),
-                        _ => null,
+                        ReservedKeyword { Keyword: Keyword.On } => true,
+                        ReservedKeyword { Keyword: Keyword.Off } => false,
+                        _ => throw SimulatedSqlException.SyntaxErrorNear(optionToken),
                     };
-                    if (written is not null && isDatabase)
-                        database = written;
-                    else if (written is not null && isLanguage)
-                        language = written;
-                    else if (written is not null && isOldPassword)
-                        oldPassword = written;
-                    else if (written is not null && isPolicy)
-                        checkPolicy = written.Equals("ON", StringComparison.OrdinalIgnoreCase);
-                    else if (written is not null)
-                        checkExpiration = written.Equals("ON", StringComparison.OrdinalIgnoreCase);
+                    if (kind == "CHECK_POLICY")
+                        checkPolicy = on;
+                    else
+                        checkExpiration = on;
+                }
+                else
+                {
+                    if (value is not Name named)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    switch (kind)
+                    {
+                        case "CREDENTIAL":
+                            credential = named.Value;
+                            break;
+                        case "DEFAULT_DATABASE":
+                            database = named.Value;
+                            break;
+                        case "DEFAULT_LANGUAGE":
+                            language = named.Value;
+                            break;
+                        default:
+                            newName = named.Value;
+                            break;
+                    }
                 }
             }
-            context.MoveNextOptional();
+            if (context.GetNextOptional() is not Operator { Character: ',' })
+                break;
+            context.MoveNextRequired();
         }
-        return new LoginOptions(database, language, checkPolicy, checkExpiration, oldPassword, credential, noCredential, sid);
+        return new LoginOptions(database, language, checkPolicy, checkExpiration, oldPassword, credential, noCredential, sid, mustChange, newName);
+    }
+
+    /// <summary>
+    /// The <c>name = value</c> option of a <c>CREATE LOGIN</c>
+    /// (<paramref name="creating"/>) or <c>ALTER LOGIN</c> list
+    /// <paramref name="word"/> names, as its upper-case constant, or null.
+    /// </summary>
+    private static string? LoginOptionNamed(ReadOnlySpan<char> word, bool creating)
+    {
+        Span<char> folded = stackalloc char[16];
+        if (word.Length > folded.Length)
+            return null;
+        folded = folded[..word.ToUpperInvariant(folded)];
+        return folded switch
+        {
+            "CHECK_EXPIRATION" => "CHECK_EXPIRATION",
+            "CHECK_POLICY" => "CHECK_POLICY",
+            "CREDENTIAL" => "CREDENTIAL",
+            "DEFAULT_DATABASE" => "DEFAULT_DATABASE",
+            "DEFAULT_LANGUAGE" => "DEFAULT_LANGUAGE",
+            "NAME" => creating ? null : "NAME",
+            _ => null,
+        };
     }
 
     /// <summary>
@@ -571,18 +668,13 @@ partial class Simulation
     /// With the cursor on the token after the login name, extracts the
     /// clear-text password from a <c>WITH PASSWORD = '…'</c> clause and
     /// leaves the cursor on the token after the password literal (the
-    /// caller's <see cref="ConsumeLoginOptions"/> reads the option tail). Returns null when <paramref name="required"/> is false and the
-    /// clause is absent (ALTER LOGIN's ENABLE / DISABLE / other-option
-    /// forms). Rejects the unmodeled CREATE forms: <c>FROM</c> sources and
-    /// <c>PASSWORD = 0x… HASHED</c>.
+    /// caller's <see cref="ConsumeLoginOptions"/> reads the option tail).
+    /// Returns null when <paramref name="required"/> is false and the clause
+    /// is absent (ALTER LOGIN's ENABLE / DISABLE / other-option forms), the
+    /// cursor then past a <c>WITH</c> on the option after it. Rejects the
+    /// unmodeled CREATE forms: <c>FROM</c> sources and <c>PASSWORD = 0x…
+    /// HASHED</c>.
     /// </summary>
-    private static string? ParseLoginPasswordClause(ParserContext context, bool required, out int literalStart, out int literalEnd)
-    {
-        context.MoveNextRequired();
-        return ParsePasswordClauseHere(context, required, out literalStart, out literalEnd);
-    }
-
-    /// <summary><see cref="ParseLoginPasswordClause"/> with the cursor already on the token after the login name.</summary>
     private static string? ParsePasswordClauseHere(ParserContext context, bool required, out int literalStart, out int literalEnd)
     {
         literalStart = literalEnd = -1;

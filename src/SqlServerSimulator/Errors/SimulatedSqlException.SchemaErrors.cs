@@ -3967,10 +3967,11 @@ partial class SimulatedSqlException
     /// Msg 15401: a Windows principal the server's account lookup can't find —
     /// class 16 from <c>CREATE</c> / <c>DROP LOGIN</c>, class 11 from
     /// <c>sp_grantlogin</c> and <c>sp_denylogin</c>'s own check (probed
-    /// 2026-10-17 against SQL Server 2025).
+    /// 2026-10-17 against SQL Server 2025), and state 2 from <c>ALTER USER …
+    /// WITH LOGIN</c> naming no login at all (probed 2026-10-21).
     /// </summary>
-    internal static SimulatedSqlException WindowsPrincipalNotFound(string name, byte level) =>
-        new($"Windows NT user or group '{name}' not found. Check the name again.", 15401, level, 1);
+    internal static SimulatedSqlException WindowsPrincipalNotFound(string name, byte level, byte state = 1) =>
+        new($"Windows NT user or group '{name}' not found. Check the name again.", 15401, level, state);
 
     /// <summary>
     /// Msg 15407: a Windows login named without its <c>domain\</c> part —

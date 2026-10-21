@@ -234,4 +234,63 @@ public sealed class LoginDdlTests
         AreEqual((byte)2, ex.State);
         StartsWith("Password validation failed. The password does not meet SQL Server password policy requirements because it is not complex enough.", ex.Errors[0].Message);
     }
+
+    /// <summary>
+    /// A login's option list takes the options its statement knows, once each,
+    /// with values of their kind (probed 2026-10-21 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create login zl6 with password = 'Zc0v!Passw0rd' garbage garbage 123", "garbage")]
+    [DataRow("create login zl6 with password = 'Zc0v!Passw0rd', foo = on", "foo")]
+    [DataRow("create login zl6 with password = 'Zc0v!Passw0rd', 123", "123")]
+    [DataRow("create login zl6 with password = 'Zc0v!Passw0rd', default_database = 123", "123")]
+    [DataRow("create login zl6 with password = 'Zc0v!Passw0rd', default_language = 1033", "1033")]
+    [DataRow("create login zl6 with password = 'Zc0v!Passw0rd', check_policy = maybe", "check_policy")]
+    [DataRow("create login zl6 with password = 'Zc0v!Passw0rd', check_policy = off, check_policy = off", "off")]
+    [DataRow("create login zl6 with password = 'Zc0v!Passw0rd', default_database = master, default_database = master", "master")]
+    [DataRow("create login zl6 with password = 'Zc0v!Passw0rd', name = x", "name")]
+    [DataRow("alter login zl5 with foo = 1", "1")]
+    [DataRow("alter login zl5 with foo = bar", "foo")]
+    [DataRow("alter login zl5 with foo", ";")]
+    [DataRow("alter login zl5 with check_expiration = maybe", "check_expiration")]
+    [DataRow("alter login zl5 with name = a, name = b", "b")]
+    [DataRow("alter login zl5 with sid = 0x01", "sid")]
+    [DataRow("alter login zl5 with password = 'Zc0v!Passw0rd' garbage", "garbage")]
+    [DataRow("alter login zl5 with default_database = master garbage", "garbage")]
+    [DataRow("alter login zl5 enable garbage", "garbage")]
+    public void LoginOptionsOutsideTheGrammar_AreMsg102(string statement, string near)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create login zl5 with password = 'Zc0v!Passw0rd', check_policy = off");
+        sim.AssertSqlError(statement + ";", 102, $"Incorrect syntax near '{near}'.");
+    }
+
+    /// <summary>
+    /// <c>MUST_CHANGE</c> needs <c>CHECK_EXPIRATION</c>, a clear-text password
+    /// is no <c>HASHED</c> one, and the password's own modifiers take no comma
+    /// (probed 2026-10-21 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create login zl6 with password = 'Zc0v!Passw0rd' must_change", 15099)]
+    [DataRow("create login zl6 with password = 'Zc0v!Passw0rd' must_change, check_expiration = off", 15099)]
+    [DataRow("create login zl6 with password = 'Zc0v!Passw0rd' must_change, check_expiration = on, check_policy = off", 15122)]
+    [DataRow("create login zl6 with password = 'Zc0v!Passw0rd' hashed", 15021)]
+    [DataRow("alter login zl5 with password = 'Zc0v!Passw0rd' must_change", 15099)]
+    public void PasswordModifiersRealRefuses_RaiseItsError(string statement, int number)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create login zl5 with password = 'Zc0v!Passw0rd', check_policy = off");
+        _ = sim.AssertSqlError(statement, number);
+    }
+
+    [TestMethod]
+    [DataRow("create login zl6 with password = 'Zc0v!Passw0rd' must_change, check_expiration = on")]
+    [DataRow("alter login zl5 with password = 'Zc0v!Passw0rd' unlock, check_policy = on")]
+    [DataRow("alter login zl5 with password = 'Zc0v!Passw0rd' old_password = 'Zc0v!Passw0rd'")]
+    public void PasswordModifiersRealTakes_Run(string statement)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create login zl5 with password = 'Zc0v!Passw0rd', check_policy = off");
+        _ = sim.ExecuteNonQuery(statement);
+    }
 }

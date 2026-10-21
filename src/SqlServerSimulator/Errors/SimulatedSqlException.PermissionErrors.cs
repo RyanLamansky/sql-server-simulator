@@ -64,9 +64,33 @@ public sealed partial class SimulatedSqlException
     internal static SimulatedSqlException GrantInvalidColumnListAfterObject() =>
         new("Invalid column list after object name in GRANT/REVOKE statement.", 1019, 15, 1);
 
-    /// <summary>Msg 33234: <c>DEFAULT_LANGUAGE</c> on <c>CREATE</c> / <c>ALTER USER</c> in a database that isn't contained.</summary>
-    internal static SimulatedSqlException DefaultLanguageForNonAuthenticatingUser() =>
-        new("The parameter DEFAULT_LANGUAGE cannot be provided for users that cannot authenticate in a database.", 33234, 16, 1);
+    /// <summary>
+    /// Msg 33234: <c>DEFAULT_LANGUAGE</c> or <c>PASSWORD</c> on <c>CREATE</c> /
+    /// <c>ALTER USER</c> of a login-mapped user in a database that isn't
+    /// contained (probed 2026-10-21 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ParameterForNonAuthenticatingUser(string parameter) =>
+        new($"The parameter {parameter} cannot be provided for users that cannot authenticate in a database.", 33234, 16, 1);
+
+    /// <summary>Msg 33235: <c>CREATE USER … WITHOUT LOGIN WITH PASSWORD</c> (probed 2026-10-21 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException PasswordForUserWithoutLogin() =>
+        new("The parameter PASSWORD cannot be provided for users that cannot authenticate in a database. Remove the WITHOUT LOGIN or PASSWORD clause.", 33235, 16, 1);
+
+    /// <summary>Msg 33233: a password user, which only a contained database holds (probed 2026-10-21 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException PasswordUserOutsideContainedDatabase() =>
+        new("You can only create a user with a password in a contained database.", 33233, 16, 1);
+
+    /// <summary>Msg 33242: <c>CREATE USER … FOR LOGIN … WITH SID</c> (probed 2026-10-21 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException SidForLoginMappedUser() =>
+        new("When providing a sid, the user must be a user without login or a user with password.", 33242, 16, 1);
+
+    /// <summary>Msg 33016: <c>ALTER USER … WITH LOGIN</c> of a user no login maps (probed 2026-10-21 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException UserCannotBeRemapped() =>
+        new("The user cannot be remapped to a login. Remapping can only be done for users that were mapped to Windows or SQL logins.", 33016, 16, 1);
+
+    /// <summary>Msg 33018: <c>ALTER USER … WITH LOGIN</c> naming a login another user of the database maps (probed 2026-10-21 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException LoginAlreadyMappedInDatabase(string login) =>
+        new($"Cannot remap user to login '{login}', because the login is already mapped to a user in the database.", 33018, 16, 1);
 
     /// <summary>Msg 4620: one permission statement naming both server and database permissions, refused while the batch compiles.</summary>
     internal static SimulatedSqlException PermissionsAtMixedScopes() =>

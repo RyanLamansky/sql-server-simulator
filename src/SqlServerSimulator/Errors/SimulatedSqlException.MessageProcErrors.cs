@@ -216,6 +216,10 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException PasswordNotComplex() =>
         new("Password validation failed. The password does not meet SQL Server password policy requirements because it is not complex enough. The password must be at least 8 characters long and contain characters from three of the following four sets: Uppercase letters, Lowercase letters, Base 10 digits, and Symbols.", 33064, 16, 2);
 
+    /// <summary>Msg 15099: a login's <c>MUST_CHANGE</c> with <c>CHECK_EXPIRATION</c> off (probed 2026-10-21 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException MustChangeNeedsExpiration() =>
+        new("The MUST_CHANGE option cannot be used when CHECK_EXPIRATION is OFF.", 15099, 16, 1);
+
     /// <summary>Msg 15122: <c>CHECK_EXPIRATION</c> on with <c>CHECK_POLICY</c> off.</summary>
     internal static SimulatedSqlException CheckExpirationNeedsPolicy() =>
         new("The CHECK_EXPIRATION option cannot be used when CHECK_POLICY is OFF.", 15122, 16, 1);
@@ -241,8 +245,8 @@ partial class SimulatedSqlException
         new($"Cannot drop the user '{user}'.", 15150, 16, 1);
 
     /// <summary>Msg 15150: <c>ALTER USER dbo WITH DEFAULT_SCHEMA</c>, whose default schema is always <c>dbo</c> (probed 2026-10-04 against SQL Server 2025).</summary>
-    internal static SimulatedSqlException CannotAlterDatabaseOwnerUser(string user) =>
-        new($"Cannot alter the user '{user}'.", 15150, 16, 1);
+    internal static SimulatedSqlException CannotAlterDatabaseOwnerUser(string user, byte state = 1) =>
+        new($"Cannot alter the user '{user}'.", 15150, 16, state);
 
     /// <summary>
     /// Msg 102 at severity 16, naming the option as written: <c>ALTER USER …
