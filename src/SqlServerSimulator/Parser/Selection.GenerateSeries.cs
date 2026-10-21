@@ -43,10 +43,17 @@ internal sealed partial class Selection
         SqlType[] schema = [outputType];
         string[] columnNames = ["value"];
 
+        // A numeric-named argument names the series numeric, as arithmetic's
+        // operands do (probed 2026-10-21 against SQL Server 2025).
         return new Selection(schema, columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
-            (batch, outerResolver) => EnumerateGenerateSeriesRows(startExpr, stopExpr, stepExpr, outputType, schema, batch, outerResolver));
+            (batch, outerResolver) => EnumerateGenerateSeriesRows(startExpr, stopExpr, stepExpr, outputType, schema, batch, outerResolver))
+        {
+            ColumnReportsNumeric = outputType is DecimalSqlType && (startExpr.ResultReportsNumeric || stopExpr.ResultReportsNumeric || stepExpr?.ResultReportsNumeric == true)
+                ? [true]
+                : null,
+        };
     }
 
     private static IEnumerable<byte[]> EnumerateGenerateSeriesRows(
@@ -206,8 +213,18 @@ internal sealed partial class Selection
         // numeric (both <see cref="SqlTypeCategory.Decimal"/>) collapse to one
         // family. Probe: <c>int + bigint</c> raises Msg 5373; <c>decimal(10,1)
         // + decimal(10,2)</c> is fine.
+        // Real's binder goes on to clash each argument with void, in order,
+        // naming a numeric-spelled one numeric (probed 2026-10-21 against SQL
+        // Server 2025).
         if (!SameFamily(startType, stopType) || (stepType is not null && !SameFamily(startType, stepType)))
-            throw SimulatedSqlException.GenerateSeriesArgsMustShareType();
+        {
+            List<SimulatedSqlException> errors = [SimulatedSqlException.GenerateSeriesArgsMustShareType(SameFamily(startType, stopType) ? (byte)2 : (byte)1)];
+            errors.Add(VoidClash(startExpr, startType));
+            errors.Add(VoidClash(stopExpr, stopType));
+            if (stepExpr is not null && stepType is not null)
+                errors.Add(VoidClash(stepExpr, stepType));
+            throw SimulatedSqlException.Aggregate(errors);
+        }
 
         // Output type: integer args preserve the exact subtype; decimal args
         // promote so the unified scale matches real SQL Server (DECIMAL(10,1) +
@@ -226,6 +243,9 @@ internal sealed partial class Selection
 
         return FromGenerateSeries(startExpr, stopExpr, stepExpr, outputType);
     }
+
+    private static SimulatedSqlException VoidClash(Expression argument, SqlType type) =>
+        SimulatedSqlException.OperandTypeClash(type is DecimalSqlType && argument.ResultReportsNumeric ? "numeric" : SimulatedSqlException.FamilyRootName(type), "void type");
 
     private static void ValidateArgType(SqlType type, int argumentIndex)
     {

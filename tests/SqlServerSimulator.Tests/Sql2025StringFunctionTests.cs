@@ -26,6 +26,7 @@ public sealed class Sql2025StringFunctionTests
     [TestMethod]
     [DataRow(@"unistr(N'a\\b')", @"a\b")]
     [DataRow(@"unistr(N'\0041\+01F600')", "A😀")]
+    [DataRow(@"convert(varchar(20), cast(unistr(N'\+110000\+FFFFFF') as varbinary(20)), 1)", "0x00DC00DCBF17FFDF")]
     [DataRow("unistr(N'x#0041', N'#')", "xA")]
     [DataRow("sql_variant_property(unistr(N'ab'), 'BaseType')", "nvarchar")]
     [DataRow(@"sql_variant_property(unistr(cast('\0041' as varchar(10)) collate Latin1_General_100_CI_AS_SC_UTF8), 'BaseType')", "varchar")]
@@ -34,6 +35,8 @@ public sealed class Sql2025StringFunctionTests
 
     [TestMethod]
     [DataRow(@"unistr(N'\zz')", 9841, 1)]
+    [DataRow(@"unistr(N'\00G1')", 9841, 2)]
+    [DataRow(@"unistr(N'\+00G000')", 9841, 2)]
     [DataRow(@"unistr(N'a\')", 9841, 3)]
     [DataRow("unistr(N'ab', N'a')", 9842, 0)]
     [DataRow("unistr(N'ab', N'##')", 9843, 4)]

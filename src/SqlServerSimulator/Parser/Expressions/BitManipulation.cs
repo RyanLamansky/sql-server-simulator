@@ -223,7 +223,7 @@ internal sealed class GetBit : Expression
             throw BitOperandHelpers.ArgInvalidForBitFunc("get_bit", SimulatedSqlException.FamilyRootName(v.Type), 1);
         var pos = BitOperandHelpers.IntegerArgument(this.positionArg.Run(runtime), "get_bit", 2, allowBit: false);
         if (pos < 0 || pos >= width)
-            throw SimulatedSqlException.BitFunctionPositionOutOfRange("get_bit", width - 1, state: 1);
+            throw SimulatedSqlException.BitFunctionPositionOutOfRange("get_bit", width - 1, state: 0);
         var bits = BitCount.ToUnsignedBits(v);
         return SqlValue.FromBoolean(((bits >> (int)pos) & 1UL) == 1UL);
     }

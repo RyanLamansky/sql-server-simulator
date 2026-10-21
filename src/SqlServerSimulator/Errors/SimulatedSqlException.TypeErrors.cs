@@ -635,8 +635,9 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 9841 from <c>UNISTR</c>: a malformed escape
-    /// sequence, state 3 when the escape character ends the input (probed
-    /// 2026-09-26 against SQL Server 2025).
+    /// sequence — state 1 for one too short, 2 for one holding a character
+    /// that isn't a hex digit, 3 when the escape character ends the input
+    /// (probed 2026-09-26 and 2026-10-21 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException UnistrEscapeSequenceInvalid(byte state) =>
         new("An invalid Unicode escape sequence was specified in the input. Unicode escape sequences should be specified as <UESCAPE character>XXXX or <UESCAPE character>+XXXXXX where X is a <hexit>.", 9841, 16, state);
@@ -1178,8 +1179,9 @@ partial class SimulatedSqlException
     /// width (<c>GET_BIT(int, 32)</c> exceeds int's 0-to-31 range). The check
     /// runs against the argument widened to <c>bigint</c>, so a position past
     /// <c>int</c> range lands here rather than in a conversion overflow.
-    /// State is function-keyed: 1 for <c>get_bit</c>, 2 for <c>set_bit</c>
-    /// (probe-confirmed 2026-07-31).
+    /// State is function-keyed: 0 for <c>get_bit</c> over an integer and 1 over
+    /// a binary value, 2 for <c>set_bit</c>
+    /// (probed 2026-10-21 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException BitFunctionPositionOutOfRange(string functionName, int maxPosition, byte state) =>
         new($"Parameter 2 in function '{functionName}' is out of range 0 to {maxPosition}.", 9838, 16, state);
@@ -1187,11 +1189,11 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server's Msg 9839 — <c>SET_BIT</c>'s third argument carries
     /// the bit to write and must be exactly 0 or 1; any other value, at any
-    /// magnitude, reports this rather than a range or conversion error
-    /// (probe-confirmed 2026-07-31).
+    /// magnitude, reports this rather than a range or conversion error, at
+    /// state 0 (probed 2026-10-21 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException BitFunctionValueNotZeroOrOne() =>
-        new("Parameter 3 in function 'set_bit' must be 0 or 1.", 9839, 16, 1);
+        new("Parameter 3 in function 'set_bit' must be 0 or 1.", 9839, 16, 0);
 
     /// <summary>
     /// Mimics SQL Server's Msg 9828 — <c>TRANSLATE(input, chars, translations)</c>

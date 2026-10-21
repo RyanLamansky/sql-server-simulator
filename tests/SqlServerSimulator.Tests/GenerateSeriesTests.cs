@@ -285,6 +285,25 @@ public sealed class GenerateSeriesTests
     }
 
     [TestMethod]
+    [DataRow("1, cast(5 as bigint)", 1, "int|bigint")]
+    [DataRow("1, 5, cast(1 as smallint)", 2, "int|int|smallint")]
+    [DataRow("1, 5.5, 1", 1, "int|numeric|int")]
+    public void AMismatch_ClashesEachArgumentWithVoid(string arguments, int state, string types)
+    {
+        var ex = new Simulation().AssertSqlError($"select value from generate_series({arguments})", 5373);
+        AreEqual((byte)state, ex.State);
+        AreEqual(types, string.Join('|', ex.Errors.Cast<SimulatedError>().Skip(1).Select(static error =>
+            error.Message["Operand type clash: ".Length..error.Message.IndexOf(" is incompatible", StringComparison.Ordinal)])));
+    }
+
+    [TestMethod]
+    [DataRow("1.5, 3.0, 0.5", "numeric")]
+    [DataRow("cast(1 as numeric(5, 1)), cast(3 as numeric(5, 1))", "numeric")]
+    [DataRow("cast(1 as decimal(5, 1)), cast(3 as decimal(5, 1))", "decimal")]
+    public void ANumericArgument_NamesTheSeriesNumeric(string arguments, string baseType)
+        => AreEqual(baseType, new Simulation().ExecuteScalar($"select top (1) sql_variant_property(value, 'BaseType') from generate_series({arguments})"));
+
+    [TestMethod]
     public void IntAndDecimalMismatch_Msg5373()
     {
         _ = new Simulation().AssertSqlError("select value from GENERATE_SERIES(cast(1.5 as decimal(10,1)), 5)", 5373);

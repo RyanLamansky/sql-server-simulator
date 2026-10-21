@@ -302,4 +302,11 @@ public sealed class BitManipulationTests
         AreEqual(message, ex.Errors[0].Message);
         AreEqual((byte)state, ex.State);
     }
+
+    [TestMethod]
+    [DataRow("get_bit(cast(8 as int), 32)", 9838, 0)]
+    [DataRow("get_bit(0x0102, 16)", 9838, 1)]
+    [DataRow("set_bit(5, 1, 2)", 9839, 0)]
+    public void BitFunctionRefusals_CarryRealsState(string expression, int number, int state)
+        => AreEqual((byte)state, new Simulation().AssertSqlError($"select {expression}", number).State);
 }

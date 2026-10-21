@@ -1584,11 +1584,11 @@ partial class SimulatedSqlException
     /// Mimics SQL Server's Msg 5373 — fired by <c>GENERATE_SERIES</c> when the
     /// three argument types don't all match. Wording probe-confirmed against
     /// SQL Server 2025: the suffix lists the supported types verbatim
-    /// (<c>tinyint, smallint, int, bigint, decimal and numeric</c>) and the
-    /// State / Class are 1 / 16.
+    /// (<c>tinyint, smallint, int, bigint, decimal and numeric</c>), at
+    /// state 1 where start and stop differ and 2 where only the step does.
     /// </summary>
-    internal static SimulatedSqlException GenerateSeriesArgsMustShareType() =>
-        new("All the input parameters should be of the same type. Supported types are tinyint, smallint, int, bigint, decimal and numeric.", 5373, 16, 1);
+    internal static SimulatedSqlException GenerateSeriesArgsMustShareType(byte state) =>
+        new("All the input parameters should be of the same type. Supported types are tinyint, smallint, int, bigint, decimal and numeric.", 5373, 16, state);
 
     /// <summary>
     /// Mimics SQL Server's Msg 4199 — fired by <c>GENERATE_SERIES</c> when the

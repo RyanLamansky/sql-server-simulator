@@ -439,9 +439,9 @@ The bit-manipulation family gates its own arguments under a separate rule — se
 
 - The argument must already be an integer type; decimal, float, money, string, binary and NULL all raise **Msg 8116** naming the type, argument index and function (`Argument data type decimal is invalid for argument 2 of get_bit function.`).
   `bit` is rejected everywhere except `SET_BIT`'s third argument, which alone admits it.
-- A position outside `[0, bit-width - 1]` raises **Msg 9838** — `Parameter 2 in function 'get_bit' is out of range 0 to 31.` — at state **1** for `get_bit` and state **2** for `set_bit`.
+- A position outside `[0, bit-width - 1]` raises **Msg 9838** — `Parameter 2 in function 'get_bit' is out of range 0 to 31.` — at state **0** for `get_bit` over an integer, **1** over a binary value and **2** for `set_bit` (probed 2026-10-21 against SQL Server 2025).
   The width follows the *first* operand's type (0 to 7 for `tinyint`, 0 to 63 for `bigint`).
-- `SET_BIT`'s third argument must be exactly 0 or 1; anything else, at any magnitude, raises **Msg 9839** (`Parameter 3 in function 'set_bit' must be 0 or 1.`).
+- `SET_BIT`'s third argument must be exactly 0 or 1; anything else, at any magnitude, raises **Msg 9839** at state 0 (`Parameter 3 in function 'set_bit' must be 0 or 1.`).
 - The shifts have **no range check**: a negative distance shifts the opposite way (`LEFT_SHIFT(255, -4)` = 15, `RIGHT_SHIFT(255, -4)` = 4080, and the `<<` / `>>` operators match), and any magnitude at or past the operand's bit width — including one beyond `int` range — zeroes the result whichever way it points.
 
 Divergence: real distinguishes the bare `NULL` keyword (Msg 8116) from a NULL-valued *typed* argument (result NULL).
@@ -509,7 +509,7 @@ This is the *argument* rule; the slots these types can't reach at all — sortin
 Probed 2026-09-26 against SQL Server 2025; none is gated on the compatibility level.
 - **`SUBSTRING(x, start)`** reads from `start` to the end, keeping the input's type and width as the three-argument form does without a constant length; a start at or below 1 reads the whole string.
 - **`UNISTR(x [, escape])`** replaces `\XXXX` (a UTF-16 code unit — a lone surrogate passes through), `\+XXXXXX` (a code point) and a doubled escape character, in the input's own family: a char-family input needs a UTF-8 collation (Msg 9844 otherwise) and stays `varchar`.
-  The escape character must be one printable ASCII character (Msg 9843) and not `+`, a quote, a space or a hexit (Msg 9842, which SqlClient reads at state 0); a malformed sequence is Msg 9841, at state 3 when the escape character ends the input.
+  The escape character must be one printable ASCII character (Msg 9843) and not `+`, a quote, a space or a hexit (Msg 9842, which SqlClient reads at state 0); a malformed sequence is Msg 9841 — state 1 for one too short, 2 for one holding a non-hex digit, 3 when the escape character ends the input — and a code point past U+10FFFF still becomes a pair by the surrogate arithmetic, its high half wrapping at sixteen bits (probed 2026-10-21 against SQL Server 2025).
 - **`BASE64_ENCODE(varbinary [, url_safe])`** gives the padded standard alphabet, or with a non-zero `url_safe` the `-` / `_` alphabet unpadded, as `varchar(8000)` (`varchar(max)` over a MAX input); **`BASE64_DECODE(varchar)`** reads either alphabet with or without padding as `varbinary(8000)` / `varbinary(max)`, skipping whitespace, and text that isn't Base64 is Msg 9803 with a state per fault (probed 2026-09-26 against SQL Server 2025).
   A NULL `url_safe` means the standard alphabet, and the flag takes an integer or a bit alone.
   Each refuses the other's operand family with Msg 8116.
@@ -932,8 +932,8 @@ Probe-confirmed against SQL Server 2025.
 - Allowed arg types: `tinyint`, `smallint`, `int`, `bigint`, `decimal` / `numeric`.
   Anything else (`float`, `real`, `money`, `varchar`, `date`, …) raises **Msg 8116** at parse, with verbatim wording `Argument data type <type> is invalid for argument <N> of generate_series function`.
 - All three args must share the same type.
-  Integer subtypes are distinct (`int` + `bigint` raises **Msg 5373**); `decimal` / `numeric` collapse to one family and tolerate differing precision / scale (unified via `SqlType.Promote`, so DECIMAL(10,1) + DECIMAL(10,2) projects DECIMAL with the wider scale).
-- Output column type tracks the input type — `tinyint` args project `tinyint`, decimal args project decimal with the unified precision / scale.
+  Integer subtypes are distinct (`int` + `bigint` raises **Msg 5373**, state 1 where start and stop differ and 2 where only the step does, followed by a Msg 206 clash of each argument with `void type`, all while the batch compiles — probed 2026-10-21 against SQL Server 2025); `decimal` / `numeric` collapse to one family and tolerate differing precision / scale (unified via `SqlType.Promote`, so DECIMAL(10,1) + DECIMAL(10,2) projects DECIMAL with the wider scale).
+- Output column type tracks the input type — `tinyint` args project `tinyint`, decimal args project decimal with the unified precision / scale, named `numeric` when any argument is (a decimal literal, a `numeric` cast).
 - Step omitted: defaults to `-1` when `start > stop`, else `1` — so `GENERATE_SERIES(5, 1)` yields the descending sequence `5, 4, 3, 2, 1` (probe-confirmed; matches Microsoft's docs).
 - Wrong-direction step (positive step with `start > stop`, or negative step with `start < stop`) → empty rowset, no error.
   Step `= 0` → **Msg 4199** (`Argument value 0 is invalid for argument 3 of generate_series function`).

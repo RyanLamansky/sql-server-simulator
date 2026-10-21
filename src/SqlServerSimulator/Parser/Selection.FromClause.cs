@@ -2314,7 +2314,7 @@ internal sealed partial class Selection
             var type = plan.Schema[ci];
             if (databaseCollated is not null && databaseCollated[ci] && type.Collation is not null)
                 type = type.WithCollation(databaseCollation, type.Coercibility);
-            columns[ci] = new HeapColumn(plan.ColumnNames[ci], type, maxLength: null, nullable: plan.ColumnNullability?[ci] ?? true);
+            columns[ci] = new HeapColumn(plan.ColumnNames[ci], type, maxLength: null, nullable: plan.ColumnNullability?[ci] ?? true, spelledNumeric: plan.ColumnReportsNumeric?[ci] ?? false);
         }
         var qualifier = ConsumeOptionalAliasAtCurrent(context);
         RejectRowsetColumnAliasList(context, writtenName, qualified);

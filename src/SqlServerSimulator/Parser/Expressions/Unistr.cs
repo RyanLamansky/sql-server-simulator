@@ -69,14 +69,16 @@ internal sealed class Unistr : Expression
             var wide = text[i + 1] == '+';
             var digits = wide ? 6 : 4;
             var from = wide ? i + 2 : i + 1;
-            if (from + digits > text.Length
-                || !int.TryParse(text.AsSpan(from, digits), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out var code)
-                || (wide && code > 0x10FFFF))
-            {
+            if (from + digits > text.Length)
                 throw SimulatedSqlException.UnistrEscapeSequenceInvalid(state: 1);
-            }
+            if (!int.TryParse(text.AsSpan(from, digits), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out var code))
+                throw SimulatedSqlException.UnistrEscapeSequenceInvalid(state: 2);
+            // Past U+FFFF the code point becomes a surrogate pair by the
+            // UTF-16 arithmetic alone, unchecked: beyond U+10FFFF the high
+            // half wraps at sixteen bits (probed 2026-10-21 against SQL
+            // Server 2025: \+110000 is DC00 DC00, \+FFFFFF 17BF DFFF).
             if (wide && code > 0xFFFF)
-                _ = result.Append(char.ConvertFromUtf32(code));
+                _ = result.Append((char)(0xD800 + ((code - 0x10000) >> 10))).Append((char)(0xDC00 + (code & 0x3FF)));
             else
                 _ = result.Append((char)code);
             i = from + digits - 1;
