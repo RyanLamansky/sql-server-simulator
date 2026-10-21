@@ -319,7 +319,7 @@ internal static partial class BuiltInResources
         // The key store's views (sys.symmetric_keys, sys.key_encryptions,
         // sys.openkeys; rows in BuiltInResources.EncryptionKeys.cs), then
         // views for features the simulator hasn't built (Always Encrypted
-        // column keys, database-scoped credentials, cryptographic providers),
+        // column keys, cryptographic providers),
         // each with the full shape probed against SQL Server
         // 2025 (2026-07-16) and no rows — DacFx's bacpac-export
         // reverse-engineering references them (e.g. sys.symmetric_keys LEFT
@@ -396,6 +396,7 @@ internal static partial class BuiltInResources
             new("encrypted_value", SqlType.Varbinary, 8000, true),
             new("encryption_algorithm_name", SqlType.SystemName, 128, true),
         ], static (_, _) => EmptyCatalogRows);
+        // The scoped credentials' two views, whose rows the key store holds.
         Sys("database_credentials",
         [
             new("name", SqlType.SystemName, 128, false),
@@ -406,7 +407,7 @@ internal static partial class BuiltInResources
             new("modify_date", SqlType.DateTime, null, false),
             new("target_type", nvarchar60Catalog, 60, true),
             new("target_id", SqlType.Int32, null, true),
-        ], static (_, _) => EmptyCatalogRows);
+        ], EnumerateScopedCredentials);
         Sys("database_scoped_credentials",
         [
             new("name", SqlType.SystemName, 128, false),
@@ -417,7 +418,7 @@ internal static partial class BuiltInResources
             new("modify_date", SqlType.DateTime, null, false),
             new("target_type", nvarchar60Catalog, 60, true),
             new("target_id", SqlType.Int32, null, true),
-        ], static (_, _) => EmptyCatalogRows);
+        ], EnumerateScopedCredentials);
         Sys("security_policies",
         [
             new("name", SqlType.SystemName, 128, false),
@@ -651,6 +652,7 @@ internal static partial class BuiltInResources
                 24 => "SYMMETRIC_KEYS",
                 25 => "CERTIFICATE",
                 26 => "ASYMMETRIC_KEY",
+                32 => "DATABASE_SCOPED_CREDENTIAL",
                 _ => "DATABASE",
             };
             yield return [
@@ -798,6 +800,27 @@ internal static partial class BuiltInResources
             yield return [
                 SqlValue.FromInt32(credential.Id), SqlValue.FromSystemName(credential.Name), SqlValue.FromNVarchar(credential.Identity),
                 SqlValue.FromDateTime(credential.CreateDate), SqlValue.FromDateTime(credential.ModifyDate),
+                SqlValue.Null(SqlType.NVarchar), SqlValue.Null(SqlType.Int32),
+            ];
+        }
+    }
+
+    /// <summary>
+    /// Projects <c>sys.database_scoped_credentials</c> and its older name
+    /// <c>sys.database_credentials</c> from the database's key store in
+    /// <c>credential_id</c> order, each row to a session holding a permission
+    /// on it or owning it — <c>VIEW DEFINITION</c> or <c>CONTROL</c> of the
+    /// database among them (probed 2026-10-21 against SQL Server 2025).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateScopedCredentials(Parser.BatchContext batch, Database database)
+    {
+        foreach (var (_, credential) in database.EncryptionKeys.ScopedCredentials.ToArray().OrderBy(static entry => entry.Value.Id))
+        {
+            if (!PermissionEnforcement.SeesKey(batch, database, PermissionChecker.ClassScopedCredential, credential.Id, credential.PrincipalId))
+                continue;
+            yield return [
+                SqlValue.FromSystemName(credential.Name), SqlValue.FromInt32(credential.PrincipalId), SqlValue.FromInt32(credential.Id),
+                SqlValue.FromNVarchar(credential.Identity), SqlValue.FromDateTime(credential.CreateDate), SqlValue.FromDateTime(credential.ModifyDate),
                 SqlValue.Null(SqlType.NVarchar), SqlValue.Null(SqlType.Int32),
             ];
         }

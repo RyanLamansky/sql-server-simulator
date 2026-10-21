@@ -566,7 +566,12 @@ Every statement needs `ALTER ANY CREDENTIAL`, and `sys.credentials` shows its ro
 A login's `CREDENTIAL = name` / `NO CREDENTIAL` sets the `credential_id` `sys.server_principals` and `sys.sql_logins` show, and a credential a login is mapped to can't be dropped.
 The error factories (`SimulatedSqlException.CredentialErrors.cs`) carry the refusals; the grammar's own are syntax errors raised while the batch compiles, an empty identity among them.
 
-**Not modeled yet**: `FOR CRYPTOGRAPHIC PROVIDER` (no provider exists, so it is always real's Msg 15151), `ALTER LOGIN … ADD | DROP CREDENTIAL`, database-scoped credentials, the `CREATE_CREDENTIAL` / `ALTER_CREDENTIAL` / `DROP_CREDENTIAL` server DDL trigger events, and the `DONE` token kinds a credential statement sends over TDS.
+**Database scoped credentials** (`CREATE` / `ALTER` / `DROP DATABASE SCOPED CREDENTIAL`, same file) live in the database's key store (`EncryptionKeyStore.ScopedCredentials`), so they roll back, back up and restore with its keys, and both `sys.database_scoped_credentials` and its older name `sys.database_credentials` project them (probed 2026-10-21 against SQL Server 2025).
+Their ids count from 65536 in each database, never reused, and a refused duplicate or a secret the master key can't protect spends one where a refused permission doesn't.
+Only a `SECRET` needs the master key — Msg 15581 state 6 without one, 7 where the session can't open it — and every statement needs `CONTROL` of the database or, past `CREATE`, the credential's own `ALTER` / `CONTROL`, which a principal holds as the credential's owner too.
+Each is a class 32 securable (`DATABASE_SCOPED_CREDENTIAL`) for `GRANT` and `ALTER AUTHORIZATION`, whose rows go with a drop or a change of owner; the DDL runs inside a user transaction and fires no DDL trigger event, and a provider clause is Msg 33157.
+
+**Not modeled yet**: `FOR CRYPTOGRAPHIC PROVIDER` (no provider exists, so it is always real's Msg 15151), `ALTER LOGIN … ADD | DROP CREDENTIAL`, the `CREATE_CREDENTIAL` / `ALTER_CREDENTIAL` / `DROP_CREDENTIAL` server DDL trigger events, and the `DONE` token kinds a credential statement sends over TDS.
 
 ### Server roles + server-scope permissions (`Simulation/Simulation.ServerRoles.cs`)
 

@@ -14,6 +14,8 @@ partial class DatabaseImage
     public readonly List<Certificate> Certificates = [];
     public readonly List<AsymmetricKey> AsymmetricKeys = [];
     public readonly List<SymmetricKey> SymmetricKeys = [];
+    public readonly List<DatabaseScopedCredential> ScopedCredentials = [];
+    public int LastScopedCredentialId;
 
     private void CaptureKeys(Database database)
     {
@@ -24,6 +26,8 @@ partial class DatabaseImage
             this.Certificates.AddRange(store.Certificates.ToArray().Select(static entry => entry.Value).OrderBy(static certificate => certificate.Id));
             this.AsymmetricKeys.AddRange(store.AsymmetricKeys.ToArray().Select(static entry => entry.Value).OrderBy(static key => key.Id));
             this.SymmetricKeys.AddRange(store.SymmetricKeys.ToArray().Select(static entry => entry.Value).OrderBy(static key => key.Id));
+            this.ScopedCredentials.AddRange(store.ScopedCredentials.ToArray().Select(static entry => entry.Value).OrderBy(static credential => credential.Id));
+            this.LastScopedCredentialId = store.LastScopedCredentialId;
         }
     }
 
@@ -43,6 +47,10 @@ partial class DatabaseImage
             store.SymmetricKeys.Clear();
             foreach (var key in this.SymmetricKeys)
                 store.SymmetricKeys[key.Name] = key;
+            store.ScopedCredentials.Clear();
+            foreach (var credential in this.ScopedCredentials)
+                store.ScopedCredentials[credential.Name] = credential;
+            store.LastScopedCredentialId = this.LastScopedCredentialId;
         }
     }
 
@@ -82,6 +90,17 @@ partial class DatabaseImage
             w.Write(key.ModifyDate.Ticks);
             WriteEncryptions(w, key.Encryptions);
         }
+        w.Write(this.ScopedCredentials.Count);
+        foreach (var credential in this.ScopedCredentials)
+        {
+            w.Write(credential.Id);
+            w.Write(credential.Name);
+            w.Write(credential.PrincipalId);
+            w.Write(credential.Identity);
+            w.Write(credential.CreateDate.Ticks);
+            w.Write(credential.ModifyDate.Ticks);
+        }
+        w.Write(this.LastScopedCredentialId);
     }
 
     private static void ReadKeys(BinaryReader r, DatabaseImage image)
@@ -116,6 +135,9 @@ partial class DatabaseImage
             var modifyDate = ReadDate(r);
             image.SymmetricKeys.Add(new SymmetricKey(id, name, principalId, keyLength, keyGuid, material, createDate, modifyDate, ReadEncryptions(r, image)));
         }
+        for (var i = r.ReadInt32(); i > 0; i--)
+            image.ScopedCredentials.Add(new DatabaseScopedCredential(r.ReadInt32(), r.ReadString(), r.ReadInt32(), r.ReadString(), ReadDate(r), ReadDate(r)));
+        image.LastScopedCredentialId = r.ReadInt32();
     }
 
     private static void WriteKeyPair(BinaryWriter w, KeyPair keyPair)

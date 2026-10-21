@@ -251,6 +251,10 @@ partial class Selection
                 return name is not null && database.EncryptionKeys.Certificates.TryGetValue(name, out var certificate)
                     ? (name, className, Granted(PermissionChecker.ClassCertificate, certificate.Id, 0), null)
                     : null;
+            case "DATABASE SCOPED CREDENTIAL":
+                return name is not null && database.EncryptionKeys.ScopedCredentials.TryGetValue(name, out var credential)
+                    ? (name, className, Granted(PermissionChecker.ClassScopedCredential, credential.Id, 0), null)
+                    : null;
             case "SYMMETRIC KEY":
                 return name is not null && database.EncryptionKeys.SymmetricKeys.TryGetValue(name, out var key)
                     ? (name, className, Granted(PermissionChecker.ClassSymmetricKey, key.Id, 0), null)

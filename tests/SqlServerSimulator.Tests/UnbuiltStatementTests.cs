@@ -15,7 +15,7 @@ public sealed class UnbuiltStatementTests
     [DataRow("backup certificate c to file = 'c.cer'", "BACKUP CERTIFICATE")]
     [DataRow("create column master key cmk with (key_store_provider_name = 'MSSQL_CERTIFICATE_STORE', key_path = 'x')", "CREATE COLUMN MASTER KEY")]
     [DataRow("create database encryption key with algorithm = aes_256 encryption by server certificate c", "CREATE DATABASE ENCRYPTION KEY")]
-    [DataRow("alter database scoped credential dc with identity = 'y'", "ALTER DATABASE SCOPED CREDENTIAL")]
+    [DataRow("create workload group w", "CREATE WORKLOAD GROUP")]
     [DataRow("alter service master key regenerate", "ALTER SERVICE MASTER KEY")]
     [DataRow("create external data source e with (location = 'sqlserver://x')", "CREATE EXTERNAL DATA SOURCE")]
     [DataRow("alter resource governor reconfigure", "ALTER RESOURCE GOVERNOR")]
@@ -33,7 +33,7 @@ public sealed class UnbuiltStatementTests
     public void CreateDatabaseNeighbours_CreateNoDatabase()
     {
         var simulation = new Simulation();
-        _ = Throws<NotSupportedException>(() => simulation.ExecuteNonQuery("create database scoped credential dc with identity = 'x'"));
+        _ = simulation.ExecuteNonQuery("create database scoped credential dc with identity = 'x'");
         _ = simulation.AssertSqlError("create database audit specification s for server audit a", 33073);
         AreEqual(0, simulation.ExecuteScalar("select count(*) from sys.databases where name in ('SCOPED', 'AUDIT')"));
     }

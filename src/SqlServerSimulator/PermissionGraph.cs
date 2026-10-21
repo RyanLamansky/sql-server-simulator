@@ -79,7 +79,7 @@ internal static class PermissionGraph
         "CERTIFICATE" => 25,
         "CONTRACT" => 16,
         "DATABASE" => PermissionChecker.ClassDatabase,
-        "DATABASE SCOPED CREDENTIAL" => 28,
+        "DATABASE SCOPED CREDENTIAL" => PermissionChecker.ClassScopedCredential,
         "EXTERNAL LANGUAGE" => 34,
         "EXTERNAL MODEL" => 35,
         "FULLTEXT CATALOG" => PermissionChecker.ClassFulltextCatalog,

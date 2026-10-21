@@ -299,6 +299,13 @@ internal sealed class EncryptionKeyStore(Collation collation)
 
     public readonly ConcurrentDictionary<string, AsymmetricKey> AsymmetricKeys = new(collation.NameKeys);
 
+    /// <summary>
+    /// The database's scoped credentials, kept with its keys because a
+    /// secret is the master key's to protect, and riding the store's undo and
+    /// backup with them.
+    /// </summary>
+    public readonly ConcurrentDictionary<string, DatabaseScopedCredential> ScopedCredentials = new(collation.NameKeys);
+
     /// <summary>Serializes the key DDL, whose checks span the whole store.</summary>
     public readonly Lock Gate = new();
 
@@ -310,7 +317,23 @@ internal sealed class EncryptionKeyStore(Collation collation)
 
     internal int LastAsymmetricKeyId = 255;
 
-    public bool IsEmpty => this.MasterKey is null && this.Certificates.IsEmptyLockFree() && this.SymmetricKeys.IsEmptyLockFree() && this.AsymmetricKeys.IsEmptyLockFree();
+    // Scoped credentials count from 65536 in each database, never reuse an
+    // id, and spend one on a refused duplicate or an unavailable master key
+    // (probed 2026-10-21 against SQL Server 2025).
+    internal int LastScopedCredentialId = 65535;
+
+    public bool IsEmpty => this.MasterKey is null && this.Certificates.IsEmptyLockFree() && this.SymmetricKeys.IsEmptyLockFree() && this.AsymmetricKeys.IsEmptyLockFree()
+        && this.ScopedCredentials.IsEmptyLockFree();
+
+    public DatabaseScopedCredential? ScopedCredentialById(int id)
+    {
+        foreach (var (_, credential) in this.ScopedCredentials)
+        {
+            if (credential.Id == id)
+                return credential;
+        }
+        return null;
+    }
 
     public SymmetricKey? SymmetricKeyById(int id)
     {
@@ -362,6 +385,7 @@ internal sealed class EncryptionKeyStore(Collation collation)
         var certificates = this.Certificates.ToArray();
         var symmetricKeys = this.SymmetricKeys.ToArray();
         var asymmetricKeys = this.AsymmetricKeys.ToArray();
+        var scopedCredentials = this.ScopedCredentials.ToArray();
         return () =>
         {
             this.MasterKey = masterKey;
@@ -374,8 +398,33 @@ internal sealed class EncryptionKeyStore(Collation collation)
             this.AsymmetricKeys.Clear();
             foreach (var (name, key) in asymmetricKeys)
                 this.AsymmetricKeys[name] = key;
+            this.ScopedCredentials.Clear();
+            foreach (var (name, credential) in scopedCredentials)
+                this.ScopedCredentials[name] = credential;
         };
     }
+}
+
+/// <summary>
+/// One database scoped credential: its <c>sys.database_scoped_credentials</c>
+/// row. Immutable — <c>ALTER</c> and a change of owner replace the entry,
+/// keeping the id and creation date. The secret is checked and discarded,
+/// since nothing reads it back.
+/// </summary>
+internal sealed class DatabaseScopedCredential(int id, string name, int principalId, string identity, DateTime createDate, DateTime modifyDate)
+{
+    public readonly int Id = id;
+    public readonly string Name = name;
+    public readonly int PrincipalId = principalId;
+    public readonly string Identity = identity;
+    public readonly DateTime CreateDate = createDate;
+    public readonly DateTime ModifyDate = modifyDate;
+
+    public DatabaseScopedCredential WithIdentity(string identity, DateTime modifyDate) =>
+        new(this.Id, this.Name, this.PrincipalId, identity, this.CreateDate, modifyDate);
+
+    public DatabaseScopedCredential WithOwner(int principalId) =>
+        new(this.Id, this.Name, principalId, this.Identity, this.CreateDate, this.ModifyDate);
 }
 
 /// <summary>A symmetric key a session has open: <c>sys.openkeys</c>' row.</summary>

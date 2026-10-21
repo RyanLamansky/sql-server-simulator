@@ -23,6 +23,10 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException CannotCreateCredentialForProvider(string provider) =>
         new($"Cannot create credential for the cryptographic provider '{provider}', because it does not exist or you do not have permission.", 15151, 16, 1);
 
+    /// <summary>Msg 33157: <c>CREATE DATABASE SCOPED CREDENTIAL … FOR CRYPTOGRAPHIC PROVIDER</c>.</summary>
+    internal static SimulatedSqlException ScopedCredentialProviderNotSupported() =>
+        new("Cryptographic providers are not supported on database credentials.", 33157, 16, 1);
+
     /// <summary>Msg 15541: <c>DROP CREDENTIAL</c> of a credential a login is mapped to.</summary>
     internal static SimulatedSqlException CredentialUsedByServerPrincipal(string name) =>
         new($"Cannot drop the credential '{name}' because it is used by a server principal.", 15541, 16, 1);

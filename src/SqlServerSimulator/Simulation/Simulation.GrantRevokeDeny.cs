@@ -145,6 +145,10 @@ partial class Simulation
                             : SimulatedSqlException.CannotFindSecurable("database", securableName.Leaf);
                     }
                     break;
+                case "DATABASE SCOPED CREDENTIAL":
+                    permClass = PermissionChecker.ClassScopedCredential;
+                    objectSecurableName = securableName;
+                    break;
                 case "FULLTEXT CATALOG":
                     permClass = PermissionChecker.ClassFulltextCatalog;
                     objectSecurableName = securableName;
@@ -701,6 +705,7 @@ partial class Simulation
                 PermissionChecker.ClassSymmetricKey => "SYMMETRIC KEY",
                 PermissionChecker.ClassCertificate => "CERTIFICATE",
                 PermissionChecker.ClassAsymmetricKey => "ASYMMETRIC KEY",
+                PermissionChecker.ClassScopedCredential => "DATABASE SCOPED CREDENTIAL",
                 >= PermissionChecker.ClassMessageType and <= PermissionChecker.ClassRoute => BrokerClassWord(permClass),
                 _ => "FULLTEXT CATALOG",
             };
@@ -831,6 +836,7 @@ partial class Simulation
         PermissionChecker.ClassSymmetricKey => database.EncryptionKeys.SymmetricKeyById(permMajorId)?.PrincipalId ?? Database.DboPrincipalId,
         PermissionChecker.ClassCertificate => database.EncryptionKeys.CertificateById(permMajorId)?.PrincipalId ?? Database.DboPrincipalId,
         PermissionChecker.ClassAsymmetricKey => database.EncryptionKeys.AsymmetricKeyById(permMajorId)?.PrincipalId ?? Database.DboPrincipalId,
+        PermissionChecker.ClassScopedCredential => database.EncryptionKeys.ScopedCredentialById(permMajorId)?.PrincipalId ?? Database.DboPrincipalId,
         _ => Database.DboPrincipalId,
     };
 
@@ -1189,7 +1195,8 @@ partial class Simulation
     private static bool IsDerivedSecurableClass(byte permClass) =>
         permClass is PermissionChecker.ClassType or PermissionChecker.ClassXmlSchemaCollection or PermissionChecker.ClassFulltextCatalog
             or PermissionChecker.ClassAssembly or (>= PermissionChecker.ClassMessageType and <= PermissionChecker.ClassRoute)
-            or PermissionChecker.ClassSymmetricKey or PermissionChecker.ClassCertificate or PermissionChecker.ClassAsymmetricKey;
+            or PermissionChecker.ClassSymmetricKey or PermissionChecker.ClassCertificate or PermissionChecker.ClassAsymmetricKey
+            or PermissionChecker.ClassScopedCredential;
 
     /// <summary>
     /// Resolves a <c>TYPE::</c>, <c>XML SCHEMA COLLECTION::</c> or
@@ -1263,6 +1270,12 @@ partial class Simulation
                     && PermissionEnforcement.SeesKey(batch, database, PermissionChecker.ClassAsymmetricKey, asymmetricKey.Id, asymmetricKey.PrincipalId)
                     ? asymmetricKey.Id
                     : throw SimulatedSqlException.CannotFindKey("find", "asymmetric key", name.Leaf);
+            case PermissionChecker.ClassScopedCredential:
+                // Probed 2026-10-21 against SQL Server 2025.
+                return database.EncryptionKeys.ScopedCredentials.TryGetValue(name.Leaf, out var credential)
+                    && PermissionEnforcement.SeesKey(batch, database, PermissionChecker.ClassScopedCredential, credential.Id, credential.PrincipalId)
+                    ? credential.Id
+                    : throw SimulatedSqlException.CannotFindSecurable("database scoped credential", name.Leaf);
             default:
                 return name.Count == 1 && database.FullTextCatalogs.TryGetValue(name.Leaf, out var catalog)
                     ? catalog.Id

@@ -1396,6 +1396,7 @@ internal static class PermissionChecker
     internal const byte ClassSymmetricKey = 24;
     internal const byte ClassCertificate = 25;
     internal const byte ClassAsymmetricKey = 26;
+    internal const byte ClassScopedCredential = 32;
 
     // Server-scope permissions (sys.server_permissions.class = 100) live on
     // Simulation.ServerPermissions, not a Database; Simulation.HoldsServerPermission
@@ -1592,6 +1593,8 @@ internal static class PermissionChecker
                 return database.EncryptionKeys.CertificateById(majorId) is { } certificate && closure.Contains(certificate.PrincipalId);
             case ClassAsymmetricKey:
                 return database.EncryptionKeys.AsymmetricKeyById(majorId) is { } asymmetricKey && closure.Contains(asymmetricKey.PrincipalId);
+            case ClassScopedCredential:
+                return database.EncryptionKeys.ScopedCredentialById(majorId) is { } credential && closure.Contains(credential.PrincipalId);
             default:
                 return false;
         }
@@ -2425,6 +2428,8 @@ internal static class PermissionChecker
                 return "CERTIFICATE";
             case ClassAsymmetricKey:
                 return "ASYMMETRIC KEY";
+            case ClassScopedCredential:
+                return "DATABASE SCOPED CREDENTIAL";
             default:
                 return "DATABASE";
         }

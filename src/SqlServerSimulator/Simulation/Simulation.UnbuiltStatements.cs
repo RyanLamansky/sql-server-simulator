@@ -35,7 +35,6 @@ partial class Simulation
         new(null, "COLUMN MASTER KEY", "Always Encrypted (column master keys)"),
         new(null, "COLUMN ENCRYPTION KEY", "Always Encrypted (column encryption keys)"),
         new(null, "DATABASE ENCRYPTION KEY", "Transparent data encryption (database encryption keys)"),
-        new(null, "DATABASE SCOPED CREDENTIAL", "Database scoped credentials"),
         new("ALTER", "SERVICE MASTER KEY", "the service master key"),
         new(null, "ENDPOINT", "Endpoints"),
         new(null, "RESOURCE POOL", "Resource Governor (resource pools)"),

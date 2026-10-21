@@ -39,7 +39,7 @@ partial class Simulation
     /// </summary>
     internal static bool TryParseCreateCredential(ParserContext context)
     {
-        var (name, identity) = ParseCredentialClauses(context, allowProvider: true, out var provider);
+        var (name, identity) = ParseCredentialClauses(context, allowProvider: true, out var provider, out _);
         if (context.Batch.IsSkipping)
             return true;
         var simulation = context.Batch.Connection.Simulation;
@@ -63,7 +63,7 @@ partial class Simulation
     /// </summary>
     internal static bool TryParseAlterCredential(ParserContext context)
     {
-        var (name, identity) = ParseCredentialClauses(context, allowProvider: false, out _);
+        var (name, identity) = ParseCredentialClauses(context, allowProvider: false, out _, out _);
         if (context.Batch.IsSkipping)
             return true;
         var simulation = context.Batch.Connection.Simulation;
@@ -104,6 +104,128 @@ partial class Simulation
         RecordServerSecurityUndo(context.Batch);
         _ = simulation.Credentials.TryRemove(name, out _);
         return true;
+    }
+
+    /// <summary>
+    /// Parses <c>CREATE DATABASE SCOPED CREDENTIAL name WITH IDENTITY = '…'
+    /// [, SECRET = '…']</c>, cursor on the <c>CREDENTIAL</c> word, owned by
+    /// the creating principal (probed 2026-10-21 against SQL Server 2025): a
+    /// session without <c>CONTROL</c> of the database is Msg 15247, a
+    /// provider Msg 33157, a secret where the database has no master key Msg
+    /// 15581 state 6 (state 7 where the session can't open it) and a name in
+    /// use Msg 15530 — those last two spending an id.
+    /// </summary>
+    internal static bool TryParseCreateDatabaseScopedCredential(ParserContext context)
+    {
+        var (name, identity) = ParseCredentialClauses(context, allowProvider: true, out var provider, out var hasSecret);
+        var batch = context.Batch;
+        if (batch.IsSkipping)
+            return true;
+        var database = context.CurrentDatabase;
+        if (!PermissionEnforcement.HasDatabasePermission(batch, database, Permission.Control))
+            throw SimulatedSqlException.UserDoesNotHavePermission();
+        if (provider is not null)
+            throw SimulatedSqlException.ScopedCredentialProviderNotSupported();
+        database.RejectWriteWhenReadOnly();
+        var store = database.EncryptionKeys;
+        lock (store.Gate)
+        {
+            var id = ++store.LastScopedCredentialId;
+            if (hasSecret)
+                RequireScopedCredentialMasterKey(context.Connection, database);
+            if (store.ScopedCredentials.ContainsKey(name))
+                throw SimulatedSqlException.CredentialAlreadyExists(name);
+            RecordKeyStoreUndo(context, store);
+            var now = batch.CurrentStatement.UtcNow;
+            store.ScopedCredentials[name] = new Schemas.DatabaseScopedCredential(id, name, KeyCreatorId(batch), identity, now, now);
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Parses <c>ALTER DATABASE SCOPED CREDENTIAL name WITH IDENTITY = '…'
+    /// [, SECRET = '…']</c>, cursor on the <c>CREDENTIAL</c> word: a missing
+    /// credential and one the session may not alter are the same Msg 15151,
+    /// and a secret needs the master key as <c>CREATE</c>'s does.
+    /// </summary>
+    internal static bool TryParseAlterDatabaseScopedCredential(ParserContext context)
+    {
+        var (name, identity) = ParseCredentialClauses(context, allowProvider: false, out _, out var hasSecret);
+        var batch = context.Batch;
+        if (batch.IsSkipping)
+            return true;
+        var database = context.CurrentDatabase;
+        var store = database.EncryptionKeys;
+        lock (store.Gate)
+        {
+            if (!store.ScopedCredentials.TryGetValue(name, out var existing)
+                || !PermissionEnforcement.HoldsPermission(batch, database, Permission.Alter, PermissionChecker.ClassScopedCredential, existing.Id, 0))
+            {
+                throw SimulatedSqlException.CannotAlterOrDropCredential("alter", name);
+            }
+            database.RejectWriteWhenReadOnly();
+            if (hasSecret)
+                RequireScopedCredentialMasterKey(context.Connection, database);
+            RecordKeyStoreUndo(context, store);
+            store.ScopedCredentials[name] = existing.WithIdentity(identity, batch.CurrentStatement.UtcNow);
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Parses <c>DROP DATABASE SCOPED CREDENTIAL name</c>, which has no
+    /// <c>IF EXISTS</c>, cursor on the <c>CREDENTIAL</c> word: a missing
+    /// credential and one the session doesn't control are the same Msg
+    /// 15151, and the permissions granted on it go with it.
+    /// </summary>
+    internal static bool TryParseDropDatabaseScopedCredential(ParserContext context)
+    {
+        context.MoveNextRequired();
+        var name = ParseCredentialName(context);
+        context.MoveNextOptional();
+        if (!IsStatementBoundary(context.Token))
+        {
+            throw context.Token is ReservedKeyword keyword
+                ? SimulatedSqlException.SyntaxErrorNearKeyword(keyword)
+                : SimulatedSqlException.SyntaxErrorNear(context);
+        }
+        var batch = context.Batch;
+        if (batch.IsSkipping)
+            return true;
+        var database = context.CurrentDatabase;
+        var store = database.EncryptionKeys;
+        lock (store.Gate)
+        {
+            if (!store.ScopedCredentials.TryGetValue(name, out var existing)
+                || !PermissionEnforcement.HoldsPermission(batch, database, Permission.Control, PermissionChecker.ClassScopedCredential, existing.Id, 0))
+            {
+                throw SimulatedSqlException.CannotAlterOrDropCredential("drop", name);
+            }
+            database.RejectWriteWhenReadOnly();
+            RecordKeyStoreUndo(context, store);
+            _ = store.ScopedCredentials.TryRemove(name, out _);
+            DropSecurablePermissions(context, database, PermissionChecker.ClassScopedCredential, existing.Id);
+        }
+        return true;
+    }
+
+    /// <summary>A credential's secret needs the database's master key: Msg 15581 state 6 where there is none, 7 where the session can't open it.</summary>
+    private static void RequireScopedCredentialMasterKey(SimulatedDbConnection connection, Database database)
+    {
+        if (database.EncryptionKeys.MasterKey is null)
+            throw SimulatedSqlException.MasterKeyUnavailable(6);
+        if (!MasterKeyAvailable(connection, database))
+            throw SimulatedSqlException.MasterKeyUnavailable(7);
+    }
+
+    /// <summary>Whether the cursor, on <c>DATABASE</c>, starts <c>DATABASE SCOPED CREDENTIAL</c>; the cursor is left on <c>CREDENTIAL</c> when it does.</summary>
+    private static bool AtDatabaseScopedCredential(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        if (IsKeyWord(context.GetNextOptional(), "SCOPED") && IsKeyWord(context.GetNextOptional(), "CREDENTIAL"))
+            return true;
+        context.RestoreCheckpoint(checkpoint);
+        return false;
     }
 
     /// <summary>
@@ -152,9 +274,10 @@ partial class Simulation
     /// near the token that took its place, and <c>ALTER</c>'s provider clause
     /// is Msg 156 near <c>FOR</c> (probed 2026-10-06 against SQL Server 2025).
     /// </summary>
-    private static (string Name, string Identity) ParseCredentialClauses(ParserContext context, bool allowProvider, out string? provider)
+    private static (string Name, string Identity) ParseCredentialClauses(ParserContext context, bool allowProvider, out string? provider, out bool hasSecret)
     {
         provider = null;
+        hasSecret = false;
         context.MoveNextRequired();
         var name = ParseCredentialName(context);
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.With })
@@ -169,6 +292,7 @@ partial class Simulation
             if (context.GetNextRequired() is not UnquotedString { Span: var secretWord } || !secretWord.Equals("SECRET", StringComparison.OrdinalIgnoreCase))
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             _ = ParseCredentialString(context);
+            hasSecret = true;
             context.MoveNextOptional();
         }
         if (allowProvider && context.Token is ReservedKeyword { Keyword: Keyword.For })

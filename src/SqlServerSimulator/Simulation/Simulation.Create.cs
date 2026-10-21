@@ -39,6 +39,8 @@ partial class Simulation
         {
             case UnquotedString when TryParseBrokerDdl(context, "CREATE"):
                 return true;
+            case ReservedKeyword { Keyword: Keyword.Database } when AtDatabaseScopedCredential(context):
+                return TryParseCreateDatabaseScopedCredential(context);
             case ReservedKeyword { Keyword: Keyword.Database }:
                 return TryParseCreateDatabase(context);
             case ReservedKeyword { Keyword: Keyword.Schema }:

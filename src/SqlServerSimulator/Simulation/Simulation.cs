@@ -3393,6 +3393,10 @@ public sealed partial class Simulation
             if (!context.MoveNext() || context.Token is not ReservedKeyword { Keyword: Keyword.Database })
                 return null;
             var scoped = context.MoveNext() && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Scoped };
+            // A database scoped credential's DDL runs inside one (probed
+            // 2026-10-21 against SQL Server 2025).
+            if (scoped && context.MoveNext() && IsKeyWord(context.Token, "CREDENTIAL"))
+                return null;
             return verb switch
             {
                 Keyword.Alter when scoped => SimulatedSqlException.ScopedConfigurationInTransaction(),

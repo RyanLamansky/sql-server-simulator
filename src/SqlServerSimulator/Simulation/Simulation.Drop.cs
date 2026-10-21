@@ -49,6 +49,8 @@ partial class Simulation
         {
             case UnquotedString when TryParseBrokerDdl(context, "DROP"):
                 return true;
+            case ReservedKeyword { Keyword: Keyword.Database } when AtDatabaseScopedCredential(context):
+                return TryParseDropDatabaseScopedCredential(context);
             case ReservedKeyword { Keyword: Keyword.Database }:
                 return TryParseDropDatabase(context);
             case ReservedKeyword { Keyword: Keyword.User }:

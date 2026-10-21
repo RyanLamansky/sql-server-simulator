@@ -75,12 +75,14 @@ partial class Simulation
             case "ASYMMETRIC KEY":
                 ChangeKeyOwner(context, entityName.Leaf, ownerName, PermissionChecker.ClassAsymmetricKey);
                 break;
-            case "AVAILABILITY GROUP" or "DATABASE SCOPED CREDENTIAL" or "FULLTEXT STOPLIST" or "SEARCH PROPERTY LIST":
+            case "DATABASE SCOPED CREDENTIAL":
+                ChangeScopedCredentialOwner(context, entityName.Leaf, ownerName);
+                break;
+            case "AVAILABILITY GROUP" or "FULLTEXT STOPLIST" or "SEARCH PROPERTY LIST":
                 // None of these exists here — the full-text stoplists and
-                // property lists, availability groups and scoped credentials
-                // aren't built — so every name is missing, the system stoplist
-                // included, as real's is (probed 2026-10-16 against SQL Server
-                // 2025).
+                // property lists and availability groups aren't built — so
+                // every name is missing, the system stoplist included, as
+                // real's is (probed 2026-10-16 against SQL Server 2025).
                 throw SimulatedSqlException.CannotFindSecurable(ClassKind(securableClass), entity);
             case "CERTIFICATE":
                 ChangeKeyOwner(context, entityName.Leaf, ownerName, PermissionChecker.ClassCertificate);
@@ -442,6 +444,34 @@ partial class Simulation
         if (previous != newOwner)
             DropSecurablePermissions(context, database, PermissionChecker.ClassFulltextCatalog, catalog.Id);
         RecordDdlEvent(context, "ALTER_AUTHORIZATION_DATABASE", "", catalog.Name, "FULLTEXT CATALOG", ownerName: ownerName);
+    }
+
+    /// <summary>
+    /// <c>ALTER AUTHORIZATION ON DATABASE SCOPED CREDENTIAL::name</c>: a
+    /// missing credential and one the session may not take ownership of are
+    /// the same Msg 15151, a role may own one, and the permissions granted on
+    /// it go with a change of owner; the event names no object type (probed
+    /// 2026-10-21 against SQL Server 2025).
+    /// </summary>
+    private static void ChangeScopedCredentialOwner(ParserContext context, string name, string? ownerName)
+    {
+        var database = context.CurrentDatabase;
+        var store = database.EncryptionKeys;
+        lock (store.Gate)
+        {
+            if (!store.ScopedCredentials.TryGetValue(name, out var existing))
+                throw SimulatedSqlException.CannotFindSecurable("database scoped credential", name);
+            RejectUnknownNewOwner(database, ownerName);
+            if (!PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.TakeOwnership, PermissionChecker.ClassScopedCredential, existing.Id, 0))
+                throw SimulatedSqlException.CannotFindSecurable("database scoped credential", name);
+            database.RejectWriteWhenReadOnly();
+            var newOwner = ResolveNewOwner(context, database, ownerName, acceptsSchemaOwner: false)!.Value;
+            RecordKeyStoreUndo(context, store);
+            store.ScopedCredentials[name] = existing.WithOwner(newOwner);
+            if (existing.PrincipalId != newOwner)
+                DropSecurablePermissions(context, database, PermissionChecker.ClassScopedCredential, existing.Id);
+        }
+        RecordDdlEvent(context, "ALTER_AUTHORIZATION_DATABASE", null, name, string.Empty, ownerName: ownerName);
     }
 
     /// <summary>
