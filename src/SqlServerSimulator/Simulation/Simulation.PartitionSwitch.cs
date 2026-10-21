@@ -133,7 +133,6 @@ partial class Simulation
         VersionStore.SetAsideVersions(batch, target);
 
         // Move the rows.
-        var undoLog = context.Connection.CurrentTransaction?.UndoLog;
         var moving = new List<(int Page, int Slot, SqlValue[] Values)>();
         var storageOrdinal = source.Partitioning?.StorageOrdinal(source) ?? -1;
         foreach (var (page, slot, bytes) in source.Heap.EnumerateRowsWithAddress())
@@ -142,12 +141,42 @@ partial class Simulation
                 continue;
             moving.Add((page, slot, RowDecoder.DecodeRow(source.StoredColumns, bytes, source.Heap)));
         }
-        foreach (var (page, slot, values) in moving)
+        WriteAtomically(context.Connection, undoLog =>
         {
-            _ = target.Heap.Insert(RowEncoder.EncodeRow(target.StoredColumns, values, target.Heap), undoLog);
-            source.Heap.DeleteAt(page, slot, undoLog, ReclaimSuperseded(source, context));
-        }
+            foreach (var (page, slot, values) in moving)
+            {
+                _ = target.Heap.Insert(RowEncoder.EncodeRow(target.StoredColumns, values, target.Heap), undoLog);
+                source.Heap.DeleteAt(page, slot, undoLog, ReclaimSuperseded(source, context));
+            }
+        });
         return true;
+    }
+
+    /// <summary>
+    /// Runs the row writes of a statement that moves or removes rows outside
+    /// <see cref="RunMutation"/> on its transaction's undo log, or, in
+    /// autocommit, on one of its own committed as they end — which reclaims
+    /// the deleted rows' slots and off-row chains and logs the writes for a
+    /// log backup — and rolled back if they fail.
+    /// </summary>
+    private static void WriteAtomically(SimulatedDbConnection connection, Action<UndoLog> write)
+    {
+        if (connection.CurrentTransaction is { } transaction)
+        {
+            write(transaction.UndoLog);
+            return;
+        }
+        var statementLog = new UndoLog(connection.Simulation.LobReclamation);
+        try
+        {
+            write(statementLog);
+        }
+        catch
+        {
+            statementLog.Rollback();
+            throw;
+        }
+        statementLog.Commit();
     }
 
     /// <summary>A switched table as the SWITCH errors name it: database, schema and table.</summary>
@@ -587,10 +616,12 @@ partial class Simulation
             if (chosen[placement.PartitionOfRow(table, storageOrdinal, bytes) - 1])
                 doomed.Add((page, slot));
         }
-        var undoLog = batch.Connection.CurrentTransaction?.UndoLog;
         var reclaim = !VersionStore.WillCaptureVersions(batch.DatabaseFor(table), table);
-        foreach (var (page, slot) in doomed)
-            table.Heap.DeleteAt(page, slot, undoLog, reclaim);
+        WriteAtomically(batch.Connection, undoLog =>
+        {
+            foreach (var (page, slot) in doomed)
+                table.Heap.DeleteAt(page, slot, undoLog, reclaim);
+        });
     }
 }
 

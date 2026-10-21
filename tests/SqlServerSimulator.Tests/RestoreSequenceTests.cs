@@ -419,4 +419,34 @@ public sealed class RestoreSequenceTests
             """) as string;
         AreEqual("Database changes were restored|Log was restored. Database: d,|Restore is complete on databas|RESTORE DATABASE successfully ", lines);
     }
+
+    /// <summary>
+    /// An autocommit <c>ALTER TABLE … SWITCH</c> or <c>TRUNCATE … WITH
+    /// (PARTITIONS …)</c> reaches the log backup taken after it, so a restore
+    /// through the log replays it.
+    /// </summary>
+    [TestMethod]
+    [DataRow("alter table d.dbo.t switch partition 1 to d.dbo.t2 partition 1", "3,4|1,2")]
+    [DataRow("truncate table d.dbo.t with (partitions (1))", "3,4|")]
+    public void AutocommitPartitionRowMoves_ReachTheLogBackup(string change, string expected)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create database d",
+            "alter database d set recovery full",
+            "use d; create partition function pf (int) as range left for values (2); create partition scheme ps as partition pf all to ([primary])",
+            """
+            use d;
+            create table t (id int primary key, v varchar(max)) on ps (id);
+            create table t2 (id int primary key, v varchar(max)) on ps (id);
+            insert t select value, replicate(cast('x' as varchar(max)), 9000) from generate_series(1, 4);
+            backup database d to disk = N'/b/full.bak';
+            """,
+            change,
+            "backup log d to disk = N'/b/log.trn'");
+        _ = simulation.ExecuteNonQuery("restore database d2 from disk = N'/b/full.bak' with norecovery, move N'd' to N'/x/d2.mdf', move N'd_log' to N'/x/d2.ldf'; restore log d2 from disk = N'/b/log.trn' with recovery");
+        AreEqual(expected, simulation.ExecuteScalar("""
+            select concat((select string_agg(id, ',') within group (order by id) from d2.dbo.t), '|', (select string_agg(id, ',') within group (order by id) from d2.dbo.t2))
+            """));
+    }
 }
