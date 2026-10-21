@@ -36,6 +36,14 @@ internal sealed partial class XmlSchemaCompiler
 
     private Particle? BuildParticle(XsdNode node)
     {
+        if (this.BuildParticleOf(node) is not { } built)
+            return null;
+        built.Source = node;
+        return built;
+    }
+
+    private Particle? BuildParticleOf(XsdNode node)
+    {
         var min = Occurs(node, "minOccurs");
         var max = Occurs(node, "maxOccurs");
         switch (node.Local)
@@ -176,8 +184,9 @@ internal sealed partial class XmlSchemaCompiler
     /// <summary>
     /// A complex type's content model, in real's order: an <c>all</c> group
     /// nested in another, repeated or holding a repeated element (Msg 6958),
-    /// two elements of one name that differ (Msg 6992), and a model that
-    /// violates unique particle attribution (Msg 6916).
+    /// two elements of one name that differ (Msg 6992), a model that
+    /// violates unique particle attribution (Msg 6916), and one an instance
+    /// can match along two paths (Msg 6928).
     /// </summary>
     private static void RejectContentModel(ComplexXsdType type, Particle? particle)
     {
@@ -191,7 +200,110 @@ internal sealed partial class XmlSchemaCompiler
             throw SimulatedSqlException.XmlSchemaInconsistentElements(type.Name, name);
 
         if (IsAmbiguous(particle))
-            throw SimulatedSqlException.XmlSchemaAmbiguousContentModel(type.Name);
+            throw SimulatedSqlException.XmlSchemaAmbiguousContentModel(ContentModelName(type, particle));
+        var edges = new Dictionary<(Particle, Particle), bool>();
+        var redundant = false;
+        _ = FollowSets.Of(particle, edges, ref redundant);
+        if (redundant)
+            throw SimulatedSqlException.XmlSchemaMultiplyValidatedContentModel(ContentModelName(type, particle));
+    }
+
+    /// <summary>
+    /// The content model's name in real's messages: the type's, unless its
+    /// particle is a model group of one particle occurring once, when it is
+    /// the path of the particle that group comes down to — inside a group's
+    /// own definition for a reference that is one (probed 2026-10-20 against
+    /// SQL Server 2025).
+    /// </summary>
+    private static string ContentModelName(ComplexXsdType type, Particle particle)
+    {
+        var reduced = particle;
+        while (reduced.Kind is ParticleKind.Choice or ParticleKind.Sequence && reduced is { Min: 1, Max: 1, Children.Count: 1 })
+            reduced = reduced.Children[0];
+        return ReferenceEquals(reduced, particle) || reduced.Source is not { } source ? type.Name : PathOf(source);
+    }
+
+    /// <summary>
+    /// A Glushkov automaton with one position per particle, recording each
+    /// pair of positions one may follow the other in and whether a counted
+    /// repetition — more than once, but not the plain <c>*</c> or <c>+</c> —
+    /// joined them. A pair two routes reach, one of them counted, is an
+    /// instance real can validate two ways, which it refuses: a repeated
+    /// sequence of optional members is refused at <c>maxOccurs="2"</c> and
+    /// accepted unbounded (probed 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    private readonly struct FollowSets(bool nullable, List<Particle> first, List<Particle> last)
+    {
+        public readonly bool Nullable = nullable;
+        public readonly List<Particle> First = first;
+        public readonly List<Particle> Last = last;
+
+        public static FollowSets Of(Particle particle, Dictionary<(Particle, Particle), bool> edges, ref bool redundant)
+        {
+            if (particle.Max == 0)
+                return new(true, [], []);
+            FollowSets body;
+            switch (particle.Kind)
+            {
+                case ParticleKind.Any or ParticleKind.Element:
+                    body = new(false, [particle], [particle]);
+                    break;
+                case ParticleKind.Sequence:
+                    body = new(true, [], []);
+                    foreach (var child in particle.Children)
+                    {
+                        var next = Of(child, edges, ref redundant);
+                        Connect(body.Last, next.First, counted: false, edges, ref redundant);
+                        var first = body.Nullable ? [.. body.First, .. next.First] : body.First;
+                        var last = next.Nullable ? [.. next.Last, .. body.Last] : next.Last;
+                        body = new(body.Nullable && next.Nullable, first, last);
+                    }
+                    break;
+                default:
+                    var children = new List<FollowSets>();
+                    var nullable = particle.Children.Count == 0;
+                    List<Particle> starts = [], ends = [];
+                    foreach (var child in particle.Children)
+                    {
+                        var part = Of(child, edges, ref redundant);
+                        children.Add(part);
+                        nullable |= part.Nullable;
+                        starts.AddRange(part.First);
+                        ends.AddRange(part.Last);
+                    }
+                    if (particle.Kind == ParticleKind.All)
+                    {
+                        // Members in any order: each may follow every other.
+                        for (var i = 0; i < children.Count; i++)
+                        {
+                            for (var j = 0; j < children.Count; j++)
+                            {
+                                if (i != j)
+                                    Connect(children[i].Last, children[j].First, counted: false, edges, ref redundant);
+                            }
+                        }
+                    }
+                    body = new(nullable, starts, ends);
+                    break;
+            }
+            if (particle.Max > 1)
+                Connect(body.Last, body.First, particle.Max != int.MaxValue || particle.Min > 1, edges, ref redundant);
+            return particle.Min == 0 && !body.Nullable ? new(true, body.First, body.Last) : body;
+        }
+
+        private static void Connect(List<Particle> from, List<Particle> to, bool counted, Dictionary<(Particle, Particle), bool> edges, ref bool redundant)
+        {
+            foreach (var source in from)
+            {
+                foreach (var target in to)
+                {
+                    if (edges.TryGetValue((source, target), out var earlier))
+                        redundant |= counted || earlier;
+                    else
+                        edges[(source, target)] = counted;
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -427,9 +539,15 @@ internal sealed partial class XmlSchemaCompiler
     /// A complex-content restriction's particle against its base's: content
     /// emptier or fuller than the base allows (Msg 6991), then the first pair
     /// that doesn't restrict — an occurrence range wider than the base's
-    /// (Msg 6980), an element of another type (Msg 6979 state 4) or left over
-    /// (Msg 6979 state 1), and a model group that maps onto none (Msg 6990).
-    /// Shapes the mapping here doesn't cover are accepted.
+    /// (Msg 6980), an element of another type (Msg 6979 state 4), a model
+    /// group in place of an element (Msg 6979 state 1), a kind the base's
+    /// group may not be restricted by (Msg 6987 / 6988 / 6989), a sequence
+    /// member no member of a base choice takes (Msg 6990 state 5), and a
+    /// particle left over (Msg 6990 state 2) or a base one skipped that
+    /// isn't emptiable (Msg 6990). Within a sequence, a model group pair that
+    /// fails passes on to the next base particle as a name mismatch does
+    /// (probed 2026-10-20 against SQL Server 2025). Shapes the mapping here
+    /// doesn't cover are accepted.
     /// </summary>
     private static void RejectParticleRestriction(ComplexXsdType type, Particle? derived, Particle? baseParticle)
     {
@@ -486,7 +604,27 @@ internal sealed partial class XmlSchemaCompiler
                 wrapped.Children.Add(derived);
                 return Restricts(wrapped, baseParticle);
             case (ParticleKind.Choice or ParticleKind.Sequence or ParticleKind.All, ParticleKind.Element):
-                return new(6979, 1, nameMismatch: false);
+                return new(6979, 1, nameMismatch: true);
+            case (ParticleKind.Any or ParticleKind.Choice or ParticleKind.All, ParticleKind.Sequence):
+                return new(6989, 1, nameMismatch: true);
+            case (ParticleKind.Any or ParticleKind.All, ParticleKind.Choice):
+                return new(6988, 1, nameMismatch: true);
+            case (ParticleKind.Any or ParticleKind.Choice, ParticleKind.All):
+                return new(6987, 1, nameMismatch: true);
+            case (ParticleKind.Sequence, ParticleKind.Choice):
+                // Each member restricts one of the choice's, and the
+                // sequence's range times its length the choice's range.
+                foreach (var derivedChild in derived.Children)
+                {
+                    if (!baseParticle.Children.Exists(baseChild => Restricts(Unwrap(derivedChild), Unwrap(baseChild)) is null))
+                        return new(6990, 5, nameMismatch: true);
+                }
+                var length = derived.Children.Count;
+                var summedMin = (long)derived.Min * length;
+                var summedMax = derived.Max == int.MaxValue ? long.MaxValue : (long)derived.Max * length;
+                return summedMin < baseParticle.Min || summedMax > (baseParticle.Max == int.MaxValue ? long.MaxValue : baseParticle.Max)
+                    ? new(6980, 1, nameMismatch: true)
+                    : null;
             case (ParticleKind.Sequence, ParticleKind.Sequence) or (ParticleKind.All, ParticleKind.All):
                 if (widens)
                     return new(6980, 1, nameMismatch: false);
@@ -507,7 +645,7 @@ internal sealed partial class XmlSchemaCompiler
                     if (!Emptiable(baseChild))
                         return new(6990, 1, nameMismatch: false);
                 }
-                return next < derived.Children.Count ? new(6979, 1, nameMismatch: false) : null;
+                return next < derived.Children.Count ? new(6990, 2, nameMismatch: false) : null;
             case (ParticleKind.Choice, ParticleKind.Choice):
                 if (widens)
                     return new(6980, 1, nameMismatch: false);
@@ -580,6 +718,9 @@ internal sealed class Particle(ParticleKind kind, int min, int max)
     /// <summary>Whether the particle is a group reference's copy of the group's.</summary>
     public bool ViaReference;
 
+    /// <summary>Where the particle is written: the reference for a group reference's copy.</summary>
+    public XsdNode? Source;
+
     /// <summary>
     /// This particle as another reference to its group takes it: a fresh
     /// copy of the whole tree under the reference's occurrence range, so each
@@ -597,6 +738,7 @@ internal sealed class Particle(ParticleKind kind, int min, int max)
             Wildcard = this.Wildcard,
             ExcludedNamespace = this.ExcludedNamespace,
             ProcessContents = this.ProcessContents,
+            Source = this.Source,
         };
         copy.Names.AddRange(this.Names);
         foreach (var child in this.Children)

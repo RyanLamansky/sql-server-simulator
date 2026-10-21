@@ -678,8 +678,9 @@ internal sealed partial class XmlSchemaCompiler
                     throw SimulatedSqlException.XmlSchemaAttributeNotInBase(type.Name, use.Name.Name);
                 continue;
             }
-            if (use.Prohibited)
-                continue;
+            // A prohibition is judged as a redeclaration would be: of a type
+            // deriving from the base's, required where it is, fixed to its
+            // value (probed 2026-10-20 against SQL Server 2025).
             if (use.Type is not null && matching.Type is not null && !IsDerived(use.Type, matching.Type))
                 throw SimulatedSqlException.XmlSchemaAttributeRedefinition(use.Name.Name, type.Name, 6972);
             if (matching.Required && !use.Required)

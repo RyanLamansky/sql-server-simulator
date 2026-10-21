@@ -1716,6 +1716,10 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException XmlSchemaAmbiguousContentModel(string type) =>
         new($"XML Validation: The content model of type or model group '{type}' is ambiguous and thus violates the unique particle attribution constraint. Consult SQL Server Books Online for more information.", 6916, 16, 2) { AbortsAsUnderXactAbort = true };
 
+    /// <summary>Msg 6928: a content model an instance can match along two paths, a repeated group whose body is optional, say.</summary>
+    internal static SimulatedSqlException XmlSchemaMultiplyValidatedContentModel(string model) =>
+        new($"XML Validation: XML instances of the content model of type or model group '{model}' can be validated in multiple ways and are not supported.", 6928, 16, 2) { AbortsAsUnderXactAbort = true };
+
     /// <summary>Msg 6920: <c>use="prohibited"</c> on an attribute its type's base doesn't declare.</summary>
     internal static SimulatedSqlException XmlSchemaProhibitedAttributeNotInBase(string type, string attribute) =>
         new($"Invalid definition for type '{type}'. Cannot specify use=\"prohibited\" for attribute '{attribute}' because there is no corresponding attribute in the base type.", 6920, 16, 1) { AbortsAsUnderXactAbort = true };
@@ -1808,14 +1812,17 @@ partial class SimulatedSqlException
     }
 
     /// <summary>
-    /// Msg 6979 / 6980 / 6981 / 6982 / 6984 / 6985 / 6990 / 6991 / 6994: a
+    /// Msg 6979 / 6980 / 6981 / 6982 / 6984 / 6985 / 6987 / 6988 / 6989 / 6990 / 6991 / 6994: a
     /// complex-content restriction whose particle or attribute wildcard
     /// doesn't restrict its base's — an element not matching the base's
     /// (6979 state 1) or of a type not derived from its (state 4), an
     /// occurrence range wider than the base's, an element nillable or unfixed
     /// where the base's isn't, an element outside the base wildcard's
-    /// namespaces, a wildcard wider than the base's, a model group that maps
-    /// onto none (6990, state 2 for a choice), content emptier or fuller than
+    /// namespaces, a wildcard wider than the base's, a particle of a kind an
+    /// <c>all</c>, <c>choice</c> or <c>sequence</c> may not be restricted by
+    /// (6987 / 6988 / 6989), a model group that maps onto none (6990, state 2
+    /// for one left over, 5 for a sequence member no member of a choice
+    /// takes), content emptier or fuller than
     /// the base allows, and an attribute wildcard wider than the base's.
     /// </summary>
     internal static SimulatedSqlException XmlSchemaInvalidRestriction(string type, int number, byte state = 1)
@@ -1828,6 +1835,9 @@ partial class SimulatedSqlException
             6982 => "The element in the restricted type must be fixed to the same value as the corresponding element in the derived type.",
             6984 => "The element in the restricted type must be in one of the namespaces allowed by the base type's wildcard.",
             6985 => "The Wildcard in the restricted type must be a valid subset of the corresponding wildcard in the base type, and the processContents may not be more permissive.",
+            6987 => "An 'all' particle may be restricted only by 'all', 'element', or 'sequence'.",
+            6988 => "A 'choice' particle may be restricted only by 'element', 'choice', or 'sequence'.",
+            6989 => "A 'sequence' particle may be restricted only by 'element' or 'sequence'.",
             6990 => "Invalid model group restriction.",
             6994 => "The attribute wildcard in the restricted type must be a valid subset of the corresponding attribute wildcard in the base type, and the processContents may not be more permissive.",
             _ => "If the base type has empty content, then the derived type must as well, and if the derived type has empty content, then the base type must be emptiable.",
