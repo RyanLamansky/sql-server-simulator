@@ -106,7 +106,7 @@ internal sealed class StatementCoroutine(SimulatedDbConnection connection) : IDi
                     this.toCaller.Wait();
             }
             MarkMidStatement(request, false);
-            this.Dispose();
+            this.Leave();
             GC.KeepAlive(running);
         }
         this.fault?.Throw();
@@ -149,7 +149,22 @@ internal sealed class StatementCoroutine(SimulatedDbConnection connection) : IDi
             Volatile.Write(ref this.statementThreadId, 0);
             this.ended = true;
             _ = this.toCaller.Release();
+            this.Leave();
         }
+    }
+
+    /// <summary>
+    /// The threads still using the two handoff signals: the caller's, which
+    /// can see <see cref="ended"/> before the statement's thread has signalled
+    /// it, and the statement's.
+    /// </summary>
+    private int users = 2;
+
+    /// <summary>One thread is done with the handoff signals; the last lets go of them.</summary>
+    private void Leave()
+    {
+        if (Interlocked.Decrement(ref this.users) == 0)
+            this.Dispose();
     }
 
     /// <summary>Lets go of the two handoff signals, once both threads are done with them.</summary>
