@@ -411,12 +411,11 @@ Four kinds carry elements of their own after the common ones (probed 2026-09-28 
 
 A database principal's event carries its elements after `ObjectType` (`Simulation.PrincipalEventElements`, probed 2026-10-21 against SQL Server 2025): a user's `DefaultSchema`, an empty `DefaultLanguage` and its `SID`, an application role's `DefaultSchema` and `SID`, a role's `SID`, empty in `DROP_ROLE`, and a membership event's member its `DefaultSchema`, empty for a role, and `SID` ahead of `RoleName`.
 An `ALTER_TABLE` event carries its `AlterTableActionList` (`Parser/AlterTableActions.cs`, probed 2026-10-21 against SQL Server 2025): the columns and constraints it created — read off the table's change, so a generated name is listed as the simulator spells it — the column it altered, the columns and constraints it dropped in written order, and the constraints or triggers it enabled or disabled, `all="true"` for `ALL`; a `REBUILD`, `SET` or `SWITCH` lists none.
+A synonym's event names its base object's qualifiers as written, each empty where it wasn't, as `TargetServerName` / `TargetDatabaseName` / `TargetSchemaName` ahead of `TargetObjectName`, and `sp_addrolemember` / `sp_droprolemember`'s event reports the `ALTER ROLE` the procedure runs, under `QUOTED_IDENTIFIER` on, with the triggers it fires counting no rows, as real's procedure runs them under `NOCOUNT` (probed 2026-10-21 against SQL Server 2025).
 An empty element is written `<X/>`, as real's xml serializer writes one.
 
 ### Not modeled yet
 
-- **Per-event extra elements**: `sp_addrolemember`'s event reporting its own `EXEC` text where real reports the `ALTER ROLE` it runs, and the empty `TargetServerName` / `TargetDatabaseName` / `TargetSchemaName` trio real puts ahead of a synonym's `TargetObjectName`.
-  The common header plus `TSQLCommand` is what an audit body reads.
 - **A binding procedure's rows-affected count** — an `EXEC sp_bindefault` a DDL trigger fires for reports the body's writes as its own count, where real reports its internal statements' (probed 2026-09-28 against SQL Server 2025).
 
 ## Server-scope triggers — `ON ALL SERVER`

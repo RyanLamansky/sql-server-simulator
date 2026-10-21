@@ -31,14 +31,16 @@ partial class Simulation
         string? ownerName = null,
         string? trailingElements = null,
         (int Start, int End)[]? masks = null,
-        string? principalElements = null)
+        string? principalElements = null,
+        string? targetQualifierElements = null,
+        string? systemProcedureText = null)
     {
         if (!RaisesDdlEvents(context))
             return;
         var statement = context.Batch.CurrentStatement;
         (statement.PendingDdlEvents ??= []).Add(new DdlEventInfo(
-            eventType, schemaName, objectName, objectType, targetObjectName, targetObjectType, principalElements, roleName, ownerName,
-            trailingElements: trailingElements, masks: masks));
+            eventType, schemaName, objectName, objectType, targetObjectName, targetObjectType, targetQualifierElements, principalElements, roleName, ownerName,
+            trailingElements: trailingElements, masks: masks, systemProcedureText: systemProcedureText));
     }
 
     /// <summary>The mask list for one password literal, or null for none (a start of -1).</summary>
@@ -230,7 +232,7 @@ partial class Simulation
         {
             var eventType = TriggerEventTypes.TryResolve(info.EventType, out var resolved) ? resolved.Type : 0;
             string? eventData = null;
-            var text = info.Masks is { } masks ? Shaped(Masked(commandText, start, end, masks)) : statementText;
+            var text = info.SystemProcedureText ?? (info.Masks is { } masks ? Shaped(Masked(commandText, start, end, masks)) : statementText);
             if (notifies)
                 this.NotifyDdlEvent(batch, database, info, eventType, () => eventData ??= BuildDdlEventData(batch, info, text));
             if (serverTriggers.Length != 0)
@@ -271,6 +273,8 @@ partial class Simulation
         {
             var connection = batch.Connection;
             var identityScope = IdentityScope.Enter(connection);
+            var outerNoCount = connection.NoCount;
+            connection.NoCount |= events.Exists(static info => info.SystemProcedureText is not null);
             var outerTriggerLog = connection.TriggerStatementUndoLog;
             var outerTriggerVersionEntries = connection.TriggerStatementVersionEntries;
             connection.TriggerStatementUndoLog = batch.CurrentUndoLog;
@@ -304,6 +308,7 @@ partial class Simulation
             {
                 connection.TriggerStatementUndoLog = outerTriggerLog;
                 connection.TriggerStatementVersionEntries = outerTriggerVersionEntries;
+                connection.NoCount = outerNoCount;
             }
             identityScope.Exit(IdentityScopeKind.Trigger);
             return new SimulatedNonQuery(0);
@@ -381,6 +386,8 @@ partial class Simulation
             AppendElement(builder, "ObjectType", objectType);
         if (info.OwnerName is { } ownerName)
             AppendElement(builder, "OwnerName", ownerName);
+        if (info.TargetQualifierElements is { } targetQualifier)
+            _ = builder.Append(targetQualifier);
         if (info.TargetObjectName is { } targetName)
             AppendElement(builder, "TargetObjectName", targetName);
         if (info.TargetObjectType is { } targetType)
@@ -393,7 +400,7 @@ partial class Simulation
             _ = builder.Append(trailingElements);
         _ = builder
             .Append("<TSQLCommand><SetOptions ANSI_NULLS=\"ON\" ANSI_NULL_DEFAULT=\"ON\" ANSI_PADDING=\"ON\" QUOTED_IDENTIFIER=\"")
-            .Append(connection.QuotedIdentifiers ? "ON" : "OFF")
+            .Append(connection.QuotedIdentifiers || info.SystemProcedureText is not null ? "ON" : "OFF")
             .Append("\" ENCRYPTED=\"FALSE\"/>");
         AppendElement(builder, "CommandText", statementText);
         _ = builder.Append("</TSQLCommand></EVENT_INSTANCE>");
@@ -449,6 +456,21 @@ partial class Simulation
                 AppendElement(builder, "Name", name);
             _ = builder.Append("</").Append(list).Append('>');
         }
+    }
+
+    /// <summary>
+    /// A synonym event's <c>TargetServerName</c>, <c>TargetDatabaseName</c>
+    /// and <c>TargetSchemaName</c>: its base object's qualifiers as written,
+    /// each empty where it wasn't (probed 2026-10-21 against SQL Server 2025).
+    /// </summary>
+    internal static string SynonymTargetElements(Synonym synonym)
+    {
+        var count = synonym.BaseObject.Count;
+        var elements = new StringBuilder(96);
+        AppendElement(elements, "TargetServerName", count == 4 ? synonym.WrittenPart(0) : string.Empty);
+        AppendElement(elements, "TargetDatabaseName", count >= 3 ? synonym.WrittenPart(count - 3) : string.Empty);
+        AppendElement(elements, "TargetSchemaName", count >= 2 ? synonym.WrittenPart(count - 2) : string.Empty);
+        return elements.ToString();
     }
 
     /// <summary>

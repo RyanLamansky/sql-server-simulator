@@ -39,6 +39,11 @@ namespace SqlServerSimulator.Parser;
 /// <paramref name="targetObjectName"/>. Null where real emits the name without
 /// a type — a synonym's base object.
 /// </param>
+/// <param name="targetQualifierElements">
+/// The elements ahead of <c>TargetObjectName</c>, rendered: a synonym
+/// event's <c>TargetServerName</c>, <c>TargetDatabaseName</c> and
+/// <c>TargetSchemaName</c>.
+/// </param>
 /// <param name="principalElements">
 /// A database principal event's elements after <c>ObjectType</c>, rendered:
 /// the principal's <c>DefaultSchema</c>, <c>DefaultLanguage</c> and
@@ -65,6 +70,13 @@ namespace SqlServerSimulator.Parser;
 /// <c>Grantor</c> … <c>CascadeOption</c>, an extended-property or binding
 /// event's property and <c>Parameters</c> list.
 /// </param>
+/// <param name="systemProcedureText">
+/// For an event a system procedure raises through the statement it runs —
+/// <c>sp_addrolemember</c>'s <c>ALTER ROLE</c> — that statement's text, which
+/// the event reports with <c>QUOTED_IDENTIFIER</c> on, and under which the
+/// triggers it fires run with <c>NOCOUNT</c> on, as inside real's procedure;
+/// null for any other.
+/// </param>
 /// <param name="masks">
 /// Where each password literal starts and ends in the batch text, in text
 /// order, which the event's <c>CommandText</c> reports as <c>'******'</c>;
@@ -77,12 +89,14 @@ internal sealed class DdlEventInfo(
     string? objectType,
     string? targetObjectName = null,
     string? targetObjectType = null,
+    string? targetQualifierElements = null,
     string? principalElements = null,
     string? roleName = null,
     string? ownerName = null,
     string? serverLevelDatabase = null,
     string? trailingElements = null,
-    (int Start, int End)[]? masks = null)
+    (int Start, int End)[]? masks = null,
+    string? systemProcedureText = null)
 {
     public readonly string EventType = eventType;
     public readonly string? SchemaName = schemaName;
@@ -90,10 +104,12 @@ internal sealed class DdlEventInfo(
     public readonly string? ObjectType = objectType;
     public readonly string? TargetObjectName = targetObjectName;
     public readonly string? TargetObjectType = targetObjectType;
+    public readonly string? TargetQualifierElements = targetQualifierElements;
     public readonly string? PrincipalElements = principalElements;
     public readonly string? RoleName = roleName;
     public readonly string? OwnerName = ownerName;
     public readonly string? ServerLevelDatabase = serverLevelDatabase;
     public readonly string? TrailingElements = trailingElements;
     public readonly (int Start, int End)[]? Masks = masks;
+    public readonly string? SystemProcedureText = systemProcedureText;
 }

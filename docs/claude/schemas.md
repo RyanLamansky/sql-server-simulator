@@ -175,7 +175,7 @@ Reference sites that ship, all probe-confirmed against real: FROM-source table /
 ### Catalog surface
 
 Synonyms enroll in `Schema.SchemaObjects()`, so they take an `ObjectId` / `CreateDate` / `ModifyDate` and project everywhere that walk feeds: `sys.objects` / `sys.all_objects` / `sysobjects` (type `SN`, type_desc `SYNONYM`, `parent_object_id` 0), `OBJECT_NAME` / `OBJECT_SCHEMA_NAME`, `GRANT`'s securable resolution, and `DROP SCHEMA`'s non-empty check.
-`sys.synonyms` projects the 13-column real shape (`BuiltInResources.CoreObjects.cs`), with `principal_id` NULL, the three `is_*` flags 0, and `base_object_name` the bracket-quoted base **as written** — `[t]` / `[dbo].[t]` / `[otherdb].[dbo].[t]` for the 1-, 2-, and 3-part forms.
+`sys.synonyms` projects the 13-column real shape (`BuiltInResources.CoreObjects.cs`), with `principal_id` NULL, the three `is_*` flags 0, and `base_object_name` the bracket-quoted base **as written** — `[t]` / `[dbo].[t]` / `[otherdb].[dbo].[t]` for the 1-, 2-, and 3-part forms, and an omitted part empty, `[tempdb]..[t]` / `[srv]...[obj]` (`Synonym.WrittenPart`, probed 2026-10-21 against SQL Server 2025).
 
 - **`OBJECT_ID('syn')`** returns the synonym's own id and never follows the base: the `'SN'` filter matches, every other filter (`'U'`, `'P'`, …) is NULL — probe-confirmed.
 - **`OBJECTPROPERTYEX(id, 'BaseType')`** reports the *base object's* type code (`'U '` / `'P '` / `'FN'`), NULL when the base doesn't resolve.
@@ -204,7 +204,6 @@ A synonym takes no column list at all (Msg 1020), so every check through one is 
 
 - **A grant on the synonym isn't honored at use.** The DML / FROM permission gate checks the resolved *base* object, so a principal holding `SELECT` on the synonym but not on the base gets Msg 229 where real reads through.
   Closing it means carrying resolution provenance out of the redirect (`TryResolveTable` returns the base table with no record of the synonym it came through).
-- `base_object_name` expands an omitted middle segment: `FOR tempdb..t` stores `[tempdb].[dbo].[t]` where real keeps `[tempdb]..[t]`, because `MultiPartName` compresses empty segments at parse.
 
 ## ALTER SCHEMA TRANSFER
 `ALTER SCHEMA <dest> TRANSFER [(OBJECT | TYPE | XML SCHEMA COLLECTION)::] <source>.<obj>` moves a single object from one schema to another.

@@ -47,9 +47,19 @@ internal sealed class Synonym(Schema schema, string name, int objectId, DateTime
             {
                 if (i > 0)
                     _ = builder.Append('.');
-                _ = builder.Append('[').Append(this.BaseObject[i].Replace("]", "]]", StringComparison.Ordinal)).Append(']');
+                if (this.WrittenPart(i) is { Length: > 0 } part)
+                    _ = builder.Append('[').Append(part.Replace("]", "]]", StringComparison.Ordinal)).Append(']');
             }
             return builder.ToString();
         }
     }
+
+    /// <summary>
+    /// The base object's part at <paramref name="index"/> as written: empty
+    /// for one left out, <c>db..name</c>'s schema or <c>server...name</c>'s
+    /// database and schema, which real keeps empty (probed 2026-10-21 against
+    /// SQL Server 2025: <c>[db]..[t]</c>, <c>[srv]...[obj]</c>).
+    /// </summary>
+    public string WrittenPart(int index) =>
+        this.BaseObject.SchemaOmitted && index == this.BaseObject.Count - 2 ? string.Empty : this.BaseObject[index];
 }

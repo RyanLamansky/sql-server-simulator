@@ -400,8 +400,12 @@ partial class Simulation
         {
             _ = database.RoleMembers.Remove((role.PrincipalId, member.PrincipalId));
         }
+        // Through sp_addrolemember / sp_droprolemember the event reports the
+        // ALTER ROLE the procedure runs (probed 2026-10-21 against SQL Server
+        // 2025).
         RecordDdlEvent(context, isAdd ? "ADD_ROLE_MEMBER" : "DROP_ROLE_MEMBER", null, member.Name, member.TypeCode == "R" ? "ROLE" : "SQL USER", roleName: role.Name,
-            principalElements: PrincipalEventElements(database, member, asMember: true));
+            principalElements: PrincipalEventElements(database, member, asMember: true),
+            systemProcedureText: viaProcedure ? $"alter role {QuoteName(roleName)} {(isAdd ? "add" : "drop")} member {QuoteName(memberName)}" : null);
     }
 
     /// <summary>

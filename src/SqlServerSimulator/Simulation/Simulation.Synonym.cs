@@ -62,7 +62,7 @@ partial class Simulation
         RecordSlotUndo<Synonym>(context, schema.Synonyms, leaf, null);
         // Real reports the base object as TargetObjectName with no type.
         ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, schema.Database, synonym);
-        RecordDdlEvent(context, "CREATE_SYNONYM", schema.Name, leaf, "SYNONYM", baseObject.Leaf);
+        RecordDdlEvent(context, "CREATE_SYNONYM", schema.Name, leaf, "SYNONYM", baseObject.Leaf, targetQualifierElements: SynonymTargetElements(synonym));
         return true;
     }
 
@@ -113,7 +113,7 @@ partial class Simulation
         }
         RecordSlotUndo(context, schema.Synonyms, leaf, dropped);
         ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectDeleted, schema.Database, dropped);
-        RecordDdlEvent(context, "DROP_SYNONYM", schema.Name, leaf, "SYNONYM", dropped.BaseObject.Leaf);
+        RecordDdlEvent(context, "DROP_SYNONYM", schema.Name, leaf, "SYNONYM", dropped.BaseObject.Leaf, targetQualifierElements: SynonymTargetElements(dropped));
         return true;
     }
 

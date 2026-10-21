@@ -274,4 +274,29 @@ public sealed class DdlEventCoverageTests
         AreEqual(actions.Length == 0 ? "" : "<AlterTableActionList>" + actions + "</AlterTableActionList>",
             document[(document.IndexOf("</ObjectType>", StringComparison.Ordinal) + 13)..document.IndexOf("<TSQLCommand>", StringComparison.Ordinal)]);
     }
+
+    [TestMethod]
+    [DataRow("create synonym s for dbo.t", "<TargetServerName/><TargetDatabaseName/><TargetSchemaName>dbo</TargetSchemaName><TargetObjectName>t</TargetObjectName>")]
+    [DataRow("create synonym s for t", "<TargetServerName/><TargetDatabaseName/><TargetSchemaName/><TargetObjectName>t</TargetObjectName>")]
+    [DataRow("create synonym s for simulated..t", "<TargetServerName/><TargetDatabaseName>simulated</TargetDatabaseName><TargetSchemaName/><TargetObjectName>t</TargetObjectName>")]
+    [DataRow("create synonym s for srv.db.sch.obj", "<TargetServerName>srv</TargetServerName><TargetDatabaseName>db</TargetDatabaseName><TargetSchemaName>sch</TargetSchemaName><TargetObjectName>obj</TargetObjectName>")]
+    public void Synonym_Events_NameTheTargetsQualifiersAsWritten(string statement, string target)
+    {
+        var sim = Logging("create table t (a int)");
+        _ = sim.ExecuteNonQuery(statement);
+        Contains("<ObjectType>SYNONYM</ObjectType>" + target, (string)sim.ExecuteScalar("select s from ev where s like '%CREATE_SYNONYM%'")!);
+    }
+
+    [TestMethod]
+    public void SpAddRoleMember_ReportsTheAlterRoleItRuns_AndItsTriggersCountNothing()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table ev (n int identity, s nvarchar(max)); create role r; create user u without login",
+            "create trigger dt on database for add_role_member, drop_role_member as insert ev (s) select eventdata().value('(/EVENT_INSTANCE/TSQLCommand/CommandText)[1]', 'nvarchar(max)') + '|' + eventdata().value('(/EVENT_INSTANCE/TSQLCommand/SetOptions/@QUOTED_IDENTIFIER)[1]', 'nvarchar(3)')");
+        using var connection = sim.CreateOpenConnection();
+        _ = connection.CreateCommand("set quoted_identifier off").ExecuteNonQuery();
+        AreEqual(-1, connection.CreateCommand("exec sp_addrolemember 'r', 'u'; exec sp_droprolemember 'r', 'u'").ExecuteNonQuery());
+        AreEqual("alter role [r] add member [u]|ON,alter role [r] drop member [u]|ON", sim.ExecuteScalar("select string_agg(s, ',') within group (order by n) from ev"));
+    }
 }

@@ -443,6 +443,19 @@ public sealed class SynonymTests
             """));
 
     /// <summary>
+    /// A part left out stays empty in <c>base_object_name</c>, as written
+    /// (probed 2026-10-21 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void BaseObjectName_KeepsAnOmittedPartEmpty()
+        => AreEqual("[simulated]..[t]|[srv]...[obj]|[a].[b]..[c]", new Simulation().ExecuteScalar("""
+            create synonym s1 for simulated..t;
+            create synonym s2 for srv...obj;
+            create synonym s3 for a.b..c;
+            select string_agg(base_object_name, '|') within group (order by name) from sys.synonyms
+            """));
+
+    /// <summary>
     /// A transferred synonym keeps its base name untouched — probe-confirmed
     /// <c>base_object_name</c> still reads <c>[dbo].[t]</c> after the move.
     /// </summary>
