@@ -29,6 +29,7 @@ internal sealed class HeapTableSnapshot
     private readonly HeapColumn[] columns;
     private readonly (string Name, int ColumnId, bool IsRowGuidCol, bool IsSparse, Parser.Expression? Default, DefaultConstraint? DefaultConstraint, string? DefaultName)[] columnState;
     private readonly Heap heap;
+    private readonly HeapColumn[]? heapLayout;
     private readonly HeapTable? systemVersioning;
     private readonly bool isHistoryTable;
     private readonly bool periodInheritedFromBase;
@@ -37,14 +38,14 @@ internal sealed class HeapTableSnapshot
     private readonly FullTextIndex? fullTextIndex;
     private readonly TableChangeTracking? changeTracking;
     private readonly KeyConstraint[] keyConstraints;
-    private readonly (string Name, bool IsDisabled, byte FillFactor, bool IsPadded)[] keyState;
+    private readonly (string Name, bool IsDisabled, StorageOptions Options)[] keyState;
     private readonly CheckConstraint[] checkConstraints;
     private readonly (string Name, bool IsNotTrusted, bool IsDisabled, string? Definition, bool IsSystemNamed)[] checkState;
     private readonly ForeignKey[] outgoingForeignKeys;
     private readonly ForeignKey[] incomingForeignKeys;
     private readonly (ForeignKey Key, string Name, bool IsNotTrusted, bool IsDisabled)[] foreignKeyState;
     private readonly Index[] indexes;
-    private readonly (string Name, bool IgnoreDupKey, bool IsDisabled, byte FillFactor, bool IsPadded)[] indexState;
+    private readonly (string Name, bool IgnoreDupKey, bool IsDisabled, StorageOptions Options, int CompressionDelay, bool ColumnstoreArchive)[] indexState;
     private readonly UserStatistic[] userStatistics;
     private readonly XmlIndex[] xmlIndexes;
     private readonly SpatialIndex[] spatialIndexes;
@@ -53,6 +54,10 @@ internal sealed class HeapTableSnapshot
     private readonly VectorIndex[] vectorIndexes;
     private readonly (string Name, int ColumnOrdinal)[] vectorIndexState;
     private readonly (Trigger Trigger, bool IsDisabled)[] triggers;
+    private readonly EdgeConstraint[] edgeConstraints;
+    private readonly (int StartOrdinal, int EndOrdinal)? periodColumns;
+    private readonly StorageOptions heapOptions;
+    private readonly bool pageCompressed;
 
     public HeapTableSnapshot(HeapTable table, Database? database)
     {
@@ -69,6 +74,7 @@ internal sealed class HeapTableSnapshot
             column.Name, column.ColumnId, column.IsRowGuidCol, column.IsSparse, column.Default, column.DefaultConstraint,
             column.DefaultConstraint?.Name));
         this.heap = table.Heap;
+        this.heapLayout = table.Heap.ReclaimColumns;
         this.systemVersioning = table.SystemVersioning;
         this.isHistoryTable = table.IsHistoryTable;
         this.periodInheritedFromBase = table.PeriodInheritedFromBase;
@@ -77,7 +83,7 @@ internal sealed class HeapTableSnapshot
         this.fullTextIndex = table.FullTextIndex;
         this.changeTracking = table.ChangeTracking;
         this.keyConstraints = [.. table.KeyConstraints];
-        this.keyState = Array.ConvertAll(this.keyConstraints, key => (key.Name, key.IsDisabled, key.FillFactor, key.IsPadded));
+        this.keyState = Array.ConvertAll(this.keyConstraints, key => (key.Name, key.IsDisabled, StorageOptions.Of(key)));
         this.checkConstraints = [.. table.CheckConstraints];
         this.checkState = Array.ConvertAll(this.checkConstraints, check => (check.Name, check.IsNotTrusted, check.IsDisabled, check.Definition, check.IsSystemNamed));
         this.outgoingForeignKeys = [.. table.OutgoingForeignKeys];
@@ -85,7 +91,7 @@ internal sealed class HeapTableSnapshot
         this.foreignKeyState = [.. this.outgoingForeignKeys.Concat(this.incomingForeignKeys).Distinct()
             .Select(key => (key, key.Name, key.IsNotTrusted, key.IsDisabled))];
         this.indexes = [.. table.Indexes];
-        this.indexState = Array.ConvertAll(this.indexes, index => (index.Name, index.IgnoreDupKey, index.IsDisabled, index.FillFactor, index.IsPadded));
+        this.indexState = Array.ConvertAll(this.indexes, index => (index.Name, index.IgnoreDupKey, index.IsDisabled, StorageOptions.Of(index), index.CompressionDelay, index.ColumnstoreArchive));
         this.userStatistics = [.. table.UserStatistics];
         this.xmlIndexes = [.. table.XmlIndexes];
         this.spatialIndexes = [.. table.SpatialIndexes];
@@ -98,6 +104,10 @@ internal sealed class HeapTableSnapshot
             : [.. database.Schemas.EnumerateValues().SelectMany(schema => schema.Triggers.EnumerateValues())
                 .Where(trigger => ReferenceEquals(trigger.Parent, table))
                 .Select(trigger => (trigger, trigger.IsDisabled))];
+        this.edgeConstraints = [.. table.EdgeConstraints];
+        this.periodColumns = table.PeriodColumns;
+        this.heapOptions = StorageOptions.OfHeap(table);
+        this.pageCompressed = table.PageCompressed;
     }
 
     public void Restore()
@@ -124,8 +134,12 @@ internal sealed class HeapTableSnapshot
             if (state.DefaultConstraint is { } defaultConstraint)
                 defaultConstraint.Name = state.DefaultName!;
         }
-        table.RecomputeStorageProjections();
         table.Heap = this.heap;
+        table.RecomputeStorageProjections();
+        // A heap the change kept, being empty, took the new layout, and rows
+        // the transaction wrote into it since leave their slots behind, so it
+        // takes back its own by hand.
+        this.heap.ReclaimColumns = this.heapLayout;
         table.Heap.InvalidateSeekJournal();
         table.SystemVersioning = this.systemVersioning;
         table.IsHistoryTable = this.isHistoryTable;
@@ -137,7 +151,11 @@ internal sealed class HeapTableSnapshot
 
         Refill(table.KeyConstraints, this.keyConstraints);
         for (var i = 0; i < this.keyConstraints.Length; i++)
-            (this.keyConstraints[i].Name, this.keyConstraints[i].IsDisabled, this.keyConstraints[i].FillFactor, this.keyConstraints[i].IsPadded) = this.keyState[i];
+        {
+            var key = this.keyConstraints[i];
+            (key.Name, key.IsDisabled, var options) = this.keyState[i];
+            options.RestoreTo(key);
+        }
         Refill(table.CheckConstraints, this.checkConstraints);
         for (var i = 0; i < this.checkConstraints.Length; i++)
         {
@@ -167,7 +185,11 @@ internal sealed class HeapTableSnapshot
 
         table.Indexes = [.. this.indexes];
         for (var i = 0; i < this.indexes.Length; i++)
-            (this.indexes[i].Name, this.indexes[i].IgnoreDupKey, this.indexes[i].IsDisabled, this.indexes[i].FillFactor, this.indexes[i].IsPadded) = this.indexState[i];
+        {
+            var index = this.indexes[i];
+            (index.Name, index.IgnoreDupKey, index.IsDisabled, var options, index.CompressionDelay, index.ColumnstoreArchive) = this.indexState[i];
+            options.RestoreTo(index);
+        }
         table.UserStatistics = [.. this.userStatistics];
         Refill(table.XmlIndexes, this.xmlIndexes);
         Refill(table.SpatialIndexes, this.spatialIndexes);
@@ -179,6 +201,95 @@ internal sealed class HeapTableSnapshot
             (this.vectorIndexes[i].Name, this.vectorIndexes[i].ColumnOrdinal) = this.vectorIndexState[i];
         foreach (var (trigger, isDisabled) in this.triggers)
             trigger.IsDisabled = isDisabled;
+        Refill(table.EdgeConstraints, this.edgeConstraints);
+        table.PeriodColumns = this.periodColumns;
+        this.heapOptions.RestoreToHeap(table);
+        table.PageCompressed = this.pageCompressed;
+        // What the storage views lay out follows the options put back.
+        _ = Interlocked.Increment(ref table.LayoutVersion);
+    }
+
+    /// <summary>
+    /// The storage options a rebuild or an <c>ALTER INDEX … SET</c> changes in
+    /// place on an index, a key constraint's index or the heap, the
+    /// per-partition lists copied, since a rebuild edits them.
+    /// </summary>
+    private readonly struct StorageOptions
+    {
+        private readonly byte fillFactor;
+        private readonly bool isPadded;
+        private readonly bool allowRowLocks;
+        private readonly bool allowPageLocks;
+        private readonly bool optimizeForSequentialKey;
+        private readonly bool statisticsNoRecompute;
+        private readonly byte dataCompression;
+        private readonly List<byte>? partitionDataCompression;
+        private readonly bool xmlCompression;
+        private readonly List<byte>? partitionXmlCompression;
+
+        private StorageOptions(byte fillFactor, bool isPadded, bool allowRowLocks, bool allowPageLocks, bool optimizeForSequentialKey, bool statisticsNoRecompute,
+            byte dataCompression, List<byte>? partitionDataCompression, bool xmlCompression, List<byte>? partitionXmlCompression)
+        {
+            this.fillFactor = fillFactor;
+            this.isPadded = isPadded;
+            this.allowRowLocks = allowRowLocks;
+            this.allowPageLocks = allowPageLocks;
+            this.optimizeForSequentialKey = optimizeForSequentialKey;
+            this.statisticsNoRecompute = statisticsNoRecompute;
+            this.dataCompression = dataCompression;
+            this.partitionDataCompression = Copy(partitionDataCompression);
+            this.xmlCompression = xmlCompression;
+            this.partitionXmlCompression = Copy(partitionXmlCompression);
+        }
+
+        public static StorageOptions Of(KeyConstraint key) => new(key.FillFactor, key.IsPadded, key.AllowRowLocks, key.AllowPageLocks, key.OptimizeForSequentialKey,
+            key.StatisticsNoRecompute, key.DataCompression, key.PartitionDataCompression, key.XmlCompression, key.PartitionXmlCompression);
+
+        public static StorageOptions Of(Index index) => new(index.FillFactor, index.IsPadded, index.AllowRowLocks, index.AllowPageLocks, index.OptimizeForSequentialKey,
+            index.StatisticsNoRecompute, index.DataCompression, index.PartitionDataCompression, index.XmlCompression, index.PartitionXmlCompression);
+
+        public static StorageOptions OfHeap(HeapTable table) => new(0, false, table.HeapAllowRowLocks, table.HeapAllowPageLocks, false,
+            false, table.HeapDataCompression, table.HeapPartitionDataCompression, table.HeapXmlCompression, table.HeapPartitionXmlCompression);
+
+        public void RestoreTo(KeyConstraint key)
+        {
+            key.FillFactor = this.fillFactor;
+            key.IsPadded = this.isPadded;
+            key.AllowRowLocks = this.allowRowLocks;
+            key.AllowPageLocks = this.allowPageLocks;
+            key.OptimizeForSequentialKey = this.optimizeForSequentialKey;
+            key.StatisticsNoRecompute = this.statisticsNoRecompute;
+            key.DataCompression = this.dataCompression;
+            key.PartitionDataCompression = Copy(this.partitionDataCompression);
+            key.XmlCompression = this.xmlCompression;
+            key.PartitionXmlCompression = Copy(this.partitionXmlCompression);
+        }
+
+        public void RestoreTo(Index index)
+        {
+            index.FillFactor = this.fillFactor;
+            index.IsPadded = this.isPadded;
+            index.AllowRowLocks = this.allowRowLocks;
+            index.AllowPageLocks = this.allowPageLocks;
+            index.OptimizeForSequentialKey = this.optimizeForSequentialKey;
+            index.StatisticsNoRecompute = this.statisticsNoRecompute;
+            index.DataCompression = this.dataCompression;
+            index.PartitionDataCompression = Copy(this.partitionDataCompression);
+            index.XmlCompression = this.xmlCompression;
+            index.PartitionXmlCompression = Copy(this.partitionXmlCompression);
+        }
+
+        public void RestoreToHeap(HeapTable table)
+        {
+            table.HeapAllowRowLocks = this.allowRowLocks;
+            table.HeapAllowPageLocks = this.allowPageLocks;
+            table.HeapDataCompression = this.dataCompression;
+            table.HeapPartitionDataCompression = Copy(this.partitionDataCompression);
+            table.HeapXmlCompression = this.xmlCompression;
+            table.HeapPartitionXmlCompression = Copy(this.partitionXmlCompression);
+        }
+
+        private static List<byte>? Copy(List<byte>? list) => list is null ? null : [.. list];
     }
 
     private static void Refill<T>(List<T> list, T[] contents)

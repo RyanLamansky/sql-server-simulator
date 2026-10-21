@@ -154,10 +154,8 @@ internal sealed class IdentityState(Int128 seed, Int128 increment, bool notForRe
     }
 
     /// <summary>
-    /// Reads the current high-water mark for snapshot purposes — TRUNCATE's
-    /// undo entry captures this so a rollback restores both the row data
-    /// and the counter position. Returns <c>null</c> when no value has yet
-    /// been generated.
+    /// Reads the current high-water mark. Returns <c>null</c> when no value
+    /// has yet been generated.
     /// </summary>
     internal Int128? Snapshot()
     {
@@ -196,7 +194,7 @@ internal sealed class IdentityState(Int128 seed, Int128 increment, bool notForRe
         }
     }
 
-    /// <summary>Both halves of the position a reseed replaces, for its undo entry.</summary>
+    /// <summary>Both halves of the identity's position, for the undo entry of a reseed or a <c>TRUNCATE</c>.</summary>
     internal (Int128? HighWaterMark, Int128? ReseededStart) ReseedSnapshot()
     {
         lock (this.gate)

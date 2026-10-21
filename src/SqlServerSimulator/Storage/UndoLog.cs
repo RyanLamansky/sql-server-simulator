@@ -242,8 +242,14 @@ internal sealed class UndoLog(LobReclamation? reclamation)
     public void RecordUniquifier(Heap heap, (int Page, int Slot) address, long previous) =>
         this.entries.Add(new UniquifierChange(heap, address, previous));
 
-    public void RecordTruncation(Heap heap, List<HeapPage> oldPages, List<HeapLobPage> oldLobPages, HashSet<(int Page, int Slot)> oldForwardTargets, int[] oldFreeLobPages, (IdentityState State, Int128? HighWaterMark)[] identitySnapshots) =>
+    public void RecordTruncation(Heap heap, List<HeapPage> oldPages, List<HeapLobPage> oldLobPages, HashSet<(int Page, int Slot)> oldForwardTargets, int[] oldFreeLobPages, (IdentityState State, (Int128? HighWaterMark, Int128? ReseededStart) Position)[] identitySnapshots)
+    {
         this.entries.Add(new HeapTruncation(heap, oldPages, oldLobPages, oldForwardTargets, oldFreeLobPages, identitySnapshots));
+        this.recordsTruncation = true;
+    }
+
+    /// <summary>Set once the log records a <c>TRUNCATE</c>, whose heap's earlier entries commit as nothing (see <see cref="Commit"/>).</summary>
+    private bool recordsTruncation;
 
     /// <summary>
     /// Records a write to a change-tracked table, published with its
@@ -499,8 +505,17 @@ internal sealed class UndoLog(LobReclamation? reclamation)
             this.PublishLog(details);
             this.recordsLog = false;
         }
+        // A row write ahead of a TRUNCATE of its heap names a slot of the
+        // pages the truncation dropped wholesale, its off-row chains with
+        // them: the address now names another row, if any, so it commits as
+        // nothing.
+        var truncatedLater = this.recordsTruncation ? this.EntriesAheadOfATruncation() : null;
+        this.recordsTruncation = false;
         for (var i = 0; i < this.entries.Count; i++)
-            this.entries[i].Commit(reclamation);
+        {
+            if (truncatedLater is null || !truncatedLater[i])
+                this.entries[i].Commit(reclamation);
+        }
         if (this.recordsObjectEvents)
         {
             this.recordsObjectEvents = false;
@@ -511,6 +526,22 @@ internal sealed class UndoLog(LobReclamation? reclamation)
             }
         }
         this.entries.Clear();
+    }
+
+    /// <summary>Which entries write a heap a later entry truncates.</summary>
+    private bool[] EntriesAheadOfATruncation()
+    {
+        var ahead = new bool[this.entries.Count];
+        var truncated = new HashSet<Heap>(ReferenceEqualityComparer.Instance);
+        for (var i = this.entries.Count - 1; i >= 0; i--)
+        {
+            var entry = this.entries[i];
+            if (entry is HeapTruncation && entry.AffectedHeap is { } heap)
+                _ = truncated.Add(heap);
+            else
+                ahead[i] = entry.AffectedHeap is { } written && truncated.Contains(written);
+        }
+        return ahead;
     }
 
     /// <summary>
@@ -880,14 +911,15 @@ internal sealed class UndoLog(LobReclamation? reclamation)
     /// Records a <c>TRUNCATE TABLE</c> against <paramref name="heap"/>. The
     /// snapshots are the pre-truncate <see cref="Heap.Pages"/> /
     /// <see cref="Heap.LobPages"/> list contents and each identity column's
-    /// pre-truncate high-water mark. Undo splices the snapshot lists back
+    /// pre-truncate position, a <c>DBCC CHECKIDENT</c> reseed still pending
+    /// included. Undo splices the snapshot lists back
     /// into the live heap and restores each identity state — probe-
     /// confirmed against SQL Server 2025 that a rollback after TRUNCATE
     /// restores both the row data AND the identity counter (distinct from
     /// the simulator's general "identity bypasses the log" rule, which
     /// applies to INSERT only).
     /// </summary>
-    private sealed class HeapTruncation(Heap heap, List<HeapPage> oldPages, List<HeapLobPage> oldLobPages, HashSet<(int Page, int Slot)> oldForwardTargets, int[] oldFreeLobPages, (IdentityState State, Int128? HighWaterMark)[] identitySnapshots) : UndoEntry
+    private sealed class HeapTruncation(Heap heap, List<HeapPage> oldPages, List<HeapLobPage> oldLobPages, HashSet<(int Page, int Slot)> oldForwardTargets, int[] oldFreeLobPages, (IdentityState State, (Int128? HighWaterMark, Int128? ReseededStart) Position)[] identitySnapshots) : UndoEntry
     {
         public override Heap? AffectedHeap => heap;
 
@@ -906,7 +938,7 @@ internal sealed class UndoLog(LobReclamation? reclamation)
             // to reconstruct the candidate set.
             heap.RebuildReclaimablePages();
             for (var i = 0; i < identitySnapshots.Length; i++)
-                identitySnapshots[i].State.Restore(identitySnapshots[i].HighWaterMark);
+                identitySnapshots[i].State.RestoreReseed(identitySnapshots[i].Position);
         }
     }
 }

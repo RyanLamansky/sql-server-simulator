@@ -1413,8 +1413,9 @@ internal sealed class Heap(bool sessionPrivate = false)
     /// The owning table's stored-column layout (set by <see cref="HeapTable"/>
     /// whenever it (re)computes <c>StoredColumns</c>). The undo-log free hooks
     /// and version-store GC use it with <see cref="RowDecoder.CollectLobHeads"/>
-    /// to locate a superseded row's off-row chain heads. Null on bare heaps
-    /// (ALTER-rebuild scratch, procedure-param clones, tests); those skip
+    /// to locate a superseded row's off-row chain heads, so it is the layout
+    /// the heap's rows were written under and never changes while it holds
+    /// any. Null on bare heaps (procedure-param clones, tests); those skip
     /// reclamation — they either never carry an undo log or are discarded
     /// wholesale.
     /// </summary>

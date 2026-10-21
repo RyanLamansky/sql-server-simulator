@@ -136,11 +136,11 @@ partial class Simulation
         if (table.OwningDatabase is { KeepsLog: true } loggingDatabase)
             LogTruncation(context.Connection.CurrentTransaction, loggingDatabase, table);
 
-        var identitySnapshots = new List<(IdentityState State, Int128? HighWaterMark)>();
+        var identitySnapshots = new List<(IdentityState State, (Int128? HighWaterMark, Int128? ReseededStart) Position)>();
         foreach (var column in table.Columns)
         {
             if (column.Identity is { } identity)
-                identitySnapshots.Add((identity, identity.Snapshot()));
+                identitySnapshots.Add((identity, identity.ReseedSnapshot()));
         }
 
         // Sch-M excludes every reader, but not a version-store sweep freeing

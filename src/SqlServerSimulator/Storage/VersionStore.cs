@@ -32,6 +32,15 @@ internal sealed class PendingVersionEntry
     /// state.
     /// </summary>
     internal bool PushedHistory;
+
+    /// <summary>
+    /// The chain the capture wrote at <see cref="NewRid"/>. A rollback of a
+    /// <c>TRUNCATE</c> or <c>SWITCH</c> puts back the chains it set aside, one
+    /// of which may stand at an address a later write of the transaction
+    /// reused; that chain is the row's state before the transaction, which a
+    /// discard of the later write leaves alone.
+    /// </summary>
+    internal RowVersionChain Chain = null!;
 }
 
 /// <summary>
@@ -176,6 +185,7 @@ internal static class VersionStore
             OldPayload = oldPayload,
             Kind = kind,
             PushedHistory = pushedHistory,
+            Chain = chain,
         });
     }
 
@@ -357,7 +367,7 @@ internal static class VersionStore
 
     private static void Discard(PendingVersionEntry entry, HashSet<(HeapTable, (int, int))>? stillPending)
     {
-        if (!entry.Heap.RowVersions.TryGetValue(entry.NewRid, out var chain))
+        if (!entry.Heap.RowVersions.TryGetValue(entry.NewRid, out var chain) || !ReferenceEquals(chain, entry.Chain))
             return;
         if (stillPending is null || !stillPending.Contains((entry.Table, entry.NewRid)))
         {

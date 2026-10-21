@@ -404,16 +404,18 @@ partial class Simulation
         private readonly HeapColumn[] columns = table.Columns;
         private readonly int maxColumnId = table.MaxColumnIdUsed;
         private readonly Heap heap = table.Heap;
+        private readonly HeapColumn[]? layout = table.Heap.ReclaimColumns;
 
         /// <summary>The history table's own undo, when the table is system-versioned.</summary>
         public AddedColumnsUndo? History;
 
         public void Restore()
         {
+            table.Heap = this.heap;
             table.Columns = this.columns;
             table.RecomputeStorageProjections();
+            this.heap.ReclaimColumns = this.layout;
             table.MaxColumnIdUsed = this.maxColumnId;
-            table.Heap = this.heap;
             this.History?.Restore();
         }
     }
@@ -545,13 +547,9 @@ partial class Simulation
     /// </summary>
     private static void RewriteHeapForAddColumns(HeapTable table, HeapColumn[] newColumns, int existingCount, List<int> withValuesColumns, ParserContext context, Expression?[]? defaults = null)
     {
-        var anyRows = false;
-        foreach (var _ in table.Heap.EnumerateRows())
-        {
-            anyRows = true;
-            break;
-        }
-        if (!anyRows)
+        // A heap holding only deleted rows' slots is rewritten too: those
+        // slots keep the layout they were written under (RecomputeStorageProjections).
+        if (table.Heap.RowCount == 0)
             return;
 
         // Pre-evaluate the backfilled DEFAULT expressions once (constant snapshot —
@@ -664,7 +662,7 @@ partial class Simulation
             _ = newHeap.Insert(encoded.AsSpan(0, length));
         }
 
-        table.Heap = newHeap;
+        table.AdoptHeap(newHeap, newStoredColumns);
     }
 
     /// <summary>
@@ -1300,9 +1298,9 @@ partial class Simulation
         }
         catch
         {
+            table.Heap = originalHeap;
             table.Columns = originalColumns;
             table.RecomputeStorageProjections();
-            table.Heap = originalHeap;
             throw;
         }
 
@@ -1344,9 +1342,9 @@ partial class Simulation
         }
         catch
         {
+            history.Heap = originalHeap;
             history.Columns = originalColumns;
             history.RecomputeStorageProjections();
-            history.Heap = originalHeap;
             throw;
         }
     }
@@ -1554,13 +1552,9 @@ partial class Simulation
         if (oldStorageOrdinal < 0)
             return;
 
-        var anyRows = false;
-        foreach (var _ in table.Heap.EnumerateRows())
-        {
-            anyRows = true;
-            break;
-        }
-        if (!anyRows)
+        // A heap holding only deleted rows' slots is rewritten too: those
+        // slots keep the layout they were written under (RecomputeStorageProjections).
+        if (table.Heap.RowCount == 0)
             return;
 
         // Build a snapshot of the pre-ALTER stored-column layout so the
@@ -1620,7 +1614,7 @@ partial class Simulation
             _ = newHeap.Insert(encoded.AsSpan(0, length));
         }
 
-        table.Heap = newHeap;
+        table.AdoptHeap(newHeap, newStoredColumns);
     }
 
     /// <summary>
@@ -1670,13 +1664,9 @@ partial class Simulation
 
     private static void RewriteHeapForDropColumns(HeapTable table, HeapColumn[] oldStoredColumns, int[] oldStorageToNew, int newStoredCount)
     {
-        var anyRows = false;
-        foreach (var _ in table.Heap.EnumerateRows())
-        {
-            anyRows = true;
-            break;
-        }
-        if (!anyRows)
+        // A heap holding only deleted rows' slots is rewritten too: those
+        // slots keep the layout they were written under (RecomputeStorageProjections).
+        if (table.Heap.RowCount == 0)
             return;
 
         var newStoredColumns = new HeapColumn[newStoredCount];
@@ -1705,7 +1695,7 @@ partial class Simulation
             _ = newHeap.Insert(encoded.AsSpan(0, length));
         }
 
-        table.Heap = newHeap;
+        table.AdoptHeap(newHeap, newStoredColumns);
     }
 
     /// <summary>
@@ -1940,9 +1930,7 @@ partial class Simulation
                 var length = RowEncoder.EncodeRowInto(newStoredColumns, values, newHeap, ref encoded);
                 _ = newHeap.Insert(encoded.AsSpan(0, length));
             }
-            table.Heap = newHeap;
-            // The fresh heap takes the off-row reclaim list the projection sets.
-            table.RecomputeStorageProjections();
+            table.AdoptHeap(newHeap, newStoredColumns);
         }
         catch
         {

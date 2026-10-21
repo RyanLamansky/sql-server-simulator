@@ -295,7 +295,11 @@ internal sealed class HeapTable : SchemaObject
     /// / <see cref="Schema"/> from the current <see cref="Columns"/> array.
     /// Called by ALTER TABLE column-mutation paths after they've assigned
     /// the new <see cref="Columns"/>; encapsulates the storage-projection
-    /// invariant the constructor also relies on.
+    /// invariant the constructor also relies on. An empty <see cref="Heap"/>
+    /// takes the new layout as its <see cref="Heap.ReclaimColumns"/>; one
+    /// holding slots keeps the layout they were written under, since a change
+    /// to the stored columns rewrites them into a heap of its own
+    /// (<see cref="AdoptHeap"/>).
     /// </summary>
     public void RecomputeStorageProjections()
     {
@@ -326,7 +330,23 @@ internal sealed class HeapTable : SchemaObject
         this.StoredColumns = storedColumns;
         this.Schema = schema;
         this.StorageOrdinals = storageOrdinals;
-        this.Heap.ReclaimColumns = HasOffRowCapableColumn(storedColumns) ? storedColumns : null;
+        if (this.Heap.RowCount == 0)
+            this.Heap.ReclaimColumns = HasOffRowCapableColumn(storedColumns) ? storedColumns : null;
+    }
+
+    /// <summary>
+    /// Swaps in <paramref name="heap"/>, whose rows an <c>ALTER TABLE</c> wrote
+    /// under <paramref name="storedColumns"/>, which become its
+    /// <see cref="Heap.ReclaimColumns"/>; the heap it replaces keeps its own,
+    /// for a rollback that puts it back. The images of rows the transaction
+    /// deleted (<see cref="SupersededKeyImages"/>) go: they name slots of the
+    /// heap replaced, and its Sch-M keeps every other session's out.
+    /// </summary>
+    public void AdoptHeap(Heap heap, HeapColumn[] storedColumns)
+    {
+        heap.ReclaimColumns = HasOffRowCapableColumn(storedColumns) ? storedColumns : null;
+        this.Heap = heap;
+        this.SupersededKeyImages.Clear();
     }
 
     /// <summary>
