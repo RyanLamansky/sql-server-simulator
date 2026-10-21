@@ -27,15 +27,44 @@ partial class Simulation
     /// </remarks>
     internal static bool TryParseCreateLogin(ParserContext context)
     {
+        static bool ParseExternalProviderLogin(ParserContext context)
+        {
+            // FROM EXTERNAL PROVIDER [WITH OBJECT_ID = 'id'], refused once it
+            // runs: the simulator's server has no Microsoft Entra ID.
+            if (context.GetNextRequired() is not UnquotedString { Value: var provider } || !provider.Equals("PROVIDER", StringComparison.OrdinalIgnoreCase))
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.With })
+            {
+                if (context.GetNextRequired() is not Name)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (context.GetNextRequired() is not Operator { Character: '=' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (context.GetNextRequired() is not Literal)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextOptional();
+            }
+            return context.Batch.IsSkipping ? true : throw SimulatedSqlException.ExternalProviderNotConfigured();
+        }
+
         context.MoveNextRequired();
         var name = ParseLoginName(context);
         context.MoveNextRequired();
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
         {
-            if (context.GetNextRequired() is not UnquotedString { Value: var source } || !source.Equals("WINDOWS", StringComparison.OrdinalIgnoreCase))
-                throw new NotSupportedException("Only SQL-authentication and Windows logins (CREATE LOGIN name WITH PASSWORD = '…' / FROM WINDOWS) are modeled; certificate, asymmetric-key, and external-provider logins are not.");
-            context.MoveNextOptional();
-            return TryParseCreateWindowsLogin(context, name);
+            // A word naming no login source, a bracketed one included, is the
+            // syntax error at it (probed 2026-10-21 against SQL Server 2025).
+            switch (context.GetNextRequired())
+            {
+                case UnquotedString { Value: var source } when source.Equals("WINDOWS", StringComparison.OrdinalIgnoreCase):
+                    context.MoveNextOptional();
+                    return TryParseCreateWindowsLogin(context, name);
+                case ReservedKeyword { Keyword: Keyword.External }:
+                    return ParseExternalProviderLogin(context);
+                case UnquotedString { Value: var source } when source.Equals("CERTIFICATE", StringComparison.OrdinalIgnoreCase) || source.Equals("ASYMMETRIC", StringComparison.OrdinalIgnoreCase):
+                    throw new NotSupportedException("Certificate and asymmetric-key logins (CREATE LOGIN name FROM CERTIFICATE / ASYMMETRIC KEY) aren't modeled.");
+                default:
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
         }
         var password = ParsePasswordClauseHere(context, required: true, out var passwordStart, out var passwordEnd);
         var options = ConsumeLoginOptions(context, takesSid: true);

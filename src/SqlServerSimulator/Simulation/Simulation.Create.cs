@@ -758,6 +758,19 @@ partial class Simulation
             throw SimulatedSqlException.IndexEntryTooLong(length, indexName, limit, clustered);
     }
 
+    /// <summary>The <c>CREATE TABLE … WITH</c> options real takes that the simulator hasn't built.</summary>
+    private static bool IsUnbuiltCreateTableOption(ReadOnlySpan<char> name)
+    {
+        Span<char> upper = stackalloc char[name.Length];
+        _ = name.ToUpperInvariant(upper);
+        return upper switch
+        {
+            "DATA_DELETION" or "FILETABLE_COLLATE_FILENAME" or "FILETABLE_DIRECTORY" or "FILETABLE_FULLPATH_UNIQUE_CONSTRAINT_NAME"
+                or "FILETABLE_PRIMARY_KEY_CONSTRAINT_NAME" or "FILETABLE_STREAMID_UNIQUE_CONSTRAINT_NAME" or "LEDGER" or "REMOTE_DATA_ARCHIVE" => true,
+            _ => false,
+        };
+    }
+
     /// <summary>
     /// Parses the trailing <c>WITH (option, …)</c> list after a CREATE TABLE
     /// column list: <c>SYSTEM_VERSIONING = ON […]</c> and
@@ -841,10 +854,12 @@ partial class Simulation
                             : throw SimulatedSqlException.SyntaxErrorNear(context)
                         : throw SimulatedSqlException.SyntaxErrorNear(context);
                     break;
-                case StringToken name:
+                case StringToken name when IsUnbuiltCreateTableOption(name.Span):
                     throw new NotSupportedException($"The CREATE TABLE option {name.Span.ToString().ToUpperInvariant()} isn't modeled.");
+                // A word that is no table option is the syntax error at it
+                // (probed 2026-10-21 against SQL Server 2025).
                 default:
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                    throw SimulatedSqlException.SyntaxErrorNear(option);
             }
             if (context.GetNextRequired() is not Operator { Character: ',' })
                 break;

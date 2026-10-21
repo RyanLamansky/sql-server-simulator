@@ -59,7 +59,7 @@ public sealed class LoginDdlTests
     {
         var ex = Throws<NotSupportedException>(
             () => new Simulation().ExecuteNonQuery("create login w from certificate c"));
-        Assert.Contains("SQL-authentication", ex.Message);
+        Assert.Contains("Certificate and asymmetric-key logins", ex.Message);
     }
 
     [TestMethod]

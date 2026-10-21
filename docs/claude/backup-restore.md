@@ -122,6 +122,8 @@ The sequence takes, in LSN order, differential sets of the full set it began fro
 - A log set reports no page of each data file and its own of the log file.
 - `RESTORE { DATABASE | LOG } name WITH RECOVERY` alone recovers the database where the sequence stands, with Msg 3014 of no pages; of an online database it is Msg 3153, of a missing one Msg 3118.
 - `RECOVERY`, `NORECOVERY` and `STANDBY` conflict pairwise, as `STOPAT`, `STOPATMARK` and `STOPBEFOREMARK` do, with real's Msg 3031 wording (`'stopatmark' conflicts with option(s) 'stopbeforemark, stopbeforemark'` included).
+- A word real knows only from the other statement is Msg 155 (`RESTORE … WITH EXPIREDATE`, `BACKUP … WITH STOPAT`), at state 1, 2 or 3 by the word, and `CREDENTIAL` without a URL device Msg 153 (probed 2026-10-21 against SQL Server 2025).
+- The options a form knows but doesn't take — `NORECOVERY`, `NO_TRUNCATE` and `STANDBY` on `BACKUP DATABASE`, `PASSWORD` / `MEDIAPASSWORD` on either `BACKUP`, `METADATA_ONLY` on `BACKUP LOG` (named `snapshot`), and the database-changing options on the reading `RESTORE` forms — gather into one Msg 3032, which real raises while the batch compiles, so nothing in the batch runs, and which names them in an order of its own rather than as written (probed 2026-10-21).
 
 ### Stopping inside a log
 
@@ -189,8 +191,8 @@ Real's `DatabaseBackup` checks that the root `@Directory` exists and relies on `
 - File and filegroup backups.
 - `REWINDONLY`, `PARTIAL` and piecemeal restores, `STOPATMARK = 'lsn:…'`, and `VERIFYONLY`'s permission check.
 - A stop inside a log set with a definition change on both sides of it, or inside a span its database's log stopped recording; both raise `NotSupportedException`.
-- `RESTORE … WITH RECOVERY` alone combined with `NORECOVERY`, `STANDBY` or a stop point, `RESTORE LOG` of a full or differential set its LSNs don't refuse, and `BACKUP DATABASE … WITH NORECOVERY` / `NO_TRUNCATE`.
-- Striped media (more than one device), `TAPE` and `URL` devices written as such (a registered tape device is refused as real's Linux server refuses it), `MIRROR TO`, encryption, `EXPIREDATE` / `RETAINDAYS`.
+- `RESTORE … WITH RECOVERY` alone combined with `NORECOVERY`, `STANDBY` or a stop point, and `RESTORE LOG` of a full or differential set its LSNs don't refuse.
+- Striped media (more than one device), `TAPE` and `URL` devices written as such (a registered tape device is refused as real's Linux server refuses it), `MIRROR TO`, encryption, `BACKUP`'s `EXPIREDATE` / `RETAINDAYS` / `FILE_SNAPSHOT` / `RESTART`, `BACKUP LOG … WITH STANDBY`, `METADATA_ONLY`, and `RESTORE`'s `PASSWORD` / `MEDIAPASSWORD` / `RESTART` / `FILESTREAM`.
 - Backing up a database holding CLR assemblies or modules, full-text catalogs, change tracking, security policies, `CREATE DEFAULT` / `CREATE RULE` objects or bindings, memory-optimized tables or table types, temporal or graph tables, XML / spatial / JSON / vector / columnstore / hash / hypothetical indexes, masked or `GENERATED ALWAYS` columns, edge constraints, encrypted or numbered modules, or a DDL trigger with a firing order.
 - Restoring `model` or `msdb`.
 - Detaching or attaching a database holding what a backup can't yet carry (above); `@keepfulltextindexfile` has nothing to keep.

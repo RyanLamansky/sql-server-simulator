@@ -51,7 +51,7 @@ internal sealed class HierarchyIdStaticCall : Expression
                 ? arg is not null
                     ? throw SimulatedSqlException.SyntaxErrorNear(context)
                     : new HierarchyIdStaticCall("GetRoot", null)
-                : throw new NotSupportedException($"hierarchyid::{methodName} is not modeled.");
+                : throw SimulatedSqlException.ClrMethodNotFound(methodName, "Microsoft.SqlServer.Types.SqlHierarchyId", "Microsoft.SqlServer.Types", state: 10);
     }
 
     public override SqlValue Run(RuntimeContext runtime) => this.method switch

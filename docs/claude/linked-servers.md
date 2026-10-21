@@ -223,6 +223,7 @@ The query here runs on the caller's own thread, where the wait could never end, 
 
 ## Not modeled yet
 
+- A write through a linked server to a target with no key and no comparable column to find its rows by raises `NotSupportedException`.
 - **Predicate pushdown**: every four-part-name read pulls every remote row, and a write's stand-in the full table.
   The projection is pushed: a read's remote query names only the columns its query does (`Selection.UnfetchedRemoteColumns`), reading the others as NULL, so a `vector` column real's provider can't convert stops the read only when the query names it (probed 2026-09-30 against SQL Server 2025).
   A query whose reach the walk can't see all of — a subquery or an `APPLY` — fetches every column.

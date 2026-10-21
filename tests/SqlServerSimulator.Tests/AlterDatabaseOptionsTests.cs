@@ -108,20 +108,17 @@ public class AlterDatabaseOptionsTests
             "ALTER DATABASE simulated COLLATE SQL_Latin1_General_CP1_CI_AS"));
 
     /// <summary>
-    /// Names outside the catalog raise <c>NotSupportedException</c> with the
-    /// "recognized list" wording. Real SQL Server raises Msg 448; the
-    /// simulator's "honest about what's modeled" stance keeps the
-    /// distinction visible. The chosen name <c>MadeUp_Locale_CI_AS</c> has
-    /// a parseable grammar but isn't in the per-prefix tail-set catalog
-    /// (probed against SQL Server 2025).
+    /// A name outside the collation catalog — <c>MadeUp_Locale_CI_AS</c> has a
+    /// parseable grammar but no shipped collation — is Msg 448 at state 3,
+    /// ending the batch while it compiles (probed 2026-10-21 against SQL
+    /// Server 2025).
     /// </summary>
     [TestMethod]
-    public void Collate_NonDefault_RaisesNotSupported()
+    public void Collate_Unknown_RaisesMsg448()
     {
-        var ex = Throws<NotSupportedException>(() =>
-            new Simulation().ExecuteNonQuery("ALTER DATABASE simulated COLLATE MadeUp_Locale_CI_AS"));
-        Contains("MadeUp_Locale_CI_AS", ex.Message);
-        Contains("recognized list", ex.Message);
+        var ex = new Simulation().AssertSqlError("ALTER DATABASE simulated COLLATE MadeUp_Locale_CI_AS", 448);
+        AreEqual("Invalid collation 'MadeUp_Locale_CI_AS'.", ex.Errors[0].Message);
+        AreEqual(3, ex.State);
     }
 
     [TestMethod]

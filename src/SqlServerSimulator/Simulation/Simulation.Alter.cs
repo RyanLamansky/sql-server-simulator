@@ -1390,18 +1390,18 @@ partial class Simulation
     /// <see cref="Database.CollationName"/>. Subsequent identifier compares
     /// route through the new collation; pre-existing catalog dict comparers
     /// don't rebuild (existing objects keep their original identifier
-    /// registration — matches real SQL Server). An unrecognized name raises
-    /// <see cref="NotSupportedException"/> in direct SQL; the BACPAC loader
-    /// catches and records on Warnings.
+    /// registration — matches real SQL Server). An unrecognized name is Msg 448
+    /// state 3, ending the batch while it compiles (probed 2026-10-21 against
+    /// SQL Server 2025); the BACPAC loader checks the name first and records a
+    /// warning instead.
     /// </summary>
     private static bool TryParseAlterDatabaseCollate(ParserContext context, Database target)
     {
         if (context.GetNextRequired() is not UnquotedString token)
             return false;
+        var resolved = Collation.TryGet(token.Value) ?? throw SimulatedSqlException.InvalidCollation(token.Value, state: 3);
         if (context.Batch.IsSkipping)
             return true;
-        if (Collation.TryGet(token.Value) is not { } resolved)
-            throw new NotSupportedException($"ALTER DATABASE COLLATE: collation '{token.Value}' isn't on the simulator's recognized list.");
         var database = target;
         database.Collation = resolved;
         database.CollationName = resolved.Name;
@@ -2341,8 +2341,16 @@ partial class Simulation
             context.MoveNextRequired();
         }
 
+        // The other options real takes aren't built; a word that is no option
+        // is the syntax error at it (probed 2026-10-21 against SQL Server 2025).
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.System_Versioning })
-            throw new NotSupportedException("Only ALTER TABLE … SET (SYSTEM_VERSIONING | LOCK_ESCALATION = …) is supported.");
+        {
+            throw context.Token is UnquotedString { Span: var word } && (word.Equals("DATA_DELETION", StringComparison.OrdinalIgnoreCase)
+                    || word.Equals("FILESTREAM_ON", StringComparison.OrdinalIgnoreCase) || word.Equals("FILETABLE_DIRECTORY", StringComparison.OrdinalIgnoreCase)
+                    || word.Equals("REMOTE_DATA_ARCHIVE", StringComparison.OrdinalIgnoreCase))
+                ? new NotSupportedException("Only ALTER TABLE … SET (SYSTEM_VERSIONING | LOCK_ESCALATION = …) is supported.")
+                : SimulatedSqlException.SyntaxErrorNear(context);
+        }
 
         if (context.GetNextRequired() is not Operator { Character: '=' })
             throw SimulatedSqlException.SyntaxErrorNear(context);

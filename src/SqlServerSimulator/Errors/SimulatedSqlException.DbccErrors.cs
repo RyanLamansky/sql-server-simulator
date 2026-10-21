@@ -305,4 +305,8 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException DatabaseIdNotActivated(int databaseId) =>
         new($"Could not find database ID {databaseId}. Database may not be activated yet or may be in transition. Reissue the query once the database is available. If you do not think this error is due to a database that is transitioning its state and this error continues to occur, contact your primary support provider. Please have available for review the Microsoft SQL Server error log and any additional information relevant to the circumstances when the error occurred.", 913, 16, 8);
+
+    /// <summary>Mimics SQL Server error 7919 state 3: a DBCC repair outside single-user mode.</summary>
+    internal static SimulatedSqlException RepairNeedsSingleUserMode() =>
+        new("Repair statement not processed. Database needs to be in single user mode.", 7919, 16, 3);
 }

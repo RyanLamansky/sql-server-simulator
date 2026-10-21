@@ -47,10 +47,9 @@ partial class Simulation
         var devices = ParseBackupDevices(context, batch, verb);
         var refused = new List<string>();
         var options = ParseBackupOptions(context, batch, "RESTORE", verb, refused, takesStats: form == "VERIFYONLY");
+        RefuseOptionsNotTaken(refused);
         if (batch.IsSkipping)
             return true;
-        if (refused.Count > 0)
-            throw SimulatedSqlException.RestoreOptionNotSupported(string.Join(", ", refused));
         if (form == "VERIFYONLY" && batch.Connection.CurrentTransaction is not null)
             throw SimulatedSqlException.BackupInTransaction(verb);
         var device = SingleDevice(devices, verb);

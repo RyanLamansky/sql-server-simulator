@@ -433,7 +433,8 @@ public sealed class DbccCommandTests
         AreEqual(5, new Simulation().AssertSqlError("dbcc checkdb with physical_only, extended_logical_checks", 2532).State);
         _ = new Simulation().AssertSqlError("dbcc checkdb with count_rows", 2532);
         _ = new Simulation().AssertSqlError("dbcc checkdb(0, 1)", 2560);
-        _ = Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery("dbcc checkdb(0, repair_rebuild)"));
+        AreEqual(3, new Simulation().AssertSqlError("dbcc checkdb(0, repair_rebuild)", 7919).State);
+        _ = Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery("alter database current set single_user; dbcc checkdb(0, repair_rebuild)"));
     }
 
     [TestMethod]

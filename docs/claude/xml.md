@@ -788,7 +788,7 @@ A pattern matching several nodes takes the first; one matching nothing is NULL, 
 The selected text then routes through the ordinary string→type coercion, so a non-numeric attribute read as `int` is Msg 245; an `xml` column reads a matched element's markup instead (probed 2026-10-02 against SQL Server 2025).
 
 A colpattern beginning `@mp:` reads a metaproperty of the row node instead: `id`, `localname`, `prefix`, `namespaceuri`, `prev`, `parentid`, `parentlocalname`, `parentprefix`, `parentnamespaceuri`, and `xmltext`.
-Anything else after the prefix raises `NotSupportedException` naming it.
+Anything else after the prefix is real's Msg 7007, raised as the rowset opens whether or not any row matches, after its empty result set, and ending the batch outside a `TRY` (probed 2026-10-21 against SQL Server 2025).
 
 ### The rowpattern dialect
 
@@ -1298,6 +1298,7 @@ The subset itself is read only for its entities, where a literal not followed by
 
 ### Not modeled yet
 
+- `FOR XML … XMLSCHEMA` over a column of a type its inline schema has no mapping for — spatial, `vector`, `json` or a CLR type — raises `NotSupportedException`.
 - **The internal subset's own grammar under `CONVERT` style 2**: a malformed `ELEMENT`, `ATTLIST` or `ENTITY` declaration, a `DOCTYPE` without a name or not first, a second one, text ahead of the root and an unparsed entity's reference raise `NotSupportedException` where real raises its parse errors (Msg 9412, 9413, 9421, 9422, 9426, 9429, 9449, 9455 — probed 2026-10-21 against SQL Server 2025), once .NET's reader refuses the subset.
 
 ## Known gaps

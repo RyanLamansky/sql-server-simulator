@@ -147,9 +147,18 @@ partial class Simulation
             throw SimulatedSqlException.FileOptionRequired("NAME", 16, 2);
         }
 
-        // A skipped (un-taken IF branch) statement validates nothing and has no
-        // schema effect — mirror ALTER DATABASE COLLATE, which defers collation
-        // resolution past the skip check.
+        // An unknown collation ends the batch while it compiles, at the line
+        // of the token after the statement (probed 2026-10-21 against SQL
+        // Server 2025).
+        if (collationName is not null && !Collation.IsRecognized(collationName))
+        {
+            var invalid = SimulatedSqlException.InvalidCollation(collationName, state: 3);
+            invalid.Errors[0].LineNumber = (context.Token ?? context.LastToken)!.LineNumber;
+            throw invalid;
+        }
+
+        // A skipped (un-taken IF branch) statement validates nothing else and
+        // has no schema effect.
         if (context.Batch.IsSkipping)
             return true;
 
@@ -194,10 +203,7 @@ partial class Simulation
         if (options.PersistentLogBuffer)
             throw new NotSupportedException("A persistent log buffer (CREATE DATABASE … WITH PERSISTENT_LOG_BUFFER = ON) isn't modeled by the simulator, which has no log.");
 
-        var collation = collationName is null
-            ? this.ServerCollation
-            : Collation.TryGet(collationName)
-                ?? throw new NotSupportedException($"CREATE DATABASE COLLATE: collation '{collationName}' isn't on the simulator's recognized list.");
+        var collation = collationName is null ? this.ServerCollation : Collation.Get(collationName);
 
         Database database;
         lock (this.Databases)

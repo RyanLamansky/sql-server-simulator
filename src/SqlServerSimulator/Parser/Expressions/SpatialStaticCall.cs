@@ -94,15 +94,18 @@ internal sealed class SpatialStaticCall : Expression
     /// <summary>
     /// Argument count each constructor demands, checked at parse time the way
     /// real does (Msg 174, severity 15). Real reports the name with the
-    /// caller's own casing here, unlike the built-in function path.
+    /// caller's own casing here, unlike the built-in function path. A CLR
+    /// method's name matches case-sensitively, so <c>geometry::point</c> and
+    /// a name merely ending like a constructor's are no method (probed
+    /// 2026-10-21 against SQL Server 2025).
     /// </summary>
-    private static int? RequiredArgumentCount(string method) =>
-        method.Equals("Parse", StringComparison.OrdinalIgnoreCase) ? 1
-        : method.Equals("Point", StringComparison.OrdinalIgnoreCase) ? 3
-        : method.Equals("GeomFromGml", StringComparison.OrdinalIgnoreCase) ? 2
-        : method.EndsWith("FromText", StringComparison.OrdinalIgnoreCase)
-            || method.EndsWith("FromWKB", StringComparison.OrdinalIgnoreCase) ? 2
-        : null;
+    private static int? RequiredArgumentCount(string method) => method switch
+    {
+        "Parse" => 1,
+        "Point" => 3,
+        "GeomFromGml" or "STGeomFromText" or "STGeomFromWKB" => 2,
+        _ => RequiredKind(method) is null ? null : 2,
+    };
 
     public override SqlValue Run(RuntimeContext runtime)
     {

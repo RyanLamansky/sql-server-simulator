@@ -1081,6 +1081,15 @@ partial class SimulatedSqlException
         new(marked is null ? $"XML parsing error: {detail}" : $"XML parsing error: {detail}\r\n\n{marked}", 6603, 16, 2);
 
     /// <summary>
+    /// Mimics SQL Server error 7007: an <c>OPENXML</c> column reading a
+    /// metaproperty that doesn't exist, raised as the rowset opens, rows or
+    /// none, and ending the batch outside a <c>TRY</c> (probed 2026-10-21
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException OpenXmlUnknownMetaProperty(string metaProperty) =>
+        new SimulatedSqlException($"OPENXML encountered unknown metaproperty '@mp:{metaProperty}'.", 7007, 16, 1).EndingBatch();
+
+    /// <summary>
     /// Msg 8179 state 5: a document handle that <c>sp_xml_preparedocument</c>
     /// never issued on this session, or that <c>sp_xml_removedocument</c>
     /// already released. A NULL handle reports <c>0</c>. Probe-confirmed

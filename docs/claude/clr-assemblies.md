@@ -343,6 +343,7 @@ The strong-named case is unprobed.
 
 ## Not modeled yet
 
+- A CLR parameter, return value, UDT member or `SqlMetaData` column of a type the marshaller doesn't map raises `NotSupportedException` when called.
 - **Context-connection shapes**: a function's `SELECT` over a side-effecting built-in (real's Msg 443 names it `SELECT WITHOUT QUERY`) and its `EXEC sp_executesql` (Msg 557) run; `GetSchemaTable`, `ExecuteXmlReader`, the async methods and `FireInfoMessageEventOnUserErrors`; a `SqlTransaction` the server's own rollback ended; a type's members and an aggregate marked to read data; and the `hierarchyid` and spatial columns as their `Microsoft.SqlServer.Types` instances (a reader serves their bytes).
 - **Connections other than the context connection** from an `EXTERNAL_ACCESS` or `UNSAFE` assembly throw `NotSupportedException` inside Msg 6522 rather than connecting.
 - CLR type members beyond the modeled shapes: a member through a three-part column name, an `UPDATE … FROM` alias target's mutator, `SqlMethod(OnNullCall = false)` / `InvokeIfReceiverIsNull`, `SqlFacet` on a member, `ValidationMethodName`, and the `IsDeterministic` / `IsPrecise` flags a persisted computed column or index would read.

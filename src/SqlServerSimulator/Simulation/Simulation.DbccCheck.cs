@@ -45,10 +45,11 @@ partial class Simulation
             | (isDatabase ? DbccOptions.DataPurity | DbccOptions.ExtendedLogicalChecks : DbccOptions.None));
         RejectPhysicalOnlyCombination(dbcc);
         dbcc.RequireArgumentCount(0, 2);
-        RejectRepairArgument(dbcc, 1);
+        var repair = RejectRepairArgument(dbcc, 1);
 
         var database = isDatabase ? ResolveDbccDatabase(batch, dbcc.Arguments.Count > 0 ? dbcc.Arguments[0] : null, 1) : batch.CurrentDatabase;
         RequireDbccDatabaseOwner(batch, database, isDatabase ? "checkdb" : "checkfilegroup");
+        RefuseRepair(dbcc, database, repair);
         var filegroupId = isDatabase ? (int?)null : ResolveDbccFilegroup(batch, database, dbcc);
         batch.Connection.LastStatementRowCount = 0;
 
@@ -139,8 +140,9 @@ partial class Simulation
             | DbccOptions.PhysicalOnly | DbccOptions.TableResults | DbccOptions.MaxDop | DbccOptions.DataPurity | DbccOptions.ExtendedLogicalChecks);
         RejectPhysicalOnlyCombination(dbcc);
         dbcc.RequireArgumentCount(1, 2);
-        RejectRepairArgument(dbcc, 1);
+        var repair = RejectRepairArgument(dbcc, 1);
         var (table, display, database) = ResolveDbccTable(batch, dbcc, 0, allowTemporary: true);
+        RefuseRepair(dbcc, database, repair);
         if (!PermissionEnforcement.HasObjectControl(batch, database, table.ObjectId, table.SchemaId))
             throw SimulatedSqlException.DbccObjectPermissionDenied(batch.Connection.Security.Effective.DatabasePrincipalName, "checktable", table.Name, 3);
         // An index id the table has no index under is Msg 7999 state 7 naming
@@ -209,9 +211,10 @@ partial class Simulation
     {
         dbcc.AllowOptions(DbccOptions.NoInfoMessages | DbccOptions.AllErrorMessages | DbccOptions.TabLock | DbccOptions.EstimateOnly | DbccOptions.TableResults);
         dbcc.RequireArgumentCount(0, 2);
-        RejectRepairArgument(dbcc, 1);
+        var repair = RejectRepairArgument(dbcc, 1);
         var database = ResolveDbccDatabase(batch, dbcc.Arguments.Count > 0 ? dbcc.Arguments[0] : null, 1);
         RequireDbccDatabaseOwner(batch, database, "checkalloc");
+        RefuseRepair(dbcc, database, repair);
         batch.Connection.LastStatementRowCount = 0;
         var tables = UserTablesByObjectId(database, filegroupId: null);
         long used = 0;
@@ -842,26 +845,45 @@ partial class Simulation
             : throw SimulatedSqlException.FilegroupNotInDatabase(name, database.Name);
     }
 
-    /// <summary>A <c>REPAIR_*</c> second argument isn't built; anything but <c>NOINDEX</c> or an index id there is Msg 2560.</summary>
-    private static void RejectRepairArgument(DbccInvocation dbcc, int index)
+    /// <summary>
+    /// Checks the second argument: <c>NOINDEX</c>, an index id for
+    /// <c>CHECKTABLE</c>, or a <c>REPAIR_*</c> word, which it answers as the
+    /// repair asked for so the caller refuses it once the target resolves
+    /// (<see cref="RefuseRepair"/>); anything else is Msg 2560.
+    /// </summary>
+    private static string? RejectRepairArgument(DbccInvocation dbcc, int index)
     {
         if (dbcc.Arguments.Count <= index)
-            return;
+            return null;
         var argument = dbcc.Arguments[index];
         if (argument.Kind == DbccArgumentKind.Name)
         {
             var word = argument.Name.Leaf;
             if (BuiltInToken.EqualsAny(word, "REPAIR_ALLOW_DATA_LOSS", "REPAIR_FAST", "REPAIR_REBUILD"))
-                throw new NotSupportedException($"DBCC {dbcc.Command.ToUpperInvariant()} with {word.ToUpperInvariant()} isn't modeled.");
+                return word.ToUpperInvariant();
             if (BuiltInToken.Equals(word, "NOINDEX"))
-                return;
+                return null;
         }
         else if (argument.Kind == DbccArgumentKind.Literal && !argument.Literal.IsNull && SqlType.IsIntegerCategory(argument.Literal.Type)
             && dbcc.Command.Equals("CHECKTABLE", StringComparison.OrdinalIgnoreCase))
         {
-            return;
+            return null;
         }
         throw SimulatedSqlException.DbccParameterIsIncorrect(index + 1);
+    }
+
+    /// <summary>
+    /// A repair the target resolved for: outside single-user mode real refuses
+    /// it with Msg 7919, which no Msg 2528 follows (probed 2026-10-21 against
+    /// SQL Server 2025); in it the repair itself isn't built.
+    /// </summary>
+    private static void RefuseRepair(DbccInvocation dbcc, Database database, string? repair)
+    {
+        if (repair is null)
+            return;
+        throw database.UserAccess != 1
+            ? SimulatedSqlException.RepairNeedsSingleUserMode()
+            : new NotSupportedException($"DBCC {dbcc.Command.ToUpperInvariant()} with {repair} isn't modeled.");
     }
 
     /// <summary>Msg 7983 unless the principal is a <c>db_owner</c> of <paramref name="database"/>.</summary>

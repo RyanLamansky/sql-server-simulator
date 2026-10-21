@@ -32,8 +32,8 @@ partial class Selection
         if (inner.AutoSourceNames is not { } sourceNames || inner.AutoColumnSource is not { } columnSource)
         {
             throw new NotSupportedException(forJson
-                ? "FOR JSON AUTO over a set-operation result isn't modeled; use FOR JSON PATH."
-                : "FOR XML AUTO over a set-operation result isn't modeled; use FOR XML PATH.");
+                ? "FOR JSON AUTO over a query whose sources carry no level binding isn't modeled; use FOR JSON PATH."
+                : "FOR XML AUTO over a query whose sources carry no level binding isn't modeled; use FOR XML PATH.");
         }
 
         // No FROM clause at all, or only sources AUTO doesn't count as tables:

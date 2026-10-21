@@ -3939,6 +3939,14 @@ partial class SimulatedSqlException
         new($"User, group, or role '{name}' already exists in the current database.", 15023, 16, state);
 
     /// <summary>
+    /// Mimics SQL Server error 37525: <c>CREATE LOGIN … FROM EXTERNAL PROVIDER</c>
+    /// on an instance with no Microsoft Entra ID configured, as the simulator's
+    /// server is (probed 2026-10-21 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ExternalProviderNotConfigured() =>
+        new("Command 'CREATE LOGIN FROM EXTERNAL PROVIDER' is not supported as Azure Active Directory is not configured for this instance.", 37525, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 15025: <c>CREATE LOGIN name</c> when a server
     /// principal of that name already exists — state 1 for a SQL login's
     /// statement, 2 for a Windows login's (probed 2026-10-17 against SQL

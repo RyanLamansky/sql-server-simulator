@@ -578,6 +578,7 @@ EF Core's `ExecuteUpdate` / `ExecuteDelete` for batched single-statement DML emi
 
 ### Not modeled
 
+- An alias-form `DELETE` / `UPDATE` with an `OUTPUT` clause whose alias names no table in its `FROM`, a `SET c = DEFAULT` on an `UPDATE` shape that binds no target column, and through a view whose `INSTEAD OF` trigger takes the write, a multi-source `DELETE` or a positioned `UPDATE` / `DELETE` with an `OUTPUT` clause or over a view with no single base table — each raises `NotSupportedException`.
 - `WHEN NOT MATCHED BY SOURCE` with `THEN INSERT` — Msg 10711 (parsing rejects).
 - MERGE into a view ships for a single-base updatable view (`MergeViewTests`), its `OUTPUT` reading the view's columns, for any view whose INSTEAD OF triggers take its actions, and for a join view whose actions each land in one base table — see [`programmable.md`](programmable.md#dml-through-a-join-view).
 - Multi-statement WHEN-clause bodies (real SQL Server only allows the one DML action per WHEN — same restriction here).

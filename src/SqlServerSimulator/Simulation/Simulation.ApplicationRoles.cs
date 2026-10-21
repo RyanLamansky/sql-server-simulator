@@ -222,9 +222,12 @@ partial class Simulation
                         : throw SimulatedSqlException.SyntaxErrorNear(context);
                     break;
                 case "PASSWORD":
+                    // A string literal alone: a number or a variable is the
+                    // syntax error at it (probed 2026-10-21 against SQL Server
+                    // 2025).
                     password = context.Token is Literal { Value: var passwordValue } && SqlType.IsStringCategory(passwordValue.Type)
                         ? passwordValue.AsString
-                        : throw new NotSupportedException("Only the clear-text password form (PASSWORD = '…') is modeled for application roles.");
+                        : throw SimulatedSqlException.SyntaxErrorNear(context);
                     (passwordStart, passwordEnd) = (context.Token.StartIndex, context.Token.EndIndex);
                     break;
                 default:

@@ -87,6 +87,8 @@ internal sealed partial class Selection
         {
             if (column.MetaProperty is null && column.ColumnPattern is { } colPattern)
                 Storage.MsxmlPatternCheck.Check(colPattern, document.Namespaces);
+            else if (column.MetaProperty is { } meta && !OpenXmlColumn.IsMetaProperty(meta))
+                throw SimulatedSqlException.OpenXmlUnknownMetaProperty(meta);
         }
         var rows = document.SelectRows(pattern);
 
@@ -287,7 +289,7 @@ internal sealed partial class Selection
             "PREFIX" => isNamespaceDeclaration ? "xmlns" : isDocument ? null : rowNode.Prefix,
             "PREV" => document.IdOf(rowNode.PreviousSibling)?.ToString(System.Globalization.CultureInfo.InvariantCulture),
             "XMLTEXT" => PreparedXmlDocument.Serialize(rowNode, consumed),
-            _ => throw new NotSupportedException($"OPENXML metaproperty '@mp:{meta}' is not modeled."),
+            _ => throw new InvalidOperationException($"'@mp:{meta}' passed OpenXmlColumn.IsMetaProperty without a reading."),
         };
         return string.IsNullOrEmpty(text) ? SqlValue.Null(type) : SqlValue.FromNVarchar(text).CoerceTo(type);
     }
@@ -461,6 +463,18 @@ internal sealed class OpenXmlColumn
 
     /// <summary>The <c>@mp:</c> prefix marking a metaproperty colpattern.</summary>
     private const string MetaPropertyPrefix = "@mp:";
+
+    /// <summary>Whether <paramref name="name"/> is one of the metaproperties real defines, in any case.</summary>
+    public static bool IsMetaProperty(string name)
+    {
+        Span<char> folded = stackalloc char[name.Length];
+        _ = name.AsSpan().ToUpperInvariant(folded);
+        return folded switch
+        {
+            "ID" or "LOCALNAME" or "NAMESPACEURI" or "PARENTID" or "PARENTLOCALNAME" or "PARENTNAMESPACEURI" or "PARENTPREFIX" or "PREFIX" or "PREV" or "XMLTEXT" => true,
+            _ => false,
+        };
+    }
 
     public static OpenXmlColumn Create(string name, SqlType type, string? colPattern) =>
         colPattern is not null && colPattern.StartsWith(MetaPropertyPrefix, StringComparison.OrdinalIgnoreCase)

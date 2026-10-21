@@ -221,7 +221,7 @@ partial class Simulation
                     _ => throw SimulatedSqlException.SyntaxErrorNear(context),
                 }, batch);
                 if (!Collation.IsRecognized(collationName))
-                    throw new NotSupportedException($"COLLATE: collation '{collationName}' isn't on the simulator's recognized list.");
+                    throw SimulatedSqlException.InvalidCollation(collationName, state: 2);
                 resolvedType = resolvedType.WithCollation(Collation.Get(collationName), Coercibility.Implicit);
                 context.MoveNextOptional();
             }

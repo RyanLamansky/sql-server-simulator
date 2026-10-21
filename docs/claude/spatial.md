@@ -214,7 +214,7 @@ The numeric parameters — `Point`'s three and every constructor's SRID — refu
 A CAST from bytes too short for what their header promises raises real's bare `System.FormatException: One of the identified items was in an invalid format.` with no 24xxx code, and `TRY_CAST` / `TRY_CONVERT` answer NULL for text that doesn't read as a spatial value (but still raise for bytes).
 `GeomFromGml(gml, srid)` reads [GML](#gml--asgml-and-geomfromgml).
 `UnionAggregate`, `EnvelopeAggregate`, `CollectionAggregate` and `ConvexHullAggregate` parse as [aggregates](#the-spatial-aggregates) instead.
-A name the type has no static method by is Msg 6506.
+A name the type has no static method by is Msg 6506, matched case-sensitively, so `geometry::point` and a name merely ending like a constructor's (`BogusFromText`) are no method (probed 2026-10-21 against SQL Server 2025).
 
 ## Parser — `Simulation/Simulation.Spatial.cs`
 
@@ -867,6 +867,8 @@ A dotted name that binds neither way reports **Msg 207** where real reports **Ms
 
 ## Not modeled yet
 
+- A non-string argument to a text constructor (`STGeomFromText(123, 0)`), which real converts to `nvarchar` and then parses — Msg 6522 with the WKT reader's label error for `123` (probed 2026-10-21 against SQL Server 2025) — raises `NotSupportedException`.
+- A WKB `COMPOUNDCURVE` holding an element other than a non-empty `LINESTRING` or `CIRCULARSTRING` raises `NotSupportedException`.
 - **`STRelate`'s matrix on `geography`** — the round-earth engine computes the nine cells but nothing reads them out, since real exposes no `STRelate` there to compare a matrix against.
   The six predicates are masks over it; a `geography`-shaped `STRelate` would need a probe oracle that doesn't exist.
 - **Curve-producing results** — real answers `STConvexHull`, `STBoundary`, the set operations and `MakeValid` over a curved instance, and `BufferWithCurves` of anything but a point, with arcs of its own (`STUnion` of a `CIRCULARSTRING` and a point keeps the arc, reversed); the simulator answers the linearization, which matches real's area and extent but not its text.

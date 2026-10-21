@@ -59,7 +59,10 @@ internal sealed class XmlDmlParser(
         // 6305) from "this isn't XQuery at all" (Msg 2209) by trying the
         // expression grammar on text no XML-DML keyword opened: `count(/r)`
         // and `for $i in /r return $i` are 6305 where `(` and `/r[` are 2209.
-        _ = XmlQueryEngine.CompileBody(this.text, this.defaultNamespace, this.prefixes, this.method);
+        // The expression may name sql:variable / sql:column, which bind as a
+        // value expression's do (probed 2026-10-21 against SQL Server 2025:
+        // `count(sql:variable("@v"))` is 6305).
+        _ = XmlQueryEngine.CompileBody(this.text, this.defaultNamespace, this.prefixes, this.method, new XmlSqlAccessorScope(this.ResolveContentAccessor), this.Typing);
         throw SimulatedSqlException.XmlDmlExpressionRequired();
     }
 

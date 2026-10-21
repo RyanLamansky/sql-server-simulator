@@ -7,6 +7,7 @@ Storage, two static factories, six instance methods, comparison, and `ORDER BY` 
 **Static factories**:
 - `hierarchyid::Parse(str)` — parses canonical path syntax (`/`, `/1/`, `/1/2.5/3/`, `/-1/`, etc.).
 - `hierarchyid::GetRoot()` — returns the empty path `/`.
+- Any other name, `parse` included since names match case-sensitively, is Msg 6506 (probed 2026-10-21 against SQL Server 2025).
 
 **Instance methods**:
 - `.GetLevel()` → `smallint` (segment count).

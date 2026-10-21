@@ -75,6 +75,7 @@ The views show a caller outside `sysadmin` only the items it sent, their attachm
 
 ## Not modeled yet
 
+- The internal `xp_sysmail_*` procedures with `Database Mail XPs` enabled raise `NotSupportedException`; disabled, they are real's blocked-component refusal.
 - Delivering mail, and with it `sent` items, `sent_account_id`, account failover across a profile's accounts, and `sysmail_send_retries` evolving over time.
 - `sysmail_help_admin_account_sp`, the credential procedures (`sysmail_create_user_credential_sp` and its pair), `sysmail_logmailevent_sp`, and the broker activation real's queues run (`sp_sysmail_activate`, `sp_ExternalMailQueueListener`): the Database Mail broker objects ship (see [`service-broker.md`](service-broker.md)) but no message crosses them.
 - The procedures as catalog objects: `msdb.sys.procedures` and `OBJECT_ID('msdb.dbo.sp_send_dbmail')` don't list them.

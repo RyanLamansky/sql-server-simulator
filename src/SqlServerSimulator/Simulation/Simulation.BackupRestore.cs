@@ -186,11 +186,11 @@ partial class Simulation
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.To })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var devices = ParseBackupDevices(context, batch, verb);
-        var options = ParseBackupOptions(context, batch, "BACKUP", verb);
+        var refused = new List<string>();
+        var options = ParseBackupOptions(context, batch, "BACKUP", verb, refused);
+        RefuseOptionsNotTaken(refused);
         if (batch.IsSkipping)
             return true;
-        if (!isLog && (options.NoRecovery || options.NoTruncate))
-            throw new NotSupportedException($"BACKUP DATABASE … WITH {(options.NoRecovery ? "NORECOVERY" : "NO_TRUNCATE")} isn't modeled by the simulator; only BACKUP LOG takes it.");
 
         var connection = batch.Connection;
         if (connection.CurrentTransaction is not null)
@@ -826,6 +826,27 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Real names the options in a Msg 3032 in an order of its own, whatever
+    /// order they were written in (probed 2026-10-21 against SQL Server 2025).
+    /// </summary>
+    private static readonly string[] OptionsNotTakenOrder =
+        ["stats", "norecovery", "no_truncate", "snapshot", "broker_option", "keep_replication", "recovery", "restricted_user", "replace", "keep_cdc", "mediapassword", "password", "standby"];
+
+    /// <summary>
+    /// Raises Msg 3032 for the options a form gathered as not taken, which real
+    /// refuses while the batch compiles, so nothing in it runs.
+    /// </summary>
+    private static void RefuseOptionsNotTaken(List<string> refused)
+    {
+        if (refused.Count == 0)
+            return;
+        refused.Sort(static (a, b) => Rank(a).CompareTo(Rank(b)));
+        throw SimulatedSqlException.OptionsNotSupportedForStatement(string.Join(", ", refused));
+
+        static int Rank(string option) => Array.FindIndex(OptionsNotTakenOrder, entry => option.StartsWith(entry, StringComparison.Ordinal));
+    }
+
+    /// <summary>
     /// The <c>WITH</c> list, entered on the token after the devices (or the
     /// name) and leaving the cursor past it. Options that change nothing the
     /// simulator models — tape handling, buffer sizes, compression — are
@@ -854,7 +875,7 @@ partial class Simulation
                 _ => throw SimulatedSqlException.SyntaxErrorNear(context),
             };
             var advanced = false;
-            if (refused is not null && name is "REPLACE" or "RECOVERY" or "NORECOVERY" or "RESTRICTED_USER" or "KEEP_REPLICATION" or "KEEP_CDC"
+            if (refused is not null && restore && name is "REPLACE" or "RECOVERY" or "NORECOVERY" or "RESTRICTED_USER" or "KEEP_REPLICATION" or "KEEP_CDC"
                 or "ENABLE_BROKER" or "NEW_BROKER" or "ERROR_BROKER_CONVERSATIONS")
             {
                 refused.Add(name switch
@@ -872,6 +893,28 @@ partial class Simulation
             switch (name)
             {
                 case "":
+                    break;
+                // The options a BACKUP form knows but doesn't take, gathered
+                // for Msg 3032 (probed 2026-10-21 against SQL Server 2025).
+                case "NORECOVERY" or "NO_TRUNCATE" when verb == "BACKUP DATABASE":
+                case "METADATA_ONLY" when verb == "BACKUP LOG":
+                    refused!.Add(name switch
+                    {
+                        "METADATA_ONLY" => "snapshot",
+                        "NORECOVERY" => "norecovery",
+                        _ => "no_truncate",
+                    });
+                    break;
+                case "MEDIAPASSWORD" or "PASSWORD" when !restore:
+                case "STANDBY" when verb == "BACKUP DATABASE":
+                    ExpectEquals(context);
+                    _ = ParseBackupStringValue(context, batch);
+                    refused!.Add(name switch
+                    {
+                        "MEDIAPASSWORD" => "mediapassword",
+                        "PASSWORD" => "password",
+                        _ => "standby",
+                    });
                     break;
                 case "BLOCKSIZE" or "BUFFERCOUNT" or "MAXTRANSFERSIZE":
                     ExpectEquals(context);
@@ -1006,8 +1049,22 @@ partial class Simulation
                         stats = null;
                     }
                     break;
-                case "ENCRYPTION" or "CREDENTIAL" or "EXPIREDATE" or "RETAINDAYS" or "METADATA_ONLY" or "FILE_SNAPSHOT" or "STANDBY"
-                    or "NO_TRUNCATE" or "PARTIAL" or "PASSWORD" or "MEDIAPASSWORD" or "STOPAT" or "STOPATMARK" or "STOPBEFOREMARK" or "RESTART" or "FILESTREAM":
+                // Words real refuses in the statement while it compiles: one it
+                // knows only from the other statement is Msg 155, and
+                // CREDENTIAL, which only a URL device takes, Msg 153 (probed
+                // 2026-10-21 against SQL Server 2025).
+                case "CREDENTIAL":
+                    throw SimulatedSqlException.InvalidBackupOptionUsage(token.Source.ToString(), statement);
+                case "ENCRYPTION" or "EXPIREDATE" or "FILE_SNAPSHOT" or "NO_TRUNCATE" or "RETAINDAYS" when restore:
+                case "FILESTREAM" or "PARTIAL" or "STOPAT" or "STOPATMARK" or "STOPBEFOREMARK" when !restore:
+                    throw SimulatedSqlException.UnrecognizedBackupOption(token.Source.ToString(), statement, name switch
+                    {
+                        "RETAINDAYS" => 2,
+                        "EXPIREDATE" or "STOPAT" or "STOPATMARK" or "STOPBEFOREMARK" => 3,
+                        _ => 1,
+                    });
+                case "ENCRYPTION" or "EXPIREDATE" or "FILE_SNAPSHOT" or "FILESTREAM" or "MEDIAPASSWORD" or "METADATA_ONLY" or "PARTIAL"
+                    or "PASSWORD" or "RESTART" or "RETAINDAYS" or "STANDBY":
                     throw new NotSupportedException($"{statement} … WITH {name} isn't modeled by the simulator.");
                 default:
                     throw SimulatedSqlException.UnrecognizedBackupOption(token.Source.ToString(), statement);

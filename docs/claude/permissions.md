@@ -524,7 +524,7 @@ The hash uses the legacy `0x0200` single-pass-SHA-512 format (`PasswordHash.Encr
 In-process connections never authenticate — login DDL through one is how the registry is seeded.
 
 - `CREATE LOGIN name WITH PASSWORD = '…' [MUST_CHANGE] [, option …]` — only the SQL-auth clear-text form is modeled; `CREDENTIAL` maps the login to a credential (see [Credentials](#credentials)), and `SID` gives the login its SID (see [Login SIDs](#login-sids)), and the rest of the option tail (CHECK_POLICY / CHECK_EXPIRATION / DEFAULT_DATABASE / DEFAULT_LANGUAGE) is kept as the login's catalog rows show it or read without effect — save `DEFAULT_LANGUAGE`, which the login's sessions start in, the server's `default language` standing in when it is left out ([`session-options.md`](session-options.md#what-a-session-starts-with-user-options-and-the-logins-language)).
-  `FROM WINDOWS` is refused as the Linux server refuses it (see [Windows logins](#windows-logins)); the certificate / asymmetric-key / external-provider forms and `PASSWORD = 0x… HASHED` raise `NotSupportedException`.
+  `FROM WINDOWS` is refused as the Linux server refuses it (see [Windows logins](#windows-logins)), `FROM EXTERNAL PROVIDER` is real's Msg 37525 for an instance with no Microsoft Entra ID and any other word after `FROM` Msg 102 (probed 2026-10-21 against SQL Server 2025); the certificate and asymmetric-key forms and `PASSWORD = 0x… HASHED` raise `NotSupportedException`.
   A password over SQL Server's documented **128-character cap** raises Msg 6607 (CREATE and ALTER alike) — **approximate**: 6607 is the password-machinery error probe-confirmed on the `PWDENCRYPT` cap, but real's CREATE LOGIN rejection shape is unverifiable from the reference instance (its login hits the Msg 15247 permission wall before password validation).
 - `ALTER LOGIN name WITH PASSWORD = '…'` re-hashes and stamps `PasswordLastSetTime` (readable via `LOGINPROPERTY`).
   `ALTER LOGIN name DISABLE` / `ENABLE` set the login's `IsDisabled`, which `is_disabled` projects and the [login gate](#the-login-gate) refuses; the other `WITH` options parse-and-discard after the existence check.
@@ -800,6 +800,7 @@ A `DENY` binds even a login that also holds `ALTER ANY DATABASE`.
 
 #### Not modeled yet
 
+- A column-level permission on a catalog view (`GRANT SELECT (name) ON sys.objects`) raises `NotSupportedException`.
 - The permissions whose statements the simulator doesn't have stay catalog truth: the endpoint, event-notification and availability-group families and `ALTER RESOURCES`.
 - `UNSAFE ASSEMBLY` as a signing certificate's or key's login holds it under `clr strict security`; it is read only as a `TRUSTWORTHY` database's owner's (see [`clr-assemblies.md`](clr-assemblies.md#what-the-server-takes-the-edition-the-catalog-and-clr-strict-security)).
 - `ALTER AUTHORIZATION` on a fixed server role raises `NotSupportedException`: on real it ended the probing session (2026-10-21).

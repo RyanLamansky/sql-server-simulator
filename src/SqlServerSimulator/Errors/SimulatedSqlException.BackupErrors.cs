@@ -146,9 +146,13 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException RestoreMasterOutsideSingleUserMode(string verb) =>
         FollowedByBackupTerminating(new("To restore the master database, the server must be running in single-user mode. For information on starting in single-user mode, see \"How to: Start an Instance of SQL Server (sqlservr.exe)\" in Books Online.", 3108, 16, 1), verb);
 
-    /// <summary>Mimics SQL Server error 911 (state 11): a backup of a database that doesn't exist.</summary>
+    /// <summary>
+    /// Mimics SQL Server error 911: a backup of a database that doesn't exist,
+    /// at state 11 for <c>BACKUP DATABASE</c> and 10 for <c>BACKUP LOG</c>
+    /// (probed 2026-10-21 against SQL Server 2025).
+    /// </summary>
     internal static SimulatedSqlException BackupDatabaseDoesNotExist(string databaseName, string verb) =>
-        FollowedByBackupTerminating(new($"Database '{databaseName}' does not exist. Make sure that the name is entered correctly.", 911, 16, 11), verb);
+        FollowedByBackupTerminating(new($"Database '{databaseName}' does not exist. Make sure that the name is entered correctly.", 911, 16, verb == "BACKUP LOG" ? (byte)10 : (byte)11), verb);
 
     /// <summary>Mimics SQL Server error 3206: a logical backup device name, none of which the simulator registers.</summary>
     internal static SimulatedSqlException BackupDeviceDoesNotExist(string name, string verb) =>
@@ -174,9 +178,20 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException BackupOptionConflict(string option, string conflicting) =>
         new($"Option '{option}' conflicts with option(s) '{conflicting}'. Remove the conflicting option and reissue the statement.", 3031, 16, 1);
 
-    /// <summary>Mimics SQL Server error 155: a <c>WITH</c> word that is no option of the statement.</summary>
-    internal static SimulatedSqlException UnrecognizedBackupOption(string option, string statement) =>
-        new($"'{option}' is not a recognized {statement} option.", 155, 15, 1);
+    /// <summary>
+    /// Mimics SQL Server error 155: a <c>WITH</c> word that is no option of the
+    /// statement — at state 2 or 3 for a word real knows from the other
+    /// statement, by the word (probed 2026-10-21 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException UnrecognizedBackupOption(string option, string statement, byte state = 1) =>
+        new($"'{option}' is not a recognized {statement} option.", 155, 15, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 153: <c>CREDENTIAL</c>, which only a URL device
+    /// takes, named as written (probed 2026-10-21 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException InvalidBackupOptionUsage(string option, string statement) =>
+        new($"Invalid usage of the option {option} in the {statement} statement.", 153, 15, 1);
 
     /// <summary>Mimics SQL Server error 4208: <c>BACKUP LOG</c> in the simple recovery model.</summary>
     internal static SimulatedSqlException BackupLogUnderSimpleRecovery() =>
@@ -199,10 +214,11 @@ partial class SimulatedSqlException
         FollowedByBackupTerminating(new(string.Create(CultureInfo.InvariantCulture, $"Cannot find file ID {file} on device '{path}'."), 4038, 16, 1), verb);
 
     /// <summary>
-    /// Mimics SQL Server error 3032 state 2: an option the <c>RESTORE</c> form
-    /// doesn't take, named as real lowercases it — no Msg 3013 follows.
+    /// Mimics SQL Server error 3032 state 2: options a <c>BACKUP</c> or
+    /// <c>RESTORE</c> form doesn't take, named as real lowercases them — no
+    /// Msg 3013 follows. Raised while the batch compiles.
     /// </summary>
-    internal static SimulatedSqlException RestoreOptionNotSupported(string options) =>
+    internal static SimulatedSqlException OptionsNotSupportedForStatement(string options) =>
         new($"One or more of the options ({options}) are not supported for this statement. Review the documentation for supported options.", 3032, 16, 2);
 
     /// <summary>Mimics SQL Server error 3118: a differential or log restore naming a database that doesn't exist.</summary>

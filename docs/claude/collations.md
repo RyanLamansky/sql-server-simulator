@@ -310,7 +310,7 @@ With an explicit `COLLATE`, the new collation pins at `Implicit` rank.
 
 `Collation.TryGet(name)` decodes the grammatical shape of a name and constructs the matching instance on demand; results are interned so the same name always resolves to the same reference.
 The complete `sys.fn_helpcollations()` catalog ships — 5540 names total (77 SQL_* + 5463 non-SQL_*), probed against SQL Server 2025 and validated against the per-prefix tail-set tables in `Collation.Catalog.cs`.
-Names outside the catalog (whether outright misspellings or grammar-valid but never-shipped combinations like `Pashto_CI_AS` or `Latin1_General_140_BIN`) raise `NotSupportedException` in direct SQL and surface on `BacpacImportResult.Warnings` for BACPAC loads.
+Names outside the catalog (whether outright misspellings or grammar-valid but never-shipped combinations like `Pashto_CI_AS` or `Latin1_General_140_BIN`) are real's Msg 448 in direct SQL — `ALTER` / `CREATE DATABASE … COLLATE` and a `WITH RESULT SETS` column at state 3 and 2, ending the batch while it compiles (probed 2026-10-21 against SQL Server 2025) — and surface on `BacpacImportResult.Warnings` for BACPAC loads, whose loader checks the name before it emits the statement.
 
 ### Architecture
 
