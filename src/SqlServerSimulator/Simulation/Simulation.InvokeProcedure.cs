@@ -445,6 +445,12 @@ partial class Simulation
                     // them from their statement plans.
                     if (!recompiles)
                         innerBatch.StatementPlanModule = procedure;
+                    // A temporary procedure whose name named a database tempdb
+                    // ignored names it again as its body compiles — on the
+                    // first call and on each recompile, not a cached one
+                    // (probed 2026-10-21 against SQL Server 2025).
+                    if (procedure.IgnoredDatabaseInName is { } ignoredDatabase && (recompiles || procedure.CompiledPlan is null))
+                        outerBatch.Connection.PendingMessages.Enqueue(SimulatedSqlException.TempdbDatabaseNameIgnoredMessage(outerBatch, ignoredDatabase));
                     if (this.CompileModuleBody(innerBatch, procedure.TemporaryBindingDatabase ?? procedure.Schema.Database, ref procedure.CompiledPlan, parent: null, recompiles, keepsPlan: !recompiles, out var compileError) is { } failures)
                         outcomes.AddRange(CompileFailuresSent(innerBatch, failures));
                     if (compileError is not null)

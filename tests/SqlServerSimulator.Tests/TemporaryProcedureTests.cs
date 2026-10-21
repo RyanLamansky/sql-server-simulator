@@ -190,8 +190,16 @@ public sealed class TemporaryProcedureTests
         Run(connection, "create proc nosuch.dbo.#p as select 7");
         AreEqual("2701", string.Join(",", messages));
         messages.Clear();
+        // The first exec names tempdb (ignored, one 2701) and compiles the
+        // body, which names the stored 'nosuch' qualifier (a second 2701); a
+        // later cached exec that names no database sends none (probed
+        // 2026-10-21 against SQL Server 2025).
         AreEqual(7, Scalar(connection, "exec tempdb..#p"));
         AreEqual(7, Scalar(connection, "exec dbo.#p"));
+        AreEqual("2701,2701", string.Join(",", messages));
+        // A recompile compiles the body afresh, so the 'nosuch' 2701 returns.
+        messages.Clear();
+        AreEqual(7, Scalar(connection, "exec #p with recompile"));
         AreEqual("2701", string.Join(",", messages));
         var missing = Throws<SimulatedSqlException>(() => Run(connection, "exec tempdb..#nope"));
         AreEqual("Could not find stored procedure '#nope'.", missing.Errors[0].Message);

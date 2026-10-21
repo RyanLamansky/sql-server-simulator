@@ -43,6 +43,13 @@ internal sealed class Procedure(
     public Schema Schema = schema;
 
     /// <summary>
+    /// The database a temporary procedure's <c>CREATE</c> name qualified with
+    /// but tempdb ignored, which its body compile names in a fresh Msg 2701
+    /// (probed 2026-10-21 against SQL Server 2025); null when none.
+    /// </summary>
+    public string? IgnoredDatabaseInName;
+
+    /// <summary>
     /// Number of newlines in the <c>CREATE</c> text that precede
     /// <see cref="BodyText"/>'s start. Added to a body error's line so the
     /// reported number is relative to the whole <c>CREATE PROCEDURE</c>

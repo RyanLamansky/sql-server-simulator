@@ -106,6 +106,10 @@ partial class Simulation
         // a database part ignored with Msg 2701 (probed 2026-10-16 against SQL
         // Server 2025).
         var temporary = BatchContext.IsLocalTempName(procName.Leaf) || BatchContext.IsGlobalTempName(procName.Leaf);
+        // A temporary procedure's name qualified with a database other than
+        // tempdb carries that database to its body, which names it again in
+        // Msg 2701 each time it compiles (see Procedure.IgnoredDatabaseInName).
+        var ignoredDatabaseInName = temporary && procName.Count >= 3 && procName[procName.Count - 3] is { Length: > 0 } ignoredDb ? ignoredDb : null;
         if (temporary)
         {
             procName = BatchContext.TemporaryTableName(context, procName);
@@ -255,6 +259,7 @@ partial class Simulation
                 UsesQuotedIdentifier = context.QuotedIdentifiers,
                 UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
                 GroupNumber = groupNumber,
+                IgnoredDatabaseInName = ignoredDatabaseInName,
                 RecompilesEveryCall = options.Recompile,
                 IsNativelyCompiled = nativelyCompiled,
             });
@@ -292,6 +297,7 @@ partial class Simulation
             ExecuteAsPrincipalId = ResolveExecuteAsPrincipalId(context, executeAsClause),
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
+            IgnoredDatabaseInName = ignoredDatabaseInName,
             // The group's numbered procedures and the startup flag stay with it
             // across an ALTER (probed 2026-10-15 against SQL Server 2025).
             Numbered = replaced?.Numbered,
