@@ -251,6 +251,7 @@ public sealed class StatementBoundaryTests
     [DataRow("create statistics zst on zt (b) with fullscan zzbogus", "zzbogus")]
     [DataRow("alter index all on zt rebuild zzbogus", "zzbogus")]
     [DataRow("begin tran zzbogus zx", "zx")]
+    [DataRow("create xml schema collection zxc as N'<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"><xs:element name=\"e\"/></xs:schema>' zzbogus", "zzbogus")]
     [DataRow("while 1 = 0 begin break end zzbogus", "zzbogus")]
     [DataRow("while 1 = 0 begin break zzbogus end", "zzbogus")]
     public void AStrayTokenAfterTheStatement_IsASyntaxErrorAtIt(string statement, string near)

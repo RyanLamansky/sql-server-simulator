@@ -88,7 +88,7 @@ partial class Simulation
             case UnquotedString { ContextualKeyword: ContextualKeyword.FullText }:
                 return Simulation.TryParseCreateFullText(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Xml }:
-                return Simulation.TryParseCreateXml(context);
+                return RejectingTrailingToken(context, Simulation.TryParseCreateXml(context));
             case Name jsonWord when jsonWord.Value.Equals("JSON", StringComparison.OrdinalIgnoreCase):
                 return Simulation.TryParseCreateJsonIndex(context);
             case Name vectorWord when vectorWord.Value.Equals("VECTOR", StringComparison.OrdinalIgnoreCase):
