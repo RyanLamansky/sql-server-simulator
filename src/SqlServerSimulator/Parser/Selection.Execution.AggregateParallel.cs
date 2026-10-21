@@ -166,17 +166,25 @@ internal sealed partial class Selection
         private static readonly object Gate = new();
 
 #pragma warning disable SSS008 // Deliberate: the hand-off queue is mutated for the life of the process, which is what the rule's "fixed after initialization" premise excludes.
-        private static readonly Queue<Action> Pending = new();
+        private static readonly Queue<(Action Run, ExecutionContext? Context)> Pending = new();
 #pragma warning restore SSS008
 
         private static int threads;
         private static int idle;
 
+        /// <summary>
+        /// Queues <paramref name="run"/> to run under the submitter's execution
+        /// context, which carries its session's <c>SET DATEFORMAT</c>,
+        /// <c>SET LANGUAGE</c> and two-digit year cutoff: a worker thread
+        /// serves every statement's fan-out, so it can't keep the context of
+        /// the one that started it.
+        /// </summary>
         public static void Submit(Action run)
         {
+            var context = ExecutionContext.Capture();
             lock (Gate)
             {
-                Pending.Enqueue(run);
+                Pending.Enqueue((run, context));
                 if (idle > 0)
                 {
                     // A parked thread takes it.
@@ -191,7 +199,7 @@ internal sealed partial class Selection
                     {
                         IsBackground = true,
                         Name = "SqlServerSimulator aggregate worker",
-                    }.Start();
+                    }.UnsafeStart();
                     return;
                 }
 
@@ -208,6 +216,7 @@ internal sealed partial class Selection
             while (true)
             {
                 Action run;
+                ExecutionContext? context;
                 lock (Gate)
                 {
                     while (Pending.Count == 0)
@@ -226,9 +235,12 @@ internal sealed partial class Selection
                             return;
                         }
                     }
-                    run = Pending.Dequeue();
+                    (run, context) = Pending.Dequeue();
                 }
-                run();
+                if (context is null)
+                    run();
+                else
+                    ExecutionContext.Run(context, static state => ((Action)state!)(), run);
             }
         }
     }
