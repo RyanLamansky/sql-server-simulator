@@ -1799,7 +1799,7 @@ internal sealed partial class Selection
                         var placeholderAlias = context.Token?.StartIndex == beforeClause
                             ? ConsumeOptionalAlias(context)
                             : ConsumeOptionalAliasAtCurrent(context);
-                        ParseOptionalTableSample(context);
+                        ParseOptionalTableSample(context, objectName.ToString());
                         _ = ParseOptionalFromSourceHints(context, placeholderAlias is not null, objectName.ToString());
                         return FromSource.DeferredPlaceholder(placeholderAlias ?? objectName.Leaf);
                     }
@@ -1854,7 +1854,7 @@ internal sealed partial class Selection
                 var heapAlias = clauseParsed
                     ? ConsumeOptionalAliasAtCurrent(context)
                     : ConsumeOptionalAlias(context);
-                ParseOptionalTableSample(context);
+                ParseOptionalTableSample(context, objectName.ToString());
                 var heapHints = ParseOptionalFromSourceHints(context, heapAlias is not null, objectName.ToString());
                 // NOEXPAND names an indexed view, which a table is not
                 // (probed 2026-10-04 against SQL Server 2025).

@@ -53,9 +53,13 @@ internal sealed class Numeric : Token
                 char.IsAsciiDigit(number[^1]) ? number : $"{number}0",
                 NumberStyles.Float,
                 CultureInfo.InvariantCulture);
-            // A value below the smallest normal float reads as 0, with a
-            // warning (probed 2026-09-26 against SQL Server 2025).
-            if (parsed != 0 && Math.Abs(parsed) < 2.2250738585072014E-308)
+            // A value past float's range is an error, and one below the
+            // smallest normal float reads as 0 with a warning — a nonzero
+            // mantissa whose value parses to 0 included (probed 2026-09-26 and
+            // 2026-10-21 against SQL Server 2025: 1e400, 1e-320, 1e-400).
+            if (double.IsInfinity(parsed))
+                throw SimulatedSqlException.FloatLiteralOutOfRange(number.ToString());
+            if (Math.Abs(parsed) < 2.2250738585072014E-308 && number[..number.IndexOfAny(['e', 'E'])].ContainsAnyInRange('1', '9'))
             {
                 this.Underflowed = true;
                 parsed = 0;

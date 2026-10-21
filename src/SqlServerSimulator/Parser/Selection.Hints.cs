@@ -1102,10 +1102,12 @@ internal sealed partial class Selection
     /// The sample is <b>discarded</b>: the simulator returns every row, a
     /// deterministic approximation of SQL Server's nondeterministic random
     /// sample (which the wire contract permits — a sample is any subset).
+    /// Its values are checked as real checks them, while the statement
+    /// compiles to run (see <see cref="CheckTableSampleValue"/>).
     /// </summary>
-    private static void ParseOptionalTableSample(ParserContext context)
+    private static void ParseOptionalTableSample(ParserContext context, string table)
     {
-        if (context.Token is not ReservedKeyword { Keyword: Keyword.TableSample })
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.TableSample } tableSample)
             return;
         // A view's or inline function's definition samples nothing (probed
         // 2026-10-04 against SQL Server 2025).
@@ -1117,18 +1119,152 @@ internal sealed partial class Selection
         // Optional SYSTEM sampling-method identifier (contextual).
         if (context.Token is Name method && collation.Equals(method.Value, "SYSTEM"))
             context.MoveNextRequired();
-        if (context.Token is not Operator { Character: '(' })
+        var size = ParseTableSampleValue(context);
+        var rows = context.Token is Name unit && collation.Equals(unit.Value, "ROWS");
+        if (rows || context.Token is ReservedKeyword { Keyword: Keyword.Percent })
+            context.MoveNextRequired();
+        if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        SkipBalancedParens(context);
         context.MoveNextOptional();
-        // Optional REPEATABLE (seed).
+        (Expression Value, string? IntegerLiteral)? seed = null;
         if (context.Token is Name repeatable && collation.Equals(repeatable.Value, "REPEATABLE"))
         {
             context.MoveNextRequired();
-            if (context.Token is not Operator { Character: '(' })
+            seed = ParseTableSampleValue(context);
+            if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            SkipBalancedParens(context);
             context.MoveNextOptional();
+        }
+        // A skipped branch never reaches the check, as real's never compiles
+        // to run, while a statement read again for its binder report records
+        // a refusal among its names (probed 2026-10-21 against SQL Server
+        // 2025: a percentage past 100 reports ahead of the WHERE clause's
+        // Msg 207s).
+        var report = context.Batch.BindErrors is { } installed && installed.Covers(tableSample) ? installed : null;
+        if (context.Batch.IsSkipping && report is null)
+            return;
+        try
+        {
+            CheckTableSampleValue(context, size, rows, table);
+            if (seed is { } repeatableSeed)
+                CheckTableSampleValue(context, repeatableSeed, rows: true, table);
+        }
+        catch (SimulatedSqlException error) when (report is not null)
+        {
+            if (!report.FailedAt(tableSample.StartIndex))
+                report.Record(error, tableSample.StartIndex);
+        }
+    }
+
+    /// <summary>
+    /// Parses one parenthesized <c>TABLESAMPLE</c> or <c>REPEATABLE</c> value,
+    /// leaving the cursor on the token after it, with the text of a value
+    /// written as an integer literal alone, sign included — <c>2147483648</c>
+    /// counts as an integer there though it types as <c>numeric(10, 0)</c>.
+    /// </summary>
+    private static (Expression Value, string? IntegerLiteral) ParseTableSampleValue(ParserContext context)
+    {
+        if (context.Token is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        if (context.Token is Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var sign = context.Token is Operator { Character: '-' or '+' } signOperator ? signOperator.Character.ToString() : "";
+        var literal = context.Token as Numeric;
+        if (sign.Length != 0)
+        {
+            var checkpoint = context.SaveCheckpoint();
+            literal = context.MoveNext() ? context.Token as Numeric : null;
+            context.RestoreCheckpoint(checkpoint);
+        }
+        var value = Expression.Parse(context);
+        return (value, literal is not null && literal.EndIndex == context.PreviousTokenEnd && IsDigits(literal.Source) ? sign + literal.Source.ToString() : null);
+    }
+
+    private static bool IsDigits(ReadOnlySpan<char> text) => !text.IsEmpty && !text.ContainsAnyExceptInRange('0', '9');
+
+    /// <summary>
+    /// Real's checks of a <c>TABLESAMPLE</c> size or <c>REPEATABLE</c> seed,
+    /// made as the statement compiles to run (probed 2026-10-21 against SQL
+    /// Server 2025). A name binds against nothing, so even the sampled
+    /// table's own column is Msg 207, and a variable is Msg 497. A percentage
+    /// converts to <c>float</c> — an operand that can't is the ordinary Msg
+    /// 206 / 257 — and one that doesn't fold to a non-NULL value, a subquery
+    /// or <c>RAND()</c> or <c>'abc'</c> or <c>1 / 0</c>, is Msg 482; outside
+    /// 0 – 100 it is Msg 476. A row count or seed must be of an integer type
+    /// or a bare integer literal, Msg 477 state 0 otherwise or for a NULL and
+    /// state 1 for one that doesn't fold to a <c>bigint</c> (<c>@@SPID</c>,
+    /// <c>1 / 0</c>, a literal past <c>bigint</c>), and below 1 is Msg 479.
+    /// </summary>
+    private static void CheckTableSampleValue(ParserContext context, (Expression Value, string? IntegerLiteral) written, bool rows, string table)
+    {
+        var (value, integerLiteral) = written;
+        var batch = context.Batch;
+        var recordedBefore = batch.BindErrors?.Count ?? 0;
+        var type = value.GetSqlType(batch, static name => throw SimulatedSqlException.UnboundColumnReference(name));
+        // A name the report recorded leaves the value error-typed, which no
+        // check refuses.
+        if (batch.BindErrors is { } report && report.Count > recordedBefore)
+            return;
+        var readsVariable = false;
+        value.Walk((node, _) =>
+        {
+            readsVariable |= node is Expressions.VariableReference;
+            return !readsVariable;
+        });
+        if (readsVariable)
+            throw SimulatedSqlException.TableSampleVariable();
+
+        if (!rows)
+        {
+            if (SqlType.PairError(TypePairOperation.Assign, type, SqlType.Float, "") is { } clash)
+                throw clash;
+            if (!value.IsWrittenConstant || FoldTableSampleValue(batch, value) is not { IsNull: false } folded)
+                throw SimulatedSqlException.TableSampleNotConstant();
+            double percent;
+            try
+            {
+                percent = folded.CoerceTo(SqlType.Float).AsDouble;
+            }
+            catch (SimulatedSqlException)
+            {
+                throw SimulatedSqlException.TableSampleNotConstant();
+            }
+            if (percent is < 0 or > 100 || double.IsNegative(percent))
+                throw SimulatedSqlException.TableSamplePercentOutOfRange(percent, table);
+            return;
+        }
+
+        long count;
+        if (integerLiteral is not null)
+        {
+            count = long.TryParse(integerLiteral, System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture, out var parsed)
+                ? parsed
+                : throw SimulatedSqlException.TableSampleValueNotInteger(table, 1);
+        }
+        else
+        {
+            if (type is not { Category: SqlTypeCategory.Integer } or BitSqlType)
+                throw SimulatedSqlException.TableSampleValueNotInteger(table, 0);
+            if (!value.IsWrittenConstant || FoldTableSampleValue(batch, value) is not { } folded)
+                throw SimulatedSqlException.TableSampleValueNotInteger(table, 1);
+            count = folded.IsNull ? throw SimulatedSqlException.TableSampleValueNotInteger(table, 0) : folded.CoerceTo(SqlType.BigInt).AsInt64;
+        }
+        if (count < 1)
+            throw SimulatedSqlException.TableSampleValueNotPositive(count, table);
+    }
+
+    /// <summary>A written constant's value, null where evaluating it raises.</summary>
+    private static SqlValue? FoldTableSampleValue(BatchContext batch, Expression value)
+    {
+        try
+        {
+            // A written constant reaches no column.
+            return value.Run(new RuntimeContext(static _ => throw new NotSupportedException(), batch));
+        }
+        catch (SimulatedSqlException)
+        {
+            return null;
         }
     }
 }

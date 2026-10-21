@@ -228,6 +228,14 @@ public sealed class StatementBoundaryTests
     public void SelectFollowedByAComma_RaisesMsg102AtTheComma(string sql)
         => new Simulation().AssertSqlError(sql, 102, "Incorrect syntax near ','.");
 
+    /// <summary>A select list's comma with no element before it is Msg 102 at itself (probed 2026-10-21 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("select 1, , 2")]
+    [DataRow("select 1 a, , 2")]
+    [DataRow("select , 1")]
+    public void ASelectListCommaWithNoElement_RaisesMsg102AtTheComma(string sql)
+        => new Simulation().AssertSqlError(sql, 102, "Incorrect syntax near ','.");
+
     [TestMethod]
     [DataRow("select 1 where exists (select 1) = 1", "=")]
     [DataRow("select 1 where 'a' like 'a' = 1", "=")]

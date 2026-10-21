@@ -878,6 +878,14 @@ partial class SimulatedSqlException
         new($"The number '{literal}' is out of the range for numeric representation (maximum precision 38).", 1007, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 168: a float literal past <c>float</c>'s range,
+    /// named by its written text without a sign. Class 15 — raised while
+    /// reading the literal.
+    /// </summary>
+    internal static SimulatedSqlException FloatLiteralOutOfRange(string literal) =>
+        new($"The floating point value '{literal}' is out of the range of computer representation (8 bytes).", 168, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 9812: the offset passed to SWITCHOFFSET /
     /// TODATETIMEOFFSET falls outside the legal ±14:00 range. The builtin
     /// function name appears lowercase in the message.

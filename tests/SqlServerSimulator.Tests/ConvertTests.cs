@@ -856,6 +856,30 @@ public sealed class ConvertTests
         AreEqual("Warning: the floating point value '5e-324' is too small. It will be interpreted as 0.", messages.Single());
     }
 
+    /// <summary>A float literal whose value parses to 0 outright warns too, where a zero mantissa doesn't (probed 2026-10-21 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("select 1e-400", "1e-400")]
+    [DataRow("select 0e400, 1.0e-400", "1.0e-400")]
+    public void AFloatLiteralPastTheSmallestDouble_IsZeroWithAWarning(string sql, string literal)
+    {
+        var sim = new Simulation();
+        using var connection = (SimulatedDbConnection)sim.CreateOpenConnection();
+        var messages = new List<string>();
+        connection.InfoMessage += (_, e) => messages.Add(e.Message);
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        AreEqual(0.0, command.ExecuteScalar());
+        AreEqual($"Warning: the floating point value '{literal}' is too small. It will be interpreted as 0.", messages.Single());
+    }
+
+    /// <summary>A float literal past float's range is Msg 168 as the batch compiles, named without its sign (probed 2026-10-21 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("select 1e400", "1e400")]
+    [DataRow("print 'ran'; select -1E+400", "1E+400")]
+    [DataRow("if 1 = 0 select 1.8e308", "1.8e308")]
+    public void AFloatLiteralPastFloatsRange_RaisesMsg168(string sql, string literal)
+        => new Simulation().AssertSqlError(sql, 168, $"The floating point value '{literal}' is out of the range of computer representation (8 bytes).");
+
     /// <summary>
     /// The ISO 8601 styles drop a fraction that is all zeros and keep every
     /// digit of one that isn't.

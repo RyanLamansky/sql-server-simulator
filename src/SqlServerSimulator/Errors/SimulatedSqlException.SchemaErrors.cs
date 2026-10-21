@@ -3685,6 +3685,31 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException TableSampleInModuleDefinition() =>
         new("The TABLESAMPLE clause cannot be used in a view definition or inline table function definition.", 478, 16, 0);
 
+    /// <summary>Mimics SQL Server error 476: a <c>TABLESAMPLE</c> percentage outside 0 – 100, shown to six decimals.</summary>
+    internal static SimulatedSqlException TableSamplePercentOutOfRange(double percent, string table) =>
+        new(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"Invalid PERCENT tablesample size \"{percent:F6}\" for table \"{table}\". The PERCENT tablesample size must be between 0 and 100."), 476, 15, 0);
+
+    /// <summary>
+    /// Mimics SQL Server error 477: a <c>TABLESAMPLE … ROWS</c> count or
+    /// <c>REPEATABLE</c> seed that isn't an integer — state 0 for a value not
+    /// of an integer type or NULL, state 1 for one that doesn't fold to a
+    /// <c>bigint</c>.
+    /// </summary>
+    internal static SimulatedSqlException TableSampleValueNotInteger(string table, byte state) =>
+        new($"Invalid ROWS value or REPEATABLE seed in the TABLESAMPLE clause for table \"{table}\". The value or seed must be an integer.", 477, 15, state);
+
+    /// <summary>Mimics SQL Server error 479: a <c>TABLESAMPLE … ROWS</c> count or <c>REPEATABLE</c> seed below 1.</summary>
+    internal static SimulatedSqlException TableSampleValueNotPositive(long value, string table) =>
+        new($"Invalid ROWS value or REPEATABLE seed \"{value}\" in the TABLESAMPLE clause for table \"{table}\". The value or seed must be greater than 0.", 479, 15, 0);
+
+    /// <summary>Mimics SQL Server error 482: a <c>TABLESAMPLE</c> percentage that doesn't fold to a non-NULL <c>float</c>.</summary>
+    internal static SimulatedSqlException TableSampleNotConstant() =>
+        new("Non-constant or invalid expression is in the TABLESAMPLE or the REPEATABLE clause.", 482, 15, 2);
+
+    /// <summary>Mimics SQL Server error 497: a variable in a <c>TABLESAMPLE</c> or <c>REPEATABLE</c> clause.</summary>
+    internal static SimulatedSqlException TableSampleVariable() =>
+        new("Variables are not allowed in the TABLESAMPLE or REPEATABLE clauses.", 497, 15, 1);
+
     /// <summary>
     /// Mimics SQL Server error 1902 for a view: a second clustered index
     /// (probed 2026-10-04 against SQL Server 2025).

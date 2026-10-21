@@ -375,6 +375,7 @@ A `DROP` of a kind no statement here creates (`UnbuiltDropKinds`) is answered in
 - **A `(` after a `DELETE` target** that holds no query is Msg 102 at the `(`, state 31, on real; here it is Msg 102 at the token inside it.
 - **A delimited one-part call as an `sp_executesql` argument** (`EXEC sp_executesql N'SELECT 1', N'@p int', [abs](1)`) is Msg 102 at the name here, where real takes the name as the argument and fails at the `1` of the next statement's `(1)`.
 - **Syntax-error recovery past a `(WITH …)` statement** misses the Msg 422 real's restart at the `WITH` reports for a common table expression nothing reads.
+- **A literal real's lexer refuses** — a float past `float`'s range (Msg 168), a number past 38 digits (Msg 1007) — is the batch's one error here, where real's lexer reads on past it and reports every such literal in the batch, plus the first syntax error, in source order: `SELECT 1e400, 1e500` is two Msg 168s and `SELECT FROM 1e400` a Msg 156 then a Msg 168 (probed 2026-10-21 against SQL Server 2025).
 - **Multi-statement-TVF bodies treat a `SET QUOTED_IDENTIFIER` as top-level** rather than rejecting it (real SQL Server disallows `SET QUOTED_IDENTIFIER` inside a function body).
 
 ## Expression depth limits (Msg 8631 / Msg 191 / Msg 125)

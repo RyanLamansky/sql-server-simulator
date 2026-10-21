@@ -435,6 +435,9 @@ A frame written in the *refinement* rather than inherited stays on the inline Ms
 ## `TABLESAMPLE`
 - `TABLESAMPLE [SYSTEM] (n PERCENT | n ROWS) [REPEATABLE (seed)]` on a FROM source parses and is **discarded** — the query returns every row.
 - SQL Server's sample is nondeterministic (any subset is a valid wire result), so returning all rows is a documented deterministic approximation; the win is accepting the syntax.
+  The one sample real draws deterministically is `0 PERCENT`, which returns no rows there and every row here.
+- The values are checked as the statement compiles to run, so an untaken `IF` branch raises none, and each check's refusal reports ahead of the statement's other binder errors (probed 2026-10-21 against SQL Server 2025; `Selection.CheckTableSampleValue` carries the rules).
+  A size is any constant expression — `5 + 5`, `'10'` and `ABS(-5)` included — but a percentage converts to `float` and a row count or seed must be of an integer type or a bare integer literal, which is how `2147483648 ROWS` passes where `CAST(5 AS decimal(5, 0)) ROWS` doesn't.
 
 ## ORDER BY term resolution
 

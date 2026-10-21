@@ -2328,7 +2328,10 @@ internal sealed partial class Selection
                     throw SimulatedSqlException.SyntaxErrorNearKeyword(keyword);
 
                 case Operator { Character: ',' }:
-                    if (expressions.Count == 0)
+                    // A comma with no element before it — the first, or a
+                    // second in a row — is Msg 102 at itself (probed
+                    // 2026-10-21 against SQL Server 2025: `SELECT 1, , 2`).
+                    if (expressions.Count == 0 || elementExpected)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     // Reached when a comma follows an aliased element, whose
                     // alias arm re-entered this switch. Still expecting one.
