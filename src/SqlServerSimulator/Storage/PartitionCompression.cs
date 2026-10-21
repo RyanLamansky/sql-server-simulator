@@ -55,7 +55,7 @@ internal static class PartitionCompression
                 for (var number = low; number <= high; number++)
                 {
                     if (listed[number - 1])
-                        throw xml ? SimulatedSqlException.XmlCompressionSpecifiedTwice(state: 2) : SimulatedSqlException.DataCompressionSpecifiedTwice();
+                        throw xml ? SimulatedSqlException.XmlCompressionSpecifiedTwice(state: 2) : SimulatedSqlException.DataCompressionSpecifiedTwice(state: 2);
                     listed[number - 1] = true;
                     result[(int)number - 1] = clause.Level;
                 }

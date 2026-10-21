@@ -2690,7 +2690,7 @@ partial class Simulation
                 onPartitions = true;
                 if (context.GetNextRequired() is not Operator { Character: '(' })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
-                var ranges = ReadPartitionRanges(context);
+                var ranges = ReadPartitionRanges(context, "ALTER TABLE");
                 if (writtenLevel is not null)
                 {
                     // Named for the whole table and for partitions is Msg 7711

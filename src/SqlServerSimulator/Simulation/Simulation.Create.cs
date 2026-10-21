@@ -809,7 +809,7 @@ partial class Simulation
                         : level.Span.Equals("PAGE", StringComparison.OrdinalIgnoreCase) ? (byte)2
                         : (byte)0;
                     if (FollowedByOnPartitions(context))
-                        (compression.Partitions ??= []).Add(new PartitionCompressionClause(tableLevel, ReadOnPartitionsList(context)));
+                        (compression.Partitions ??= []).Add(new PartitionCompressionClause(tableLevel, ReadOnPartitionsList(context, "CREATE TABLE")));
                     else
                         compression.Data = tableLevel;
                     dataCompression = true;
@@ -825,7 +825,7 @@ partial class Simulation
                     if (compression.Xml is not null || (!xmlOnPartitions && compression.XmlPartitions is not null))
                         throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.XmlCompressionSpecifiedTwice(state: 1), state: 0);
                     if (xmlOnPartitions)
-                        (compression.XmlPartitions ??= []).Add(new PartitionCompressionClause(xmlLevel, ReadOnPartitionsList(context)));
+                        (compression.XmlPartitions ??= []).Add(new PartitionCompressionClause(xmlLevel, ReadOnPartitionsList(context, "CREATE TABLE")));
                     else
                         compression.Xml = xmlLevel == 1;
                     break;
@@ -1457,7 +1457,7 @@ partial class Simulation
                                 throw XmlCompressionTwice(statement);
                             }
                             if (xmlOnPartitions)
-                                (xmlPartitionCompressions ??= []).Add(new PartitionCompressionClause(on ? (byte)1 : (byte)0, ReadOnPartitionsList(context)));
+                                (xmlPartitionCompressions ??= []).Add(new PartitionCompressionClause(on ? (byte)1 : (byte)0, ReadOnPartitionsList(context, PartitionVariablesRefusedIn(statement))));
                             else
                                 xmlCompression = on;
                             break;
@@ -1533,7 +1533,7 @@ partial class Simulation
                             throw SimulatedSqlException.DataCompressionSpecifiedTwice();
                         }
                         if (onPartitions)
-                            (partitionCompressions ??= []).Add(new PartitionCompressionClause(compressionLevel, ReadOnPartitionsList(context)));
+                            (partitionCompressions ??= []).Add(new PartitionCompressionClause(compressionLevel, ReadOnPartitionsList(context, PartitionVariablesRefusedIn(statement))));
                         else
                             dataCompression = compressionLevel;
                         compressionOnPartitions |= onPartitions;
@@ -1958,32 +1958,36 @@ partial class Simulation
     /// <summary>
     /// Reads the <c>ON PARTITIONS ( n [ TO m ] [, …] )</c> list after a
     /// compression level, the cursor on the level and left on the list's
-    /// closing parenthesis.
+    /// closing parenthesis, a variable in it refused in
+    /// <paramref name="variablesRefusedIn"/>'s statement.
     /// </summary>
-    private static List<(long Low, long High)> ReadOnPartitionsList(ParserContext context)
+    private static List<(long Low, long High)> ReadOnPartitionsList(ParserContext context, string? variablesRefusedIn)
     {
         context.MoveNextRequired();
         context.MoveNextRequired();
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        return ReadPartitionRanges(context);
+        return ReadPartitionRanges(context, variablesRefusedIn);
     }
 
     /// <summary>
     /// Reads a parenthesized list of partition numbers and <c>n TO m</c>
-    /// ranges, the cursor on its opening parenthesis and left on its closing one.
+    /// ranges, the cursor on its opening parenthesis and left on its closing
+    /// one; <paramref name="variablesRefusedIn"/> names the statement that
+    /// takes no variable there (see <see cref="ReadListedPartitionNumber"/>).
     /// </summary>
-    internal static List<(long Low, long High)> ReadPartitionRanges(ParserContext context)
+    internal static List<(long Low, long High)> ReadPartitionRanges(ParserContext context, string? variablesRefusedIn)
     {
         var ranges = new List<(long Low, long High)>();
         while (true)
         {
-            var low = context.GetNextRequired() is Numeric { Value: { IsNull: false } lowValue } ? lowValue.CoerceTo(SqlType.BigInt).AsInt64 : throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+            var low = ReadListedPartitionNumber(context, variablesRefusedIn);
             var high = low;
-            if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.To })
+            if (context.Token is ReservedKeyword { Keyword: Keyword.To })
             {
-                high = context.GetNextRequired() is Numeric { Value: { IsNull: false } highValue } ? highValue.CoerceTo(SqlType.BigInt).AsInt64 : throw SimulatedSqlException.SyntaxErrorNear(context);
                 context.MoveNextRequired();
+                high = ReadListedPartitionNumber(context, variablesRefusedIn);
             }
             ranges.Add((low, high));
             if (context.Token is Operator { Character: ')' })
@@ -1992,6 +1996,39 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
     }
+
+    /// <summary>
+    /// One number of a <c>PARTITIONS</c> list, the cursor on it and left past
+    /// it: a constant expression, converted to an integer as the statement
+    /// runs and NULL read as 0 (probed 2026-10-21 against SQL Server 2025:
+    /// <c>1 + 1</c>, <c>'2'</c> and <c>0x02</c> name partition 2). A name is
+    /// Msg 128 and a subquery Msg 1046, and a variable, which <c>ALTER
+    /// INDEX</c> and <c>TRUNCATE TABLE</c> take, is Msg 112 in
+    /// <paramref name="variablesRefusedIn"/>'s statement.
+    /// </summary>
+    private static long ReadListedPartitionNumber(ParserContext context, string? variablesRefusedIn)
+    {
+        if (context.Token is Operator { Character: ')' or ',' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        Expression number;
+        using (ParserScope.Enter(ref context.VariablesRefusedIn, variablesRefusedIn ?? context.VariablesRefusedIn))
+        using (context.EnterScalarOnlyOperand())
+        {
+            number = Expression.Parse(context);
+            if (context.ScalarOnlyColumnReference is not null)
+                throw Expression.ScalarOnlyOperandError(context);
+        }
+        return context.Batch.IsSkipping ? 1 : EvaluatePartitionNumber(context.Batch, number);
+    }
+
+    /// <summary>The statement a variable in an index option's <c>PARTITIONS</c> list is refused in, null where one is taken.</summary>
+    private static string? PartitionVariablesRefusedIn(IndexOptionStatement statement) => statement switch
+    {
+        IndexOptionStatement.AlterTable => "ALTER TABLE",
+        IndexOptionStatement.CreateIndex or IndexOptionStatement.CreateColumnstoreIndex => "CREATE INDEX",
+        IndexOptionStatement.CreateTable => "CREATE TABLE",
+        _ => null,
+    };
 
     private static bool FollowedByOnPartitions(ParserContext context)
     {

@@ -141,7 +141,8 @@ Wherever `ALTER INDEX`, `ALTER TABLE … REBUILD` and `SWITCH` take a partition 
 
 A partitioned rowset — the heap, an index, a key constraint — keeps a `DATA_COMPRESSION` per partition once its partitions differ (`PartitionCompression`), which `sys.partitions` reports and `SWITCH` compares (all probed 2026-10-05 against SQL Server 2025):
 
-- `CREATE TABLE … ON scheme(c) WITH (DATA_COMPRESSION = level ON PARTITIONS (n | n TO m, …), …)` and `CREATE INDEX`'s equivalent set the listed partitions, the rest `NONE`; a number past the partitions is Msg 7722 state 2 naming the table or index, a partition listed twice or a whole-object level beside a list Msg 7711.
+- `CREATE TABLE … ON scheme(c) WITH (DATA_COMPRESSION = level ON PARTITIONS (n | n TO m, …), …)` and `CREATE INDEX`'s equivalent set the listed partitions, the rest `NONE`; a number past the partitions is Msg 7722 state 2 naming the table or index, a partition listed twice Msg 7711 state 2 and a whole-object level beside a list state 1.
+  Each number is a constant expression converted to an integer (`1 + 1`, `'2'`, `0x02`), a name in it Msg 128 and a subquery Msg 1046; a variable is Msg 112 in `CREATE TABLE`, `CREATE INDEX` and `ALTER TABLE`, and taken by `ALTER INDEX` and `TRUNCATE TABLE` (probed 2026-10-21 against SQL Server 2025).
   On an unpartitioned table it is Msg 7729 in the create table wording, or for a clustered key the create index wording followed by Msg 1750.
 - A rebuild of one partition sets its level: the whole-object one, or that of a clause listing it — `ON PARTITIONS` is legal beside `PARTITION = n` — else nothing.
   A rebuild of every partition sets the level of all, or of those its lists name, which need `PARTITION = ALL` written (Msg 10737, ahead of an unpartitioned table's Msg 7729, for `ALTER TABLE` as for `ALTER INDEX`).
@@ -172,7 +173,6 @@ The loader creates the functions and schemes and places tables, indexes and key 
 
 ## Not modeled yet
 
-- **A partition number list's entries are expressions on real** — `DATA_COMPRESSION = PAGE ON PARTITIONS (a)` is Msg 128 for a column name, Msg 137 for an undeclared variable, and `(1 + 1)`, `(-1)` and `('x')` parse and meet Msg 7729 on an unpartitioned index — where the simulator reads integer literals only and is Msg 102 at anything else (probed 2026-10-11 against SQL Server 2025).
 - **A `FILESTREAM` column** is a syntax error here, where real raises Msg 5508 for a string `(max)` type, Msg 1969 for `varbinary(max)` with no FILESTREAM filegroup to default to, Msg 1921 state 3 for a `FILESTREAM_ON` naming no filegroup and Msg 1724 for one naming a filegroup that isn't a FILESTREAM one (probed 2026-09-30); `FILESTREAM_ON` on a table without one is Msg 1716.
 - **An indexed view's index on a scheme** reports `data_space_id` 1 and no `sys.partitions` rows at all, where real reports the scheme and one row per partition counting the view's rows (probed 2026-09-30): the simulator never materializes the view, so it has no row counts to place — storage the simulator doesn't keep, not chased.
 - **Partition-level lock escalation** — `LOCK_ESCALATION = AUTO` still escalates to the table; which lock real escalates to rides its storage engine's per-partition lock counts, not chased.

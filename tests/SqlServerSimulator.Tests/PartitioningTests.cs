@@ -1387,4 +1387,39 @@ public sealed class PartitioningTests
         sim.ExecuteBatches("drop view dbo.vt", "create view dbo.vs with schemabinding as select a, b from dbo.s", "create unique clustered index cx on dbo.vs (a)");
         sim.AssertSqlError("alter table t switch partition 2 to s", 11402, "ALTER TABLE SWITCH statement failed. Target table 'simulated.dbo.s' is referenced by 1 indexed view(s), but source table 'simulated.dbo.t' is only referenced by 0 indexed view(s). Every indexed view on the target table must have at least one matching indexed view on the source table.");
     }
+
+    [TestMethod]
+    [DataRow("1 + 1", 2)]
+    [DataRow("'2'", 2)]
+    [DataRow("0x02", 2)]
+    [DataRow("cast(2 as bigint)", 2)]
+    public void APartitionsListEntry_IsAConstantExpression(string entry, int partition)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(LeftFunctionAndScheme, $"create table t (a int not null) on ps(a); alter table t rebuild partition = all with (data_compression = page on partitions ({entry}))");
+        AreEqual(partition, sim.ExecuteScalar("select partition_number from sys.partitions where object_id = object_id('t') and data_compression = 2"));
+    }
+
+    [TestMethod]
+    [DataRow("alter table t rebuild partition = all with (data_compression = page on partitions (a))", 128, 1)]
+    [DataRow("alter table t rebuild partition = all with (data_compression = page on partitions ((select 1)))", 1046, 1)]
+    [DataRow("declare @v int = 2; alter table t rebuild partition = all with (data_compression = page on partitions (@v))", 112, 4)]
+    [DataRow("alter table t rebuild partition = all with (data_compression = page on partitions (null))", 7722, 2)]
+    [DataRow("alter table t rebuild partition = all with (data_compression = page on partitions (1, 1))", 7711, 2)]
+    [DataRow("truncate table t with (partitions (a))", 128, 1)]
+    public void APartitionsListEntry_RefusesAsRealDoes(string statement, int number, int state)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(LeftFunctionAndScheme, "create table t (a int not null) on ps(a)");
+        AreEqual((byte)state, sim.AssertSqlError(statement, number).State);
+    }
+
+    [TestMethod]
+    public void TruncateAndAlterIndex_TakeAVariableInTheList()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(LeftFunctionAndScheme, "create table t (a int not null, b int) on ps(a); create index ix on t (b) on ps(a); insert t values (1, 1), (15, 2)");
+        _ = sim.ExecuteNonQuery("declare @v int = 1; truncate table t with (partitions (@v)); alter index ix on t rebuild partition = all with (data_compression = row on partitions (@v))");
+        AreEqual(1, sim.ExecuteScalar("select count(*) from t"));
+    }
 }

@@ -182,6 +182,14 @@ partial class Simulation
             : (int)given;
     }
 
+    /// <summary>An expression with no column scope, a name in it Msg 128 and a subquery Msg 1046 (probed 2026-10-21 against SQL Server 2025).</summary>
+    private static Expression ParseScalarOnly(ParserContext context)
+    {
+        using var scalarOnly = context.EnterScalarOnlyOperand();
+        var expression = Expression.Parse(context);
+        return context.ScalarOnlyColumnReference is null ? expression : throw Expression.ScalarOnlyOperandError(context);
+    }
+
     /// <summary>
     /// A <c>TRUNCATE … WITH (PARTITIONS …)</c> bound's value as an integer, 0
     /// for NULL or a value that won't convert (where real reports a
@@ -516,12 +524,12 @@ partial class Simulation
             context.MoveNextRequired();
             if (context.Token is Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            var low = Expression.Parse(context);
+            var low = ParseScalarOnly(context);
             Expression? high = null;
             if (context.Token is ReservedKeyword { Keyword: Keyword.To })
             {
                 context.MoveNextRequired();
-                high = Expression.Parse(context);
+                high = ParseScalarOnly(context);
             }
             ranges.Add((low, high));
         } while (context.Token is Operator { Character: ',' });

@@ -667,7 +667,7 @@ partial class Simulation
                 {
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 }
-                _ = ReadPartitionRanges(context);
+                _ = ReadPartitionRanges(context, "CREATE INDEX");
                 context.MoveNextRequired();
             }
             else if (context.Token is StringToken { Span: var unit }

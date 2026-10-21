@@ -98,11 +98,13 @@ partial class SimulatedSqlException
         new("This is not a valid data compression setting for this object. It can only be used with columnstore indexes. Please choose NONE, PAGE, or ROW compression.", 10798, level, 1);
 
     /// <summary>
-    /// Mimics SQL Server's Msg 7711 state 1: an index's <c>DATA_COMPRESSION</c>
-    /// written twice for the whole object (probed 2026-10-05 against SQL Server 2025).
+    /// Mimics SQL Server's Msg 7711: an index's <c>DATA_COMPRESSION</c>
+    /// written twice for the whole object (state 1, probed 2026-10-05 against
+    /// SQL Server 2025), or a partition its <c>PARTITIONS</c> lists name twice
+    /// (state 2, probed 2026-10-21).
     /// </summary>
-    internal static SimulatedSqlException DataCompressionSpecifiedTwice() =>
-        new("The DATA_COMPRESSION option was specified more than once for the table, or for at least one of its partitions if the table is partitioned.", 7711, 16, 1);
+    internal static SimulatedSqlException DataCompressionSpecifiedTwice(byte state = 1) =>
+        new("The DATA_COMPRESSION option was specified more than once for the table, or for at least one of its partitions if the table is partitioned.", 7711, 16, state);
 
     /// <summary>
     /// Msg 7741: <c>XML_COMPRESSION</c> named for the whole object and for
