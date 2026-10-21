@@ -253,4 +253,25 @@ public sealed class DdlEventCoverageTests
         _ = sim.ExecuteNonQuery("create user u without login");
         sim.AssertSqlError(statement, 33234, "The parameter DEFAULT_LANGUAGE cannot be provided for users that cannot authenticate in a database.");
     }
+
+    [TestMethod]
+    [DataRow("alter table t add d int, e int null", "<Create><Columns><Name>d</Name><Name>e</Name></Columns></Create>")]
+    [DataRow("alter table t add h int, constraint zx check (h > 0)", "<Create><Columns><Name>h</Name></Columns><Constraints><Name>zx</Name></Constraints></Create>")]
+    [DataRow("alter table t add j int not null constraint zuj unique, k int constraint zck check (k > 0)", "<Create><Columns><Name>j</Name><Name>k</Name></Columns><Constraints><Name>zuj</Name><Name>zck</Name></Constraints></Create>")]
+    [DataRow("alter table t alter column b bigint", "<Alter><Columns><Name>b</Name></Columns></Alter>")]
+    [DataRow("alter table t drop constraint ck, column b", "<Drop><Columns><Name>b</Name></Columns><Constraints><Name>ck</Name></Constraints></Drop>")]
+    [DataRow("alter table t drop constraint df, ck", "<Drop><Constraints><Name>df</Name><Name>ck</Name></Constraints></Drop>")]
+    [DataRow("alter table t nocheck constraint all", "<Disable><Constraints all=\"true\"/></Disable>")]
+    [DataRow("alter table t with check check constraint ck", "<Enable><Constraints><Name>ck</Name></Constraints></Enable>")]
+    [DataRow("alter table t disable trigger tr", "<Disable><Triggers><Name>tr</Name></Triggers></Disable>")]
+    [DataRow("alter table t enable trigger all", "<Enable><Triggers all=\"true\"/></Enable>")]
+    [DataRow("alter table t rebuild", "")]
+    public void AlterTable_ListsItsActions(string statement, string actions)
+    {
+        var sim = Logging("create table t (a int not null, b int, c int constraint df default 1, constraint ck check (a > 0))");
+        sim.ExecuteBatches("create trigger tr on t for insert as select 1", statement);
+        var document = (string)sim.ExecuteScalar("select s from ev where s like '%ALTER_TABLE%'")!;
+        AreEqual(actions.Length == 0 ? "" : "<AlterTableActionList>" + actions + "</AlterTableActionList>",
+            document[(document.IndexOf("</ObjectType>", StringComparison.Ordinal) + 13)..document.IndexOf("<TSQLCommand>", StringComparison.Ordinal)]);
+    }
 }

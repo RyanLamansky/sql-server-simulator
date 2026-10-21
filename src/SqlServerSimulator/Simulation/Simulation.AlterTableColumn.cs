@@ -726,6 +726,7 @@ partial class Simulation
             throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
         if (table.IsHistoryTable)
             throw SimulatedSqlException.HistoryTableColumnChange("DROP", null, QualifyTableName(table, context.Batch.DatabaseFor(table)));
+        context.AlterTableActions?.DroppedColumns.AddRange(names);
 
         var toDropOrdinals = new List<int>();
         foreach (var name in names)
@@ -980,6 +981,7 @@ partial class Simulation
         if (context.GetNextRequired() is not Name nameToken || nameToken is UnquotedString { Value: ['$', ..] })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var columnName = nameToken.Value;
+        context.AlterTableActions?.AlteredColumns.Add(columnName);
 
         // `ALTER COLUMN col ADD | DROP <attribute>` follows the column name
         // directly, without a type keyword.

@@ -2084,20 +2084,68 @@ partial class Simulation
         var keyIndexes = !context.Batch.IsSkipping && ExtendedEvents.XeObjectEvents.AnyTaken(context.Simulation) && context.Batch.TryResolveTable(tableName, out var observed) && !observed.IsTableVariable
             ? ExtendedEvents.XeObjectEvents.KeyIndexIds(observed)
             : null;
-        var handled = TryParseAlterTableAction(context, tableName, withCheckExplicit);
-        // Every accepted shape raises one ALTER_TABLE event (probe-confirmed:
-        // ADD COLUMN and ADD CONSTRAINT both report ALTER_TABLE, differing only
-        // in the AlterTableActionList detail the simulator doesn't emit).
+        var actions = RaisesDdlEvents(context) ? new AlterTableActions() : null;
+        HashSet<string>? beforeColumns = null;
+        HashSet<(int Id, string Name)>? beforeConstraints = null;
+        if (actions is not null && context.Batch.TryResolveTable(tableName, out var original))
+            (beforeColumns, beforeConstraints) = TableParts(original);
+        bool handled;
+        using (ParserScope.Enter(ref context.AlterTableActions, actions))
+            handled = TryParseAlterTableAction(context, tableName, withCheckExplicit);
+        // Every accepted shape raises one ALTER_TABLE event, its action list
+        // naming what it did.
         if (handled)
         {
-            if (keyIndexes is not null && context.Batch.TryResolveTable(tableName, out var altered))
+            var resolved = context.Batch.TryResolveTable(tableName, out var altered);
+            if (keyIndexes is not null && resolved)
             {
-                ExtendedEvents.XeObjectEvents.NoteKeyIndexes(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, altered, keyIndexes);
-                ExtendedEvents.XeObjectEvents.NoteTable(context.Batch, ExtendedEvents.XeEventKind.ObjectAltered, altered);
+                ExtendedEvents.XeObjectEvents.NoteKeyIndexes(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, altered!, keyIndexes);
+                ExtendedEvents.XeObjectEvents.NoteTable(context.Batch, ExtendedEvents.XeEventKind.ObjectAltered, altered!);
             }
-            RecordDdlEvent(context, "ALTER_TABLE", EventSchemaName(tableName), tableName.Leaf, "TABLE");
+            if (actions is not null && beforeColumns is not null && beforeConstraints is not null && resolved)
+            {
+                // What the statement created is what the table holds now and
+                // didn't before: columns in table order, constraints in the
+                // order they were made.
+                foreach (var column in altered!.Columns)
+                {
+                    if (!beforeColumns.Contains(column.Name))
+                        actions.CreatedColumns.Add(column.Name);
+                }
+                foreach (var (id, name) in TableParts(altered).Constraints.OrderBy(static constraint => constraint.Id))
+                {
+                    if (!beforeConstraints.Contains((id, name)))
+                        actions.CreatedConstraints.Add(name);
+                }
+            }
+            RecordDdlEvent(context, "ALTER_TABLE", EventSchemaName(tableName), tableName.Leaf, "TABLE",
+                trailingElements: actions is null ? null : RenderAlterTableActions(actions));
         }
         return handled;
+    }
+
+    /// <summary>
+    /// A table's column names and its constraints' ids and names, to tell
+    /// what an <c>ALTER TABLE</c> made; by name, since altering a column
+    /// replaces it.
+    /// </summary>
+    private static (HashSet<string> Columns, HashSet<(int Id, string Name)> Constraints) TableParts(HeapTable table)
+    {
+        var constraints = new HashSet<(int Id, string Name)>();
+        foreach (var key in table.KeyConstraints)
+            _ = constraints.Add((key.ObjectId, key.Name));
+        foreach (var check in table.CheckConstraints)
+            _ = constraints.Add((check.ObjectId, check.Name));
+        foreach (var foreignKey in table.OutgoingForeignKeys)
+            _ = constraints.Add((foreignKey.ObjectId, foreignKey.Name));
+        foreach (var edge in table.EdgeConstraints)
+            _ = constraints.Add((edge.ObjectId, edge.Name));
+        foreach (var column in table.Columns)
+        {
+            if (column.DefaultConstraint is { } defaultConstraint)
+                _ = constraints.Add((defaultConstraint.ObjectId, defaultConstraint.Name));
+        }
+        return (table.Columns.Select(static column => column.Name).ToHashSet(StringComparer.Ordinal), constraints);
     }
 
     /// <summary>
@@ -2213,6 +2261,12 @@ partial class Simulation
                 if (ReferenceEquals(trigger.Parent, table))
                     tableTriggers.Add(trigger);
             }
+        }
+        if (context.AlterTableActions is { } actions)
+        {
+            actions.Toggle = disable ? "Disable" : "Enable";
+            actions.ToggleTriggers = true;
+            actions.ToggleNames = allTriggers ? null : triggerNames;
         }
         if (allTriggers)
         {

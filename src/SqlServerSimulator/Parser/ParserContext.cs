@@ -155,6 +155,9 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// </summary>
     public bool LaterSetOperationBranch;
 
+    /// <summary>The <c>ALTER TABLE</c> statement being parsed's record of what it does, for its event; null outside one or while skipping.</summary>
+    public AlterTableActions? AlterTableActions;
+
     /// <summary>
     /// The statement a variable reference is refused in with Msg 112 while
     /// its column definitions parse — <c>CREATE TABLE</c> or <c>ALTER

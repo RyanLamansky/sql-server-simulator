@@ -1021,6 +1021,7 @@ partial class Simulation
 
         foreach (var a in planned)
             ApplyDropConstraint(table, a);
+        context.AlterTableActions?.DroppedConstraints.AddRange(names);
         return !columnsFollow || ParseDropColumns(context, tableName);
     }
 
@@ -1081,6 +1082,11 @@ partial class Simulation
 
         if (!context.Batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
+        if (context.AlterTableActions is { } actions)
+        {
+            actions.Toggle = disable ? "Disable" : "Enable";
+            actions.ToggleNames = allMode ? null : names;
+        }
 
         // Two-pass resolve: gather targets first; any miss raises Msg 4917
         // before any mutation (atomicity).

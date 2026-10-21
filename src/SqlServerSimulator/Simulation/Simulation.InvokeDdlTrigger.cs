@@ -411,6 +411,46 @@ partial class Simulation
     internal static string EventSchemaName(MultiPartName name) =>
         name.ImmediateQualifier ?? Database.DefaultSchemaName;
 
+    /// <summary>An <c>ALTER_TABLE</c> event's <c>AlterTableActionList</c>, or null for a statement that lists nothing.</summary>
+    private static string? RenderAlterTableActions(AlterTableActions actions)
+    {
+        var builder = new StringBuilder();
+        Section("Create", actions.CreatedColumns, actions.CreatedConstraints);
+        Section("Alter", actions.AlteredColumns, []);
+        Section("Drop", actions.DroppedColumns, actions.DroppedConstraints);
+        if (actions.Toggle is { } toggle)
+        {
+            var kind = actions.ToggleTriggers ? "Triggers" : "Constraints";
+            _ = builder.Append('<').Append(toggle).Append('>');
+            if (actions.ToggleNames is { } names)
+                Names(kind, names);
+            else
+                _ = builder.Append('<').Append(kind).Append(" all=\"true\"/>");
+            _ = builder.Append("</").Append(toggle).Append('>');
+        }
+        return builder.Length == 0 ? null : "<AlterTableActionList>" + builder + "</AlterTableActionList>";
+
+        void Section(string action, List<string> columns, List<string> constraints)
+        {
+            if (columns.Count == 0 && constraints.Count == 0)
+                return;
+            _ = builder.Append('<').Append(action).Append('>');
+            Names("Columns", columns);
+            Names("Constraints", constraints);
+            _ = builder.Append("</").Append(action).Append('>');
+        }
+
+        void Names(string list, List<string> names)
+        {
+            if (names.Count == 0)
+                return;
+            _ = builder.Append('<').Append(list).Append('>');
+            foreach (var name in names)
+                AppendElement(builder, "Name", name);
+            _ = builder.Append("</").Append(list).Append('>');
+        }
+    }
+
     /// <summary>
     /// The elements a database principal's event carries after
     /// <c>ObjectType</c> (probed 2026-10-21 against SQL Server 2025): a
