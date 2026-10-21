@@ -374,10 +374,15 @@ partial class Simulation
 
         Span<char> kind = stackalloc char[level1Type.Length];
         _ = level1Type.AsSpan().ToUpperInvariant(kind);
+        // An aggregate is a function of its own kind; a logical file name is
+        // a level-1 kind of a filegroup's, refused beneath a schema at state
+        // 6 (probed 2026-10-21 against SQL Server 2025).
         SchemaObject? obj = kind switch
         {
+            "AGGREGATE" => schema.Functions.GetValueOrDefault(level1Name) is { ObjectTypeCode: "AF" } aggregate ? aggregate : null,
             "DEFAULT" => schema.Defaults.GetValueOrDefault(level1Name),
             "FUNCTION" => schema.Functions.GetValueOrDefault(level1Name),
+            "LOGICAL FILE NAME" => throw SimulatedSqlException.InvalidExtendedPropertyLevel(procLabel, state: 6),
             "PROCEDURE" => schema.Procedures.GetValueOrDefault(level1Name),
             "QUEUE" => schema.Queues.GetValueOrDefault(level1Name),
             "RULE" => schema.Rules.GetValueOrDefault(level1Name),

@@ -85,7 +85,3 @@ The rules, which are not the ones the argument names suggest (probed 2026-09-26 
 - Every name above the deepest must be given; the deepest's may be NULL — or the `DEFAULT` keyword, which is NULL — for all of that kind.
 - Anything else lists nothing rather than raising: a NULL name above the deepest, a name or type past it, an unknown level type, a missing target, and the string `'default'`, which is a name like any other.
 - Too few arguments is Msg 313.
-
-## Not modeled yet
-
-- **Level-1 kinds real accepts beyond the modeled ones** (`AGGREGATE`, …) raise Msg 15600 state 5.

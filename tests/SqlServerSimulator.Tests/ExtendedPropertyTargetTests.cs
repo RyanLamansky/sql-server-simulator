@@ -95,6 +95,8 @@ public sealed class ExtendedPropertyTargetTests
     [DataRow("'user', 'dbo'", 15135, 2)]
     [DataRow("'user', 'u', 'table', 't'", 15135, 27)]
     [DataRow("'schema', 'dbo', 'bogus', 'x'", 15600, 5)]
+    [DataRow("'schema', 'dbo', 'logical file name', 'x'", 15600, 6)]
+    [DataRow("'schema', 'dbo', 'aggregate', 'nope'", 15135, 8)]
     [DataRow("'schema', 'dbo', null, 't'", 15600, 2)]
     [DataRow("'schema', 'dbo', 'table', 'nope'", 15135, 8)]
     [DataRow("'schema', 'dbo', 'procedure', 't'", 15135, 9)]
