@@ -35,7 +35,9 @@ partial class Simulation
         if (bare)
             loginLink = name;
         var (defaultSchema, _) = ParsePrincipalWithOptions(context, acceptsName: false, acceptsNullSchema: false, out _, out var defaultLanguage);
-        ConsumeToStatementBoundary(context);
+        // A token past the statement is Msg 102 there (probed 2026-10-21
+        // against SQL Server 2025).
+        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
         context.CurrentDatabase.RejectWriteWhenReadOnly();
@@ -108,10 +110,9 @@ partial class Simulation
     /// Reads the modeled <c>CREATE USER</c> source clauses — <c>{FOR | FROM}
     /// LOGIN login</c> (stores the login link) and <c>WITHOUT LOGIN</c> (stores
     /// the synthetic-SID marker). Every other source form
-    /// (<c>FROM EXTERNAL PROVIDER</c>, <c>FROM CERTIFICATE</c>, …) is left for
-    /// the <see cref="ConsumeToStatementBoundary"/> parse-and-discard tail: the
-    /// cursor is restored to the clause start on any non-match so nothing is
-    /// consumed. Cursor on entry: the first token after the user name.
+    /// (<c>FROM EXTERNAL PROVIDER</c>, <c>FROM CERTIFICATE</c>, …) is left
+    /// unconsumed, the cursor restored to the clause start, for the statement's
+    /// trailing-token check to refuse. Cursor on entry: the first token after the user name.
     /// </summary>
     private static (string? LoginLink, bool WithoutLogin) ParseCreateUserSource(ParserContext context)
     {
@@ -304,8 +305,11 @@ partial class Simulation
             if (context.GetNextRequired() is not Name ownerToken)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             ownerName = ownerToken.Value;
+            context.MoveNextOptional();
         }
-        ConsumeToStatementBoundary(context);
+        // A token past the name or the owner is Msg 102 there (probed
+        // 2026-10-21 against SQL Server 2025).
+        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
         context.CurrentDatabase.RejectWriteWhenReadOnly();
@@ -652,16 +656,4 @@ partial class Simulation
     /// <see cref="TryParseDropUser"/>; the principal dict is shared.
     /// </summary>
     internal static bool TryParseDropRole(ParserContext context) => TryParseDropUser(context, isRole: true);
-
-    /// <summary>
-    /// Consumes tokens through end-of-batch or the next <c>;</c> /
-    /// statement-starting keyword. Used by the parse-and-discard tails
-    /// (FROM LOGIN / WITH PASSWORD / DEFAULT_SCHEMA / etc.) that the
-    /// simulator doesn't model. Leaves the cursor on the boundary token.
-    /// </summary>
-    private static void ConsumeToStatementBoundary(ParserContext context)
-    {
-        while (!IsStatementBoundary(context.Token))
-            context.MoveNextOptional();
-    }
 }

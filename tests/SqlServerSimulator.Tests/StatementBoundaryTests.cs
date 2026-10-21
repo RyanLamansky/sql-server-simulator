@@ -236,4 +236,34 @@ public sealed class StatementBoundaryTests
     [DataRow("select 1 a where 1 = 1 option (recompile) >", ">")]
     public void AnOperatorAfterAQuery_IsASyntaxErrorAtTheOperator(string batch, string near)
         => new Simulation().AssertSqlError(batch, 102, $"Incorrect syntax near '{near}'.");
+
+    [TestMethod]
+    [DataRow("create index zix on zt (b) zzbogus", "zzbogus")]
+    [DataRow("create index zix on zt (b) with (fillfactor zzbogus = 80)", "zzbogus")]
+    [DataRow("create sequence zs as int cycle zzbogus", "zzbogus")]
+    [DataRow("create sequence zs zzbogus as int", "zzbogus")]
+    [DataRow("create type ztt as table (a int) zzbogus", "zzbogus")]
+    [DataRow("alter table zt alter column b varchar(20) not null zzbogus", "zzbogus")]
+    [DataRow("create synonym zsy for dbo.zt zzbogus", "zzbogus")]
+    [DataRow("create role zr authorization dbo zzbogus", "zzbogus")]
+    [DataRow("create role zr dbo", "dbo")]
+    [DataRow("create user zu without login zzbogus", "zzbogus")]
+    [DataRow("create statistics zst on zt (b) with fullscan zzbogus", "zzbogus")]
+    [DataRow("alter index all on zt rebuild zzbogus", "zzbogus")]
+    [DataRow("begin tran zzbogus zx", "zx")]
+    [DataRow("while 1 = 0 begin break end zzbogus", "zzbogus")]
+    [DataRow("while 1 = 0 begin break zzbogus end", "zzbogus")]
+    public void AStrayTokenAfterTheStatement_IsASyntaxErrorAtIt(string statement, string near)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table zt (a int not null primary key, b varchar(10))");
+        sim.AssertSqlError(statement, 102, $"Incorrect syntax near '{near}'.");
+    }
+
+    [TestMethod]
+    [DataRow("create zzbogus procedure zp as select 1")]
+    [DataRow("drop zzbogus index zix on zt")]
+    [DataRow("alter zzbogus index all on zt rebuild")]
+    public void AWordNamingNoObjectType_IsMsg343(string statement)
+        => new Simulation().AssertSqlError(statement, 343, "Unknown object type 'zzbogus' used in a CREATE, DROP, or ALTER statement.");
 }

@@ -542,8 +542,7 @@ partial class Simulation
     /// With the cursor on the token after the login name, extracts the
     /// clear-text password from a <c>WITH PASSWORD = '…'</c> clause and
     /// leaves the cursor on the token after the password literal (the
-    /// caller's <see cref="ConsumeToStatementBoundary"/> discards the option
-    /// tail). Returns null when <paramref name="required"/> is false and the
+    /// caller's <see cref="ConsumeLoginOptions"/> reads the option tail). Returns null when <paramref name="required"/> is false and the
     /// clause is absent (ALTER LOGIN's ENABLE / DISABLE / other-option
     /// forms). Rejects the unmodeled CREATE forms: <c>FROM</c> sources and
     /// <c>PASSWORD = 0x… HASHED</c>.

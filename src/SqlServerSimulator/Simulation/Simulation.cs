@@ -3756,10 +3756,12 @@ public sealed partial class Simulation
 
             case ReservedKeyword { Keyword: Keyword.Break }:
                 ParseBreakStatement(batch);
+                context.RejectTrailingToken();
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Continue }:
                 ParseContinueStatement(batch);
+                context.RejectTrailingToken();
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Return }:
@@ -3919,6 +3921,7 @@ public sealed partial class Simulation
                         case ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction or Keyword.Distributed }:
                             if (TryParseBeginTransaction(context))
                                 rowCount = 0;
+                            context.RejectTrailingToken();
                             break;
                         case UnquotedString { ContextualKeyword: ContextualKeyword.Try }:
                             foreach (var o in ParseTryCatch(batch))

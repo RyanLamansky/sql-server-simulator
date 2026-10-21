@@ -54,11 +54,11 @@ partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Trigger }:
                 return Simulation.TryParseCreateTrigger(context, isAlter: false, createOrAlter: false);
             case ReservedKeyword { Keyword: Keyword.Unique or Keyword.Clustered or Keyword.NonClustered or Keyword.Index }:
-                return Simulation.TryParseCreateIndex(context);
+                return RejectingTrailingToken(context, Simulation.TryParseCreateIndex(context));
             case UnquotedString { Span: var word } when word.Equals("COLUMNSTORE", StringComparison.OrdinalIgnoreCase):
-                return Simulation.TryParseCreateIndex(context);
+                return RejectingTrailingToken(context, Simulation.TryParseCreateIndex(context));
             case UnquotedString { ContextualKeyword: ContextualKeyword.Type }:
-                return TryParseCreateType(context);
+                return RejectingTrailingToken(context, TryParseCreateType(context));
             case UnquotedString { ContextualKeyword: ContextualKeyword.Sequence }:
                 return TryParseCreateSequence(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Partition }:
@@ -102,7 +102,7 @@ partial class Simulation
             case Name securityWord when securityWord.Value.Equals("SECURITY", StringComparison.OrdinalIgnoreCase):
                 return TryParseCreateSecurityPolicy(context);
             case ReservedKeyword { Keyword: Keyword.Statistics }:
-                return Simulation.TryParseCreateStatistics(context);
+                return RejectingTrailingToken(context, Simulation.TryParseCreateStatistics(context));
             case Name assemblyWord when assemblyWord.Value.Equals("ASSEMBLY", StringComparison.OrdinalIgnoreCase):
                 return TryParseCreateAssembly(context);
             case Name aggregateWord when aggregateWord.Value.Equals("AGGREGATE", StringComparison.OrdinalIgnoreCase):
@@ -128,7 +128,7 @@ partial class Simulation
                 context.Batch.CurrentStatement.CreatesTable = true;
                 break;
             default:
-                return false;
+                return RejectUnknownObjectType(context);
         }
 
         context.MoveNextRequired();
@@ -1393,6 +1393,14 @@ partial class Simulation
                     && statement is not (IndexOptionStatement.AlterIndexRebuild or IndexOptionStatement.RebuildColumnstoreIndex or IndexOptionStatement.RebuildJsonIndex))
                 {
                     throw SimulatedSqlException.Aggregate([unknown, SimulatedSqlException.InvalidUsageOfIndexOption(name)]);
+                }
+                // Every option takes `= value`: a token between the name and
+                // its `=` is Msg 102 at itself (probed 2026-10-21 against SQL
+                // Server 2025).
+                if (valueToken is null)
+                {
+                    context.MoveNextRequired();
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
                 }
                 if (statement is IndexOptionStatement.CreateIndex or IndexOptionStatement.AlterIndexRebuild or IndexOptionStatement.AlterTable)
                     ValidateIndexOptionValue(context, name, statement);

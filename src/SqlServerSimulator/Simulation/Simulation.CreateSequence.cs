@@ -122,9 +122,11 @@ partial class Simulation
         }
     exitOptionLoop:
         // Options are separated by nothing (probed 2026-10-04 against SQL
-        // Server 2025: a comma is a syntax error at itself).
+        // Server 2025: a comma is a syntax error at itself), and a word that
+        // is no option is Msg 102 at itself too (probed 2026-10-21).
         if (context.Token is Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.RejectTrailingToken();
 
         // Type-natural bounds for default min/max; a written value outside
         // them is Msg 11708, the increment checked first, then the minimum,

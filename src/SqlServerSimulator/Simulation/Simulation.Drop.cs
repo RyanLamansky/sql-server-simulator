@@ -111,7 +111,7 @@ partial class Simulation
             _ => DropTargetKind.None,
         };
         if (targetKind == DropTargetKind.None)
-            return RejectPredicateClauseWord(context);
+            return RejectUnknownObjectType(context);
 
         context.MoveNextRequired();
         var ifExists = false;

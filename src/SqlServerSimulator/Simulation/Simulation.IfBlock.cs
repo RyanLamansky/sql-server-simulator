@@ -707,6 +707,9 @@ partial class Simulation
         if (context.Token is not ReservedKeyword { Keyword: Keyword.End })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional(); // consume END
+        // A token after the END is Msg 102 there (probed 2026-10-21 against
+        // SQL Server 2025).
+        context.RejectTrailingToken();
     }
 
     /// <summary>

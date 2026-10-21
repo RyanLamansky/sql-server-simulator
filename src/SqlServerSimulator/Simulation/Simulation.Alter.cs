@@ -47,7 +47,7 @@ partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Table }:
                 return TryParseAlterTable(context);
             case ReservedKeyword { Keyword: Keyword.Index }:
-                return TryParseAlterIndex(context);
+                return RejectingTrailingToken(context, TryParseAlterIndex(context));
             case UnquotedString { ContextualKeyword: ContextualKeyword.Role }:
                 return TryParseAlterRole(context);
             case ReservedKeyword { Keyword: Keyword.User }:
@@ -83,7 +83,7 @@ partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Database }:
                 break;
             default:
-                return RejectPredicateClauseWord(context);
+                return RejectUnknownObjectType(context);
         }
 
         // Cursor is on DATABASE; advance to the token after it (a db name, the
@@ -2192,7 +2192,7 @@ partial class Simulation
                 if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Index })
                     return TryParseAlterTableAlterIndex(context, tableName);
                 context.RestoreCheckpoint(beforeAlterTarget);
-                return TryParseAlterTableAlterColumn(context, tableName);
+                return RejectingTrailingToken(context, TryParseAlterTableAlterColumn(context, tableName));
             case UnquotedString { ContextualKeyword: ContextualKeyword.Rebuild }:
                 if (withCheckExplicit.HasValue)
                     throw SimulatedSqlException.SyntaxErrorNear(context);

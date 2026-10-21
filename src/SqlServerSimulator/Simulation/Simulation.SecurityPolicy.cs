@@ -245,16 +245,34 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Raises Msg 343 for the <c>FILTER</c> / <c>BLOCK</c> word a <c>DROP</c>
-    /// or <c>ALTER</c> predicate clause written after a <c>CREATE SECURITY
-    /// POLICY</c> leaves where an object type belongs: real reads the clause
-    /// as a statement of its own naming an unknown object type. False for any
-    /// other word, which the caller's syntax error answers.
+    /// Raises Msg 343 for a word where a <c>CREATE</c>, <c>DROP</c> or
+    /// <c>ALTER</c> statement's object type belongs that names none (probed
+    /// 2026-10-21 against SQL Server 2025: <c>CREATE zzbogus PROCEDURE …</c>,
+    /// <c>DROP zix ON zt</c>) — the <c>FILTER</c> / <c>BLOCK</c> word a
+    /// predicate clause written after a <c>CREATE SECURITY POLICY</c> leaves
+    /// there among them, as real reads the clause as a statement of its own.
+    /// False for any other token, and for a word that opens an object type
+    /// of one of the three verbs (<see cref="ObjectTypeWords"/>), which the
+    /// caller's syntax error answers as real's Msg 102 does: <c>ALTER TYPE
+    /// x</c>, <c>CREATE SIGNATURE x</c>.
     /// </summary>
-    private static bool RejectPredicateClauseWord(ParserContext context) =>
-        context.Token is UnquotedString { Value: var word } && (BuiltInToken.Equals(word, "FILTER") || BuiltInToken.Equals(word, "BLOCK"))
+    private static bool RejectUnknownObjectType(ParserContext context) =>
+        context.Token is UnquotedString { Value: var word } && Array.BinarySearch(ObjectTypeWords, word.ToUpperInvariant(), StringComparer.Ordinal) < 0
             ? throw SimulatedSqlException.UnknownObjectType(word)
             : false;
+
+    /// <summary>
+    /// The unreserved words that open an object type after <c>CREATE</c>,
+    /// <c>ALTER</c> or <c>DROP</c> in real's grammar, sorted ordinally.
+    /// </summary>
+    private static readonly string[] ObjectTypeWords =
+    [
+        "AGGREGATE", "APPLICATION", "ASSEMBLY", "ASYMMETRIC", "AVAILABILITY", "BROKER", "CERTIFICATE", "COLUMNSTORE",
+        "CONTRACT", "COUNTER", "CREDENTIAL", "CRYPTOGRAPHIC", "ENDPOINT", "EVENT", "EXTERNAL", "FULLTEXT", "JSON",
+        "LOGIN", "MASTER", "MATERIALIZED", "MESSAGE", "PARTITION", "QUEUE", "REMOTE", "RESOURCE", "ROLE", "ROUTE",
+        "SEARCH", "SECURITY", "SELECTIVE", "SENSITIVITY", "SEQUENCE", "SERVER", "SERVICE", "SIGNATURE", "SPATIAL",
+        "SYMMETRIC", "SYNONYM", "TYPE", "VECTOR", "WORKLOAD", "XML",
+    ];
 
     /// <summary>
     /// The second Msg 102 real's parser reports after recovering from a
