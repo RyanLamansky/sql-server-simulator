@@ -44,7 +44,14 @@ public sealed class FilteredIndexHintTests
     [DataRow("select a from t with (index(ixl)) where b is null")]
     [DataRow("select a from t with (index(ix, ixd)) where b = 6")]
     public void APredicateConfiningTheRead_Plans(string query) =>
-        _ = new Simulation().ExecuteNonQuery(Setup + query);
+        HintedReads.AssertAnswersAsUnhinted(Seeded, query);
+
+    private static Simulation Seeded()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(Setup);
+        return simulation;
+    }
 
     [TestMethod]
     [DataRow("select a from t with (index(ix))")]

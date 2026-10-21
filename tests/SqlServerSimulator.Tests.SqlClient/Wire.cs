@@ -60,12 +60,18 @@ internal static class Wire
         }
     }
 
+    /// <summary>
+    /// Runs <paramref name="sql"/> through the in-process surface, untimed: a
+    /// seeding statement is no test's subject, and a saturated machine running
+    /// the whole suite can stretch one past the default 30 seconds.
+    /// </summary>
     public static void ExecInProc(Simulation simulation, string sql)
     {
         using var connection = simulation.CreateDbConnection();
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = sql;
+        command.CommandTimeout = 0;
         _ = command.ExecuteNonQuery();
     }
 
@@ -81,6 +87,7 @@ internal static class Wire
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = sql;
+        command.CommandTimeout = 0;
         var parameter = command.CreateParameter();
         parameter.ParameterName = parameterName;
         parameter.Value = value;

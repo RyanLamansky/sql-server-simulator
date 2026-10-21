@@ -19,6 +19,12 @@ public sealed class WaitForTimeTests
 {
     private static (object? Result, TimeSpan Elapsed) RunTimed(string sql)
     {
+        // A target a few hundred milliseconds ahead, built in the day's last
+        // moments, reads as tomorrow's time — a day's wait — so a run that
+        // close to midnight lets the day turn first.
+        var untilMidnight = TimeSpan.FromDays(1) - DateTime.UtcNow.TimeOfDay;
+        if (untilMidnight < TimeSpan.FromSeconds(2))
+            Thread.Sleep(untilMidnight + TimeSpan.FromMilliseconds(50));
         using var connection = new Simulation().CreateDbConnection();
         connection.Open();
         using var command = connection.CreateCommand();

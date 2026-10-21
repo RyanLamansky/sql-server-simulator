@@ -103,7 +103,14 @@ public sealed class ForceSeekPlanTests
     [DataRow("select a, b, d from t with (forcescan, index(iab)) where d = 1")]
     [DataRow("select * from t with (forcescan, index(1)) where k = 1")]
     [DataRow("select * from h with (forcescan, index(0))")]
-    public void SeekableShapes_Run(string query) => Accepts(query);
+    public void SeekableShapes_Run(string query) => HintedReads.AssertAnswersAsUnhinted(Seeded, query);
+
+    private static Simulation Seeded()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(Setup);
+        return simulation;
+    }
 
     /// <summary>
     /// The refusal is the optimizer's, while the batch compiles: nothing in
@@ -303,7 +310,7 @@ public sealed class ForceSeekPlanTests
     [DataRow("select * from v1 with (forcescan) where id = 1")]
     [DataRow("with c as (select h1.id, h3.x from h1 join h3 on h3.id = h1.id) select * from c with (forceseek) where id = 1")]
     public void ForceSeekThroughAView_SeekableShapes_Run(string query)
-        => _ = Views().ExecuteNonQuery(query);
+        => HintedReads.AssertAnswersAsUnhinted(Views, query);
 
     [TestMethod]
     public void ForceSeekThroughAView_IsACompileError()

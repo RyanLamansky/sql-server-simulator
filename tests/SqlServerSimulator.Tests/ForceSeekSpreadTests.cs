@@ -195,5 +195,5 @@ public sealed class ForceSeekSpreadTests
     [DataRow("select * from t1 inner hash join t2 with (forceseek) on t1.id = t2.id where t1.id = cast('1' as int)")]
     [DataRow("select * from t1 inner hash join t2 with (forceseek) on t1.id = t2.id where t1.id is null")]
     public void APlannableSeek_Runs(string query) =>
-        _ = Prepared().ExecuteNonQuery(query);
+        HintedReads.AssertAnswersAsUnhinted(Prepared, query);
 }

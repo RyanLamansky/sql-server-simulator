@@ -89,10 +89,12 @@ public sealed class BackupRestoreWireTests
         // An application whose pool reopens and queries as fast as it can,
         // as an entity-cache monitor polling the database does.
         using var stop = new CancellationTokenSource();
+        var attempts = 0;
         var poller = Task.Run(async () =>
         {
             while (!stop.IsCancellationRequested)
             {
+                _ = Interlocked.Increment(ref attempts);
                 try
                 {
                     await using var app = new SqlConnection(appConnectionString);
@@ -110,7 +112,7 @@ public sealed class BackupRestoreWireTests
             }
         }, TestContext.CancellationToken);
 
-        await Task.Delay(100, TestContext.CancellationToken);
+        await PollerAttemptsAsync(3);
         await Execute(master, """
             DECLARE @kill nvarchar(max) = '';
             SELECT @kill = @kill + 'KILL ' + CONVERT(varchar(5), session_id) + ';'
@@ -120,7 +122,7 @@ public sealed class BackupRestoreWireTests
             """);
         await Execute(master, "ALTER DATABASE [app] SET SINGLE_USER WITH ROLLBACK IMMEDIATE");
         await Execute(master, "ALTER DATABASE [app] SET RECOVERY SIMPLE");
-        await Task.Delay(100, TestContext.CancellationToken);
+        await PollerAttemptsAsync(Volatile.Read(ref attempts) + 3);
         await Execute(master, "RESTORE DATABASE [app] FROM DISK = N'app.bak' WITH FILE = 1, REPLACE, NOUNLOAD, STATS = 5");
         await Execute(master, "ALTER DATABASE [app] SET MULTI_USER");
         await stop.CancelAsync();
@@ -134,6 +136,17 @@ public sealed class BackupRestoreWireTests
         await after.OpenAsync(TestContext.CancellationToken);
         await using var check = new SqlCommand("select v from t where id = 1", after);
         AreEqual("clean", await check.ExecuteScalarAsync(TestContext.CancellationToken));
+
+        // The application has tried again at least `count` times in all.
+        async Task PollerAttemptsAsync(int count)
+        {
+            var waited = System.Diagnostics.Stopwatch.StartNew();
+            while (Volatile.Read(ref attempts) < count)
+            {
+                IsLessThan(10_000, waited.ElapsedMilliseconds, "the application stopped reconnecting");
+                await Task.Delay(5, TestContext.CancellationToken);
+            }
+        }
     }
 
     [TestMethod]
@@ -159,7 +172,7 @@ public sealed class BackupRestoreWireTests
     [TestMethod]
     public async Task LoginWhileRollbackImmediateSettles_IsALoneMsg18456()
     {
-        var simulation = new Simulation { RollbackSettleMillis = 1500 };
+        var simulation = new Simulation { RollbackSettleMillis = 4000 };
         Wire.ExecInProc(simulation, "create database app");
         await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var victim = await Wire.OpenAsync(listener, TestContext.CancellationToken, ";Initial Catalog=app");
@@ -182,7 +195,8 @@ public sealed class BackupRestoreWireTests
         }
         var started = System.Diagnostics.Stopwatch.StartNew();
         var error = await ThrowsExactlyAsync<SqlException>(async () => await Wire.OpenAsync(listener, TestContext.CancellationToken, ";Initial Catalog=app;ConnectRetryCount=0"));
-        IsLessThan(1000, started.ElapsedMilliseconds);
+        // Well inside the settle, which a login waiting it out would take.
+        IsLessThan(3000, started.ElapsedMilliseconds);
         CollectionAssert.AreEqual(new[] { 18456 }, error.Errors.Cast<SqlError>().Select(entry => entry.Number).ToArray());
         AreEqual("Login failed for user 'sa'.", error.Message);
         await alter;

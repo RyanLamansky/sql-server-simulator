@@ -524,7 +524,8 @@ public sealed class BackupRestoreTests
         var simulation = WithDatabase();
         var elapsed = Stopwatch.StartNew();
         _ = simulation.ExecuteNonQuery("alter database d set single_user with rollback immediate");
-        IsLessThan(1000, elapsed.ElapsedMilliseconds);
+        // The settle would take RollbackSettleMillis, three seconds.
+        IsLessThan(2500, elapsed.ElapsedMilliseconds);
     }
 
     [TestMethod]

@@ -596,12 +596,17 @@ public sealed class AlterTableColumnTests
     }
 
     [TestMethod]
-    public void AlterColumn_NoNullabilityKeyword_MakesTheColumnNullable()
+    [DataRow("")]
+    [DataRow("set ansi_null_dflt_on off;")]
+    [DataRow("set ansi_null_dflt_off on;")]
+    public void AlterColumn_NoNullabilityKeyword_MakesTheColumnNullable(string session)
     {
-        // Omitting NULL / NOT NULL leaves the column nullable whatever it was
-        // (probed 2026-10-01 against SQL Server 2025).
+        // Omitting NULL / NOT NULL leaves the column nullable whatever it was,
+        // whatever the session's nullability default (probed 2026-10-01 and
+        // 2026-10-21 against SQL Server 2025).
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("""
+        _ = sim.ExecuteNonQuery($"""
+            {session}
             create table t (v int not null);
             alter table t alter column v bigint;
             insert t values (1), (null)

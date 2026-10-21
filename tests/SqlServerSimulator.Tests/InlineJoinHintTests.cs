@@ -139,7 +139,7 @@ public sealed class InlineJoinHintTests
     [DataRow("select count(*) from jh1 a cross join jh2 b option (loop join)")]
     [DataRow("select count(*) from jh1 a join jh2 b on b.id > a.id option (hash join, loop join)")]
     public void AnAlgorithmThePredicatesBuild_IsTaken(string query)
-        => _ = Seeded().ExecuteScalar(query);
+        => HintedReads.AssertAnswersAsUnhinted(Seeded, query);
 
     [TestMethod]
     [DataRow("select count(*) from jh1 a inner loop join jh2 b on b.id = a.id option (merge join)", 1042)]
