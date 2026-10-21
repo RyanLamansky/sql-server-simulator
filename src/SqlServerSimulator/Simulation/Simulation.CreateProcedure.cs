@@ -242,7 +242,7 @@ partial class Simulation
         // A natively compiled procedure is schema-bound, so its names are
         // two-part (Msg 4512, probed 2026-10-02 against SQL Server 2025).
         if (nativelyCompiled)
-            SchemaBinding.EnforceBody(context.CurrentDatabase, "procedure", $"{schema.Name}.{procName.Leaf}", bodyText);
+            SchemaBinding.EnforceBody(context.CurrentDatabase, "procedure", procName.ToString(), bodyText);
 
         if (groupNumber > 1)
         {

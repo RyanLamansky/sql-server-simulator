@@ -516,6 +516,12 @@ internal sealed partial class Selection
                 context.MoveNextRequired();
             }
 
+            // A name after the type is the syntax error at it ahead of the
+            // type's lookup (probed 2026-10-21 against SQL Server 2025:
+            // `WITH (v nosuch int '$')` is Msg 102 near 'int').
+            if (context.Token is Name)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+
             var (resolvedType, _, _, _) = Simulation.ResolveTypeReference(
                 context.Batch, qualifiedTypeName, typeNameToken, declaredMaxLength, declaredScale,
                 index: columns.Count + 1, TypeSpecSite.Column, columnName: columnName);

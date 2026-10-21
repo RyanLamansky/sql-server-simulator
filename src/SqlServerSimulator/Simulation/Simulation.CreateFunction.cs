@@ -333,7 +333,7 @@ partial class Simulation
         CheckModuleDdlPermission(
             context, "CREATE FUNCTION", functionName, schema, isAlter, createOrAlter,
             schema.Functions.GetValueOrDefault(functionName.Leaf),
-            isSchemaBound ? () => SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText, SchemaBoundReferenceCheck(context.Batch, functionName.Leaf)) : null);
+            isSchemaBound ? () => SchemaBinding.EnforceBody(context.CurrentDatabase, "table valued function", functionName.ToString(), bodyText, SchemaBoundReferenceCheck(context.Batch, functionName.Leaf)) : null);
 
         if (isSchemaBound)
             SchemaBinding.EnforceNoAliasTypes(context.Batch, parameters, returnsAliasScalar: false, outputColumns, bodyText, CountNewlines(commandText, 0, bodyStart), endLine);
@@ -358,7 +358,7 @@ partial class Simulation
         RejectTimestampParameters(parameters);
 
         if (isSchemaBound)
-            SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText, SchemaBoundReferenceCheck(context.Batch, functionName.Leaf));
+            SchemaBinding.EnforceBody(context.CurrentDatabase, "table valued function", functionName.ToString(), bodyText, SchemaBoundReferenceCheck(context.Batch, functionName.Leaf));
 
         var function = new MultiStatementTableValuedFunction(
             schema,
@@ -505,7 +505,7 @@ partial class Simulation
         CheckModuleDdlPermission(
             context, "CREATE FUNCTION", functionName, schema, isAlter, createOrAlter,
             schema.Functions.GetValueOrDefault(functionName.Leaf),
-            isSchemaBound ? () => SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText, SchemaBoundReferenceCheck(context.Batch, functionName.Leaf)) : null);
+            isSchemaBound ? () => SchemaBinding.EnforceBody(context.CurrentDatabase, "function", functionName.ToString(), bodyText, SchemaBoundReferenceCheck(context.Batch, functionName.Leaf)) : null);
 
         if (isSchemaBound)
             SchemaBinding.EnforceNoAliasTypes(context.Batch, parameters, returnsAliasScalar: returnAliasType is not null, null, bodyText, CountNewlines(commandText, 0, bodyStart), endLine);
@@ -526,7 +526,7 @@ partial class Simulation
         RejectTimestampParameters(parameters);
 
         if (isSchemaBound)
-            SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText, SchemaBoundReferenceCheck(context.Batch, functionName.Leaf));
+            SchemaBinding.EnforceBody(context.CurrentDatabase, "function", functionName.ToString(), bodyText, SchemaBoundReferenceCheck(context.Batch, functionName.Leaf));
 
         var function = new ScalarFunction(
             schema,
@@ -652,7 +652,7 @@ partial class Simulation
         CheckModuleDdlPermission(
             context, "CREATE FUNCTION", functionName, schema, isAlter, createOrAlter,
             schema.Functions.GetValueOrDefault(functionName.Leaf),
-            isSchemaBound ? () => SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText, SchemaBoundReferenceCheck(context.Batch, functionName.Leaf)) : null);
+            isSchemaBound ? () => SchemaBinding.EnforceBody(context.CurrentDatabase, "table valued function", functionName.ToString(), bodyText, SchemaBoundReferenceCheck(context.Batch, functionName.Leaf)) : null);
 
         if (isSchemaBound)
             SchemaBinding.EnforceNoAliasTypes(context.Batch, parameters, returnsAliasScalar: false, null, "", 0, 0);
@@ -667,7 +667,7 @@ partial class Simulation
         var replaced = ResolveFunctionAlterTarget<InlineTableValuedFunction>(context, schema, functionName, isAlter, createOrAlter);
 
         if (isSchemaBound)
-            SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText, SchemaBoundReferenceCheck(context.Batch, functionName.Leaf));
+            SchemaBinding.EnforceBody(context.CurrentDatabase, "table valued function", functionName.ToString(), bodyText, SchemaBoundReferenceCheck(context.Batch, functionName.Leaf));
 
         RejectTimestampParameters(parameters);
 
@@ -872,7 +872,14 @@ partial class Simulation
             Selection selection;
             try
             {
-                selection = ReportingEveryBindError(innerBatch, bodyLineOffset, () => ParseBodyQuery(parser, rejectsNextValueFor: true));
+                selection = ReportingEveryBindError(innerBatch, bodyLineOffset, () =>
+                {
+                    var body = ParseBodyQuery(parser, rejectsNextValueFor: true);
+                    // The query is the whole body, so a token it leaves is the
+                    // syntax error at it (probed 2026-10-21 against SQL Server
+                    // 2025: `RETURN (SELECT … WHERE a = @x zz)` is near 'zz').
+                    return parser.Token is null ? body : throw SimulatedSqlException.SyntaxErrorNear(parser);
+                });
             }
             catch (SimulatedSqlException parsePhase) when (IsRecoverableSyntaxError(parsePhase) && parser.Token is { } errorToken)
             {
@@ -1197,6 +1204,16 @@ partial class Simulation
                     throw SimulatedSqlException.SyntaxErrorNear(context);
             }
             context.MoveNextRequired();
+        }
+
+        // A name, a variable or TABLE after the type is the syntax error at it
+        // ahead of the type's lookup (probed 2026-10-21 against SQL Server
+        // 2025: `RETURNS nosuch int` is Msg 102 near 'int', `RETURNS nosuch
+        // TABLE` Msg 156 near TABLE).
+        if (context.Token is AtPrefixedString or ReservedKeyword { Keyword: Keyword.Table }
+            or (Name and not UnquotedString { ContextualKeyword: ContextualKeyword.ReadOnly or ContextualKeyword.Output or ContextualKeyword.Out }))
+        {
+            throw SimulatedSqlException.SyntaxErrorNear(context);
         }
 
         (var resolvedType, maxLength, _, aliasType) = ResolveTypeReference(

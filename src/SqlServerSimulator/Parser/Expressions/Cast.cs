@@ -457,6 +457,12 @@ internal sealed class Cast : Expression
             context.MoveNextRequired();
         }
 
+        // A name after the type is the syntax error at it ahead of the type's
+        // lookup, PARSE's USING aside (probed 2026-10-21 against SQL Server
+        // 2025: `CAST(a AS nosuch varchar(5))` is Msg 102 near 'varchar').
+        if (context.Token is Tokens.Name and not UnquotedString { ContextualKeyword: ContextualKeyword.Using })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
         // Null columnName signals CAST/CONVERT context: errors use Msg 243
         // (unknown type), 291 (length on fixed type), and the
         // "type"/"convert specification" wording for Msg 131 size errors.

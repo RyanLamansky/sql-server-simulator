@@ -658,6 +658,7 @@ public sealed class BatchCompilationTests
         var missingType = sim.AssertSqlError("create table #t (a int, b)", 173);
         AreEqual("The definition for column 'b' must include a data type.", missingType.Errors[0].Message);
         AreEqual((byte)13, missingType.Errors[0].State);
+        sim.AssertSqlError("create table #t (a int, c (20))", 173, "The definition for column 'c' must include a data type.");
         AreEqual((byte)1, sim.AssertSqlError("select @a = 1", 137).Errors[0].State);
         AreEqual((byte)1, sim.AssertSqlError("select @a += 1", 137).Errors[0].State);
         var value = sim.AssertSqlError("select @a = @b", 137);

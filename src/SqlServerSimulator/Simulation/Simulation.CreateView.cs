@@ -215,7 +215,7 @@ partial class Simulation
         CheckModuleDdlPermission(
             context, "CREATE VIEW", viewName, schema, isAlter, createOrAlter,
             schema.Views.GetValueOrDefault(viewName.Leaf),
-            isSchemaBound ? () => SchemaBinding.EnforceBody(context.CurrentDatabase, "view", $"{schema.Name}.{viewName.Leaf}", bodyText, SchemaBoundReferenceCheck(context.Batch, viewName.Leaf)) : null);
+            isSchemaBound ? () => SchemaBinding.EnforceBody(context.CurrentDatabase, "view", viewName.ToString(), bodyText, SchemaBoundReferenceCheck(context.Batch, viewName.Leaf)) : null);
 
         // Cross-kind collisions (Msg 2714 on create, Msg 2010 on either ALTER
         // leg) and the ALTER-on-missing Msg 208 all live in the shared helper.
@@ -224,7 +224,7 @@ partial class Simulation
             schema.Views.TryGetValue(viewName.Leaf, out var existingView) ? existingView : null);
 
         if (isSchemaBound)
-            SchemaBinding.EnforceBody(context.CurrentDatabase, "view", $"{schema.Name}.{viewName.Leaf}", bodyText, SchemaBoundReferenceCheck(context.Batch, viewName.Leaf));
+            SchemaBinding.EnforceBody(context.CurrentDatabase, "view", viewName.ToString(), bodyText, SchemaBoundReferenceCheck(context.Batch, viewName.Leaf));
 
         var outputColumns = ComputeViewOutputColumns(context.CurrentDatabase.Collation, bodySelection, renameList, viewName.Leaf);
 

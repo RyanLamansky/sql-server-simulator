@@ -40,9 +40,10 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Msg 173: a table list's column with no data type — its name followed by
-    /// the list's <c>,</c> or <c>)</c>, the end of the batch, or a column
-    /// constraint (<c>NULL</c>, <c>DEFAULT</c>, <c>PRIMARY KEY</c>, …), in a
-    /// table, a table variable, a table type, a function's return table and
+    /// the list's <c>,</c> or <c>)</c>, the end of the batch, a type's length
+    /// list (<c>c (20)</c>, probed 2026-10-21), or a column constraint
+    /// (<c>NULL</c>, <c>DEFAULT</c>, <c>PRIMARY KEY</c>, …), in a table, a
+    /// table variable, a table type, a function's return table and
     /// <c>ALTER TABLE … ADD</c> alike, raised while the batch compiles (probed
     /// 2026-10-16 against SQL Server 2025).
     /// </summary>

@@ -2545,7 +2545,7 @@ partial class Simulation
         switch (context.Token)
         {
             case null:
-            case Operator { Character: ',' or ')' or ';' }:
+            case Operator { Character: ',' or ')' or ';' or '(' }:
                 return true;
             case ReservedKeyword { Keyword: Keyword.Not }:
                 var checkpoint = context.SaveCheckpoint();
@@ -2767,6 +2767,10 @@ partial class Simulation
                 case ReservedKeyword { Keyword: Keyword.Identity } when identitySpec is null:
                     identitySpec = ParseIdentitySpec(context);
                     continue;
+                // A second IDENTITY is a doubled column constraint (probed
+                // 2026-10-21 against SQL Server 2025).
+                case ReservedKeyword { Keyword: Keyword.Identity }:
+                    throw SimulatedSqlException.MultipleColumnConstraints("IDENTITY", columnName.Value, tableName);
                 case UnquotedString { ContextualKeyword: ContextualKeyword.Generated } when generatedAs == GeneratedAlwaysAsRow.None:
                     // The period clause comes ahead of any NULL / NOT NULL:
                     // `datetime2 NOT NULL GENERATED …` is Msg 102 at GENERATED

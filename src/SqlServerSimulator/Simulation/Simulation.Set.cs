@@ -665,7 +665,17 @@ partial class Simulation
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
         if (consumeAnother)
+        {
             context.MoveNextRequired();
+            // A two-word level's second word is READ after REPEATABLE and
+            // COMMITTED / UNCOMMITTED after READ: anything else is the syntax
+            // error at it (probed 2026-10-21 against SQL Server 2025).
+            var secondWordFits = newLevel == System.Data.IsolationLevel.RepeatableRead
+                ? context.Token is ReservedKeyword { Keyword: Keyword.Read }
+                : context.Token is UnquotedString { Value: var second } && (second.Equals("COMMITTED", StringComparison.OrdinalIgnoreCase) || second.Equals("UNCOMMITTED", StringComparison.OrdinalIgnoreCase));
+            if (!secondWordFits)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
         // An un-taken branch's SET leaves the level alone (probed 2026-10-03
         // against SQL Server 2025).
         if (!context.Batch.IsSkipping)
@@ -676,9 +686,8 @@ partial class Simulation
 
     /// <summary>
     /// Peeks the token after <c>READ</c> to decide between
-    /// <c>READ UNCOMMITTED</c> and <c>READ COMMITTED</c>; defaults to
-    /// READ COMMITTED if the peek isn't a recognizable trailer (parser
-    /// continues to consume the trailer either way for the canonical form).
+    /// <c>READ UNCOMMITTED</c> and <c>READ COMMITTED</c>; reads READ COMMITTED
+    /// for any other trailer, which the caller then refuses.
     /// </summary>
     private static (System.Data.IsolationLevel Level, bool ConsumeAnother) ResolveReadIsolationLevel(ParserContext context)
     {

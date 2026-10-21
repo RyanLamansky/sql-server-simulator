@@ -221,6 +221,15 @@ partial class SimulatedSqlException
         new($"Invalid usage of the option {option} in the DECLARE CURSOR statement.", 153, 15, 1);
 
     /// <summary>
+    /// Msg 155: a word where a cursor declaration's option belongs — between
+    /// its name and <c>CURSOR</c>, or between <c>CURSOR</c> and <c>FOR</c> —
+    /// that names none, echoed as written (probed 2026-10-21 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException UnrecognizedCursorOption(string word) =>
+        new($"'{word}' is not a recognized CURSOR option.", 155, 15, 2);
+
+    /// <summary>
     /// Msg 412: a cursor's <c>FOR UPDATE OF</c> list names a column only a
     /// constructed rowset such as <c>VALUES</c> supplies. Probed 2026-09-29
     /// against SQL Server 2025.

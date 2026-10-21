@@ -2508,10 +2508,11 @@ public sealed partial class Simulation
         // statement clears it. A module body isn't a batch of its own: its
         // CREATE is the batch's first statement, so a bare name opening the
         // body is Msg 102 too (probed 2026-09-25 for a procedure and a
-        // trigger). A dynamic-SQL string is a batch of its own, so
+        // trigger, 2026-10-21 for a multi-statement function, whose body binds
+        // at CREATE with its shape but no frame). A dynamic-SQL string is a batch of its own, so
         // `EXEC (N'sp_who')` and `sp_executesql N'sp_who'` qualify (probed
         // 2026-09-25).
-        var atBatchStart = endKeyword is null && batch.ProcFrame is not { IsDynamicSql: false } && batch.TriggerFrame is null && batch.UdfFrame is null;
+        var atBatchStart = endKeyword is null && batch.ProcFrame is not { IsDynamicSql: false } && batch.TriggerFrame is null && batch.UdfFrame is null && batch.FunctionBodyShape is null or { ContextConnection: true };
         // BEGIN...END block dispatch (endKeyword=End) bumps BlockDepth so the
         // must-be-first-statement check on CREATE/ALTER
         // PROCEDURE / FUNCTION / VIEW / TRIGGER / SCHEMA rejects them inside
@@ -5021,6 +5022,18 @@ public sealed partial class Simulation
     }
 
     /// <summary>
+    /// Refuses a token left after a <c>SAVE</c> or <c>ROLLBACK</c>, ahead of
+    /// the transaction checks the statement makes as it runs (probed
+    /// 2026-10-21 against SQL Server 2025: <c>SAVE TRAN s zz</c> and
+    /// <c>ROLLBACK zz</c> are Msg 102 near 'zz', not Msg 628 / 3903).
+    /// </summary>
+    private static void RejectTokenAfterTransactionStatement(ParserContext context)
+    {
+        if (!EndsStatement(context.Token) && !IsLabelDeclaration(context))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    /// <summary>
     /// Parses <c>SAVE TRAN[SACTION] &lt;name&gt;</c> and records the active
     /// transaction's current undo-log position against the name. EF Core 10
     /// emits this per SaveChanges call inside an active
@@ -5037,6 +5050,7 @@ public sealed partial class Simulation
         if (context.GetNextRequired() is AtPrefixedString variable)
         {
             context.MoveNextOptional();
+            RejectTokenAfterTransactionStatement(context);
             if (context.Batch.IsSkipping)
                 return true;
             name = TransactionNameFromVariable(context.Batch, variable.Value) ?? string.Empty;
@@ -5048,6 +5062,7 @@ public sealed partial class Simulation
             name = ParseTransactionName(context);
             context.MoveNextOptional();
         }
+        RejectTokenAfterTransactionStatement(context);
 
         if (context.Batch.IsSkipping)
             return true;
@@ -5334,6 +5349,7 @@ public sealed partial class Simulation
                     var variable = context.Token as AtPrefixedString;
                     var name = variable is null ? ParseTransactionName(context) : string.Empty;
                     context.MoveNextOptional();
+                    RejectTokenAfterTransactionStatement(context);
 
                     if (context.Batch.IsSkipping)
                         return true;
@@ -5365,6 +5381,7 @@ public sealed partial class Simulation
                 context.MoveNextOptional();
             }
         }
+        RejectTokenAfterTransactionStatement(context);
 
         if (context.Batch.IsSkipping)
             return true;

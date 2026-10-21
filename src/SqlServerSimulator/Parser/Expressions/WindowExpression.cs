@@ -1175,10 +1175,33 @@ internal sealed class WindowExpression : Expression
     /// to carry one (ranking + offset functions). Real SQL Server raises
     /// Msg 10752 ("The function 'X' may not have a window frame.").
     /// </summary>
+    /// <remarks>
+    /// The frame's own grammar, through the <c>OVER</c> clause's closing
+    /// parenthesis, outranks the refusal (probed 2026-10-21 against SQL Server
+    /// 2025: <c>ROW_NUMBER() OVER (ORDER BY id ROWS BETWEEN zz …)</c> is Msg
+    /// 102 near 'zz').
+    /// </remarks>
     private static void RejectFrameSpec(ParserContext context, string functionLowerName)
     {
-        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Rows or ContextualKeyword.Range })
-            throw SimulatedSqlException.FunctionMayNotHaveWindowFrame(functionLowerName, isRankingFamily: functionLowerName is not ("lag" or "lead" or "percentile_cont" or "percentile_disc"));
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Rows or ContextualKeyword.Range })
+            return;
+        context.MoveNextRequired();
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Between })
+        {
+            context.MoveNextRequired();
+            _ = ParseFrameBound(context, refusedUnbounded: ContextualKeyword.Following);
+            if (context.Token is not ReservedKeyword { Keyword: Keyword.And })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+            _ = ParseFrameBound(context, refusedUnbounded: ContextualKeyword.Preceding);
+        }
+        else
+        {
+            _ = ParseFrameBound(context, refusedUnbounded: ContextualKeyword.Following);
+        }
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        throw SimulatedSqlException.FunctionMayNotHaveWindowFrame(functionLowerName, isRankingFamily: functionLowerName is not ("lag" or "lead" or "percentile_cont" or "percentile_disc"));
     }
 
     /// <summary>

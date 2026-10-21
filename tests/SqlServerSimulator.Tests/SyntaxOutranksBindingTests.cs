@@ -1,3 +1,5 @@
+using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+
 namespace SqlServerSimulator;
 
 /// <summary>
@@ -70,6 +72,79 @@ public sealed class SyntaxOutranksBindingTests
     [TestMethod]
     public void AValueWhereAnIndexKeyListBelongs_IsTheSyntaxErrorAtIt()
         => new Simulation().AssertSqlError(Fixture + "create index zix on zt 5", 102, "Incorrect syntax near '5'.");
+
+    [TestMethod]
+    [DataRow("create function zif (@x int) returns table as return (select id from dbo.zt where a = @x zzbogus)", "zzbogus")]
+    [DataRow("create function zif (@x int) returns table as return select id from dbo.zt where a = @x )", ")")]
+    [DataRow("create function zif (@x int) returns table as return (select id from dbo.zt a = @x)", "=")]
+    [DataRow("create function zmf (@x int) returns @r table (id int) as begin zzbogus insert @r values (@x) return end", "zzbogus")]
+    public void AStrayTokenInAFunctionBody_IsTheSyntaxErrorAtIt(string definition, string near)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(Fixture);
+        sim.AssertSqlError(definition, 102, $"Incorrect syntax near '{near}'.");
+    }
+
+    [TestMethod]
+    public void ASchemaBoundSourceWithAnEmptySchemaPart_RaisesMsg4512()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(Fixture);
+        sim.AssertSqlError("create view zv with schemabinding as select id, a from .zt", 4512,
+            "Cannot schema bind view 'zv' because name '.zt' is invalid for schema binding. Names must be in two-part format and an object cannot reference itself.");
+    }
+
+    [TestMethod]
+    public void AnApplyBodysOrderByWithoutTop_RaisesMsg1033()
+        => _ = new Simulation().AssertSqlError(Fixture + "select * from zt cross apply (select (1) id from zt z2 order by id) x", 1033);
+
+    [TestMethod]
+    [DataRow("select row_number() over (order by id rows between unbounded zzbogus preceding and current row) from zt", 102, "Incorrect syntax near 'zzbogus'.")]
+    [DataRow("select row_number() over (order by id rows between unbounded preceding current row) from zt", 156, "Incorrect syntax near the keyword 'current'.")]
+    [DataRow("select row_number() over (order by id rows unbounded preceding zzbogus) from zt", 102, "Incorrect syntax near 'zzbogus'.")]
+    [DataRow("select row_number() over (order by id rows unbounded preceding) from zt", 10752, "The function 'row_number' may not have a window frame.")]
+    public void ARankingFunctionsFrame_ParsesBeforeItsRefusal(string statement, int number, string message)
+        => new Simulation().AssertSqlError(Fixture + statement, number, message);
+
+    [TestMethod]
+    [DataRow("select cast(a as zzbogus varchar(5)) from zt", "varchar")]
+    [DataRow("select try_cast('x' as zzbogus int)", "int")]
+    [DataRow("select * from openjson('[1,2]') with (v zzbogus int '$')", "int")]
+    [DataRow("create function zf (@x int) returns zzbogus int as begin return @x end", "int")]
+    [DataRow("create function zf (@x zzbogus int) returns int as begin return @x end", "int")]
+    [DataRow("create function zmf (@x int) returns zzbogus @r table (id int) as begin return end", "@r")]
+    public void ANameAfterAType_OutranksTheTypesLookup(string statement, string near)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(Fixture);
+        sim.AssertSqlError(statement, 102, $"Incorrect syntax near '{near}'.");
+    }
+
+    [TestMethod]
+    public void TableAfterAnUnknownReturnType_IsMsg156()
+        => new Simulation().AssertSqlError("create function zf () returns zzbogus table as return (select 1 a)", 156, "Incorrect syntax near the keyword 'table'.");
+
+    [TestMethod]
+    [DataRow("declare zzbogus c cursor for select 1", "c")]
+    [DataRow("declare c zzbogus cursor for select 1", "zzbogus")]
+    [DataRow("declare c cursor local zzbogus fast_forward for select 1", "zzbogus")]
+    [DataRow("declare @c cursor; set @c = cursor zzbogus for select 1", "zzbogus")]
+    public void AnUnknownCursorOption_RaisesMsg155(string statement, string option)
+    {
+        var ex = new Simulation().AssertSqlError(statement, 155);
+        AreEqual($"'{option}' is not a recognized CURSOR option.", ex.Errors[0].Message);
+        AreEqual((byte)2, ex.Errors[0].State);
+    }
+
+    [TestMethod]
+    [DataRow("fetch next from @c into @c")]
+    [DataRow("fetch next from @c into @x, @c")]
+    public void ACursorVariableAsAFetchTarget_RaisesMsg16949(string fetch)
+        => new Simulation().AssertSqlError($"""
+            create table zt (id int); insert zt values (1);
+            declare @c cursor; set @c = cursor for select id from zt; open @c; declare @x int;
+            {fetch}
+            """, 16949, "The variable '@c' is a cursor variable, but it is used in a place where a cursor variable is not valid.");
 
     [TestMethod]
     [DataRow("exec sp_executesql N'select @p', N'@p int', @p 1", "1")]

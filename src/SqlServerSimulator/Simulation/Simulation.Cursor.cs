@@ -42,7 +42,7 @@ partial class Simulation
             else if (IsWord(context.Token, "SCROLL"))
                 scroll = true;
             else
-                break;
+                throw SimulatedSqlException.UnrecognizedCursorOption(context.Token.Source.ToString());
             context.MoveNextRequired();
         }
 
@@ -85,8 +85,10 @@ partial class Simulation
         Span<char> buffer = stackalloc char[12];
         while (context.Token is not ReservedKeyword { Keyword: Keyword.For })
         {
-            if (context.Token is not UnquotedString option || option.Span.Length > buffer.Length)
+            if (context.Token is not UnquotedString option)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (option.Span.Length > buffer.Length)
+                throw SimulatedSqlException.UnrecognizedCursorOption(option.Source.ToString());
 
             var upper = buffer[..option.Span.Length];
             _ = option.Span.ToUpperInvariant(upper);
@@ -105,7 +107,7 @@ partial class Simulation
                 "SCROLL_LOCKS" => CursorOptions.ScrollLocks,
                 "STATIC" => CursorOptions.Static,
                 "TYPE_WARNING" => CursorOptions.TypeWarning,
-                _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+                _ => throw SimulatedSqlException.UnrecognizedCursorOption(option.Source.ToString()),
             };
             // INSENSITIVE belongs to the SQL-92 form only, and any option at
             // all after CURSOR mixes the two forms (probed 2026-09-29 against
@@ -460,7 +462,9 @@ partial class Simulation
     {
         var context = batch.Parser;
         context.MoveNextRequired(); // consume OPEN
+        var cursorToken = context.Token;
         var reference = ReadCursorReference(context);
+        RejectTokenAfterCursor(context, cursorToken, reference);
         if (batch.IsSkipping)
             return;
         var cursor = ResolveCursor(batch, reference, missingAtPriorLine: true);
@@ -474,7 +478,9 @@ partial class Simulation
     {
         var context = batch.Parser;
         context.MoveNextRequired(); // consume CLOSE
+        var cursorToken = context.Token;
         var reference = ReadCursorReference(context);
+        RejectTokenAfterCursor(context, cursorToken, reference);
         if (batch.IsSkipping)
             return;
         ResolveCursor(batch, reference).Close(batch.Connection);
@@ -496,7 +502,9 @@ partial class Simulation
     {
         var context = batch.Parser;
         context.MoveNextRequired(); // consume DEALLOCATE
+        var cursorToken = context.Token;
         var reference = ReadCursorReference(context);
+        RejectTokenAfterCursor(context, cursorToken, reference);
         if (batch.IsSkipping)
             return;
 
@@ -595,6 +603,7 @@ partial class Simulation
             };
         }
 
+        var cursorToken = context.Token;
         var reference = ReadCursorReference(context);
 
         List<string>? intoVariables = null;
@@ -608,6 +617,12 @@ partial class Simulation
                 intoVariables.Add(variable.Value);
                 context.MoveNextOptional();
             } while (context.Token is Operator { Character: ',' });
+            if (!EndsStatement(context.Token) && !IsLabelDeclaration(context))
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+        else
+        {
+            RejectTokenAfterCursor(context, cursorToken, reference);
         }
 
         // A function body's FETCH without INTO would send the row to the
@@ -624,6 +639,14 @@ partial class Simulation
 
         var cursor = ResolveCursor(batch, reference, missingAtPriorLine: true);
         batch.BeginImplicitTransaction();
+
+        // A cursor variable is no target, ahead of the list's count (probed
+        // 2026-10-21 against SQL Server 2025: `INTO @x, @c` is Msg 16949).
+        foreach (var target in intoVariables ?? [])
+        {
+            if (batch.HasCursorVariable(target))
+                throw SimulatedSqlException.CursorVariableUsedAsScalar(target);
+        }
 
         // The INTO-list cardinality check fires regardless of whether the
         // FETCH lands on a row (probe-confirmed Msg 16924).
@@ -686,6 +709,23 @@ partial class Simulation
         public readonly string Name = name;
         public readonly bool IsVariable = isVariable;
         public readonly bool GlobalQualified = globalQualified;
+    }
+
+    /// <summary>
+    /// Refuses a token left after a statement's cursor reference, ahead of
+    /// resolving the cursor: Msg 102 at it, except that a bare name after a
+    /// bare cursor name reads as <c>GLOBAL</c>'s position holding the first,
+    /// so the error names that one (probed 2026-10-21 against SQL Server 2025:
+    /// <c>CLOSE c 5</c> is near '5', <c>CLOSE c zz</c> near 'c', <c>CLOSE
+    /// GLOBAL c zz</c> and <c>CLOSE @c zz</c> near 'zz').
+    /// </summary>
+    private static void RejectTokenAfterCursor(ParserContext context, Token? cursorToken, CursorReference reference)
+    {
+        if (EndsStatement(context.Token) || IsLabelDeclaration(context))
+            return;
+        throw context.Token is Name && !reference.IsVariable && !reference.GlobalQualified
+            ? SimulatedSqlException.SyntaxErrorNear(cursorToken)
+            : SimulatedSqlException.SyntaxErrorNear(context);
     }
 
     /// <summary>

@@ -907,6 +907,11 @@ internal sealed partial class Selection
             lateralPlan = AcrossApplyBoundary(context, leftSources, () => ParseNestedQueryRejectingNextValueFor(context, QueryScope.Nested(QueryPosition.Derived, chainedResolver)));
         }
 
+        // Msg 1033, as for any derived table (probed 2026-10-21 against SQL
+        // Server 2025: `CROSS APPLY (SELECT … ORDER BY id) x`).
+        if (lateralPlan.HasOrderBy && !lateralPlan.HasTopOrOffsetOrFetch)
+            throw SimulatedSqlException.OrderByInvalidInCte();
+
         var schema = lateralPlan.Schema;
         var columnNames = lateralPlan.ColumnNames;
         var lateralColumns = new HeapColumn[schema.Length];

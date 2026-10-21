@@ -273,6 +273,13 @@ public sealed class StatementBoundaryTests
     [DataRow("create index zix on zt (b) with (= 80)", "=")]
     [DataRow("create index zix on zt (b) with (fillfactor = 80 80)", "80")]
     [DataRow("begin try select 1 end try begin catch end catch zzbogus", "zzbogus")]
+    [DataRow("save tran s1 zzbogus", "zzbogus")]
+    [DataRow("rollback tran s1 zzbogus", "zzbogus")]
+    [DataRow("rollback zzbogus", "zzbogus")]
+    [DataRow("set transaction isolation level read zzbogus", "zzbogus")]
+    [DataRow("set transaction isolation level repeatable zzbogus", "zzbogus")]
+    [DataRow("grant , select on zt to public", ",")]
+    [DataRow("grant select, , update on zt to public", ",")]
     public void AStrayTokenAfterTheStatement_IsASyntaxErrorAtIt(string statement, string near)
     {
         var sim = new Simulation();
@@ -297,6 +304,27 @@ public sealed class StatementBoundaryTests
         _ = sim.ExecuteNonQuery("create table zt (a int not null primary key, b varchar(10), constraint zck check (a > 0))");
         sim.AssertSqlError(statement, number, message);
     }
+
+    /// <summary>
+    /// A token after a cursor statement's cursor is the syntax error at it,
+    /// except that a bare name after a bare cursor name is reported at the
+    /// cursor's (probed 2026-10-21 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("close c 5", "5")]
+    [DataRow("close c zz", "c")]
+    [DataRow("close c, c", ",")]
+    [DataRow("close global c zz", "zz")]
+    [DataRow("close @c zz", "zz")]
+    [DataRow("open c zz", "c")]
+    [DataRow("deallocate c zz", "c")]
+    [DataRow("fetch next from @c zz", "zz")]
+    [DataRow("fetch next from c into @x zz", "zz")]
+    public void AStrayTokenAfterACursorStatement_IsASyntaxError(string statement, string near)
+        => new Simulation().AssertSqlError($"""
+            create table zt (id int); declare c cursor global for select id from zt; open c; declare @c cursor; set @c = c; declare @x int;
+            {statement}
+            """, 102, $"Incorrect syntax near '{near}'.");
 
     [TestMethod]
     public void AlterTableDrop_WithoutTheConstraintKeyword_DropsTheConstraints()

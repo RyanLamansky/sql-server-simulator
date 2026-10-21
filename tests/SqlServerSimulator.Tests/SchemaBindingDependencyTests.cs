@@ -423,6 +423,24 @@ public sealed class SchemaBindingDependencyTests
             "Cannot schema bind function 'dbo.f'. 'dbo.plain' is not schema bound.");
     }
 
+    /// <summary>
+    /// The module is named as written, and a table-valued function of either
+    /// kind as a "table valued function" (probed 2026-10-21 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create view v with schemabinding as select a from t", "view 'v'")]
+    [DataRow("create function f() returns table with schemabinding as return (select a from t)", "table valued function 'f'")]
+    [DataRow("create function f() returns @r table (a int) with schemabinding as begin insert @r select a from t return end", "table valued function 'f'")]
+    [DataRow("create function f() returns int with schemabinding as begin return (select count(*) from t) end", "function 'f'")]
+    public void SchemaBindingRefusals_NameTheModuleAsWritten(string definition, string module)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table dbo.t (a int not null)");
+        sim.AssertSqlError(definition, 4512,
+            $"Cannot schema bind {module} because name 't' is invalid for schema binding. Names must be in two-part format and an object cannot reference itself.");
+    }
+
     [TestMethod]
     public void SchemaBoundView_OverOnePartName_Raises4512()
     {

@@ -54,6 +54,7 @@ partial class Simulation
         var permissions = new List<(string Name, List<string>? Columns)>();
         var currentTokens = new List<string>();
         var wordCheckpoints = new List<ParserContext.Checkpoint>();
+        var entryRead = false;
         while (true)
         {
             var word = TryConsumePermissionWord(context);
@@ -72,9 +73,16 @@ partial class Simulation
                 wordCheckpoints.Clear();
                 var columns = context.Token is Operator { Character: '(' } ? ParsePermissionColumnList(context) : null;
                 permissions.Add((permName, columns));
+                entryRead = true;
             }
             if (context.Token is Operator { Character: ',' })
             {
+                // A comma with no permission before it is the syntax error
+                // at itself (probed 2026-10-21 against SQL Server 2025:
+                // `GRANT , SELECT` and `GRANT SELECT, , UPDATE`).
+                if (!entryRead)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                entryRead = false;
                 context.MoveNextRequired();
                 continue;
             }

@@ -283,6 +283,7 @@ public sealed class ErrorFidelityTests
     [DataRow("default 1 default 2", "DEFAULT")]
     [DataRow("check (a > 0) check (a > 1)", "CHECK")]
     [DataRow("unique unique", "UNIQUE")]
+    [DataRow("identity identity (1, 1)", "IDENTITY")]
     public void DoubledColumnConstraint_IsState0(string constraints, string kind)
         => AssertSqlError($"create table t (a int {constraints})", 8148, 0, $"More than one column {kind} constraint specified for column 'a', table 't'.");
 

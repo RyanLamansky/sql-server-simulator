@@ -216,6 +216,22 @@ internal static class SchemaBinding
     {
         var tokens = Tokenize(bodyText);
         var cteNames = DeclaredCteNames(tokens);
+        // A source named with an empty leading part, `FROM .t`, is no
+        // two-part name either (probed 2026-10-21 against SQL Server 2025).
+        for (var i = 1; i < tokens.Count; i++)
+        {
+            if (tokens[i] is not Operator { Character: '.' } || !IntroducesSource(tokens[i - 1]))
+                continue;
+            var written = new System.Text.StringBuilder();
+            for (var j = i; j < tokens.Count && tokens[j] is Operator { Character: '.' } or Name; j++)
+            {
+                _ = written.Append(tokens[j] is Name part ? part.Value : ".");
+                // A part ends the name unless a dot follows it.
+                if (tokens[j] is Name && (j + 1 >= tokens.Count || tokens[j + 1] is not Operator { Character: '.' }))
+                    break;
+            }
+            throw SimulatedSqlException.CannotSchemaBindInvalidName(moduleKind, qualifiedModuleName, written.ToString());
+        }
         foreach (var name in ScanNames(tokens))
         {
             var resolved = name.SegmentCount == 2 ? Resolve(database, name.Qualifier!, name.Leaf) : null;
