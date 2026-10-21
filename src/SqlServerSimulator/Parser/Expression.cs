@@ -35,6 +35,30 @@ internal abstract class Expression : ExpressionNode
     public virtual string Name => string.Empty;
 
     /// <summary>
+    /// Parses a call's whole argument list, entered on the token after its
+    /// <c>(</c> and left on the closing <c>)</c>, an empty list giving no
+    /// arguments. Every argument parses before the caller checks their count or
+    /// their kinds, so a stray token in the list is Msg 102 at it ahead of a
+    /// Msg 174 or 8172, as real's grammar reads the list before its actions
+    /// judge it (probed 2026-10-21 against SQL Server 2025: <c>PI(1 2)</c> and
+    /// <c>x.value('.' 'int')</c> are near the second token).
+    /// </summary>
+    internal static List<Expression> ParseArgumentList(ParserContext context)
+    {
+        List<Expression> arguments = [];
+        if (context.Token is Operator { Character: ')' })
+            return arguments;
+        while (true)
+        {
+            arguments.Add(Parse(context));
+            if (context.Token is not Operator { Character: ',' })
+                break;
+            context.MoveNextRequired();
+        }
+        return context.Token is Operator { Character: ')' } ? arguments : throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    /// <summary>
     /// Converts the tokens from a command into a single expression. Follows
     /// the lookahead contract documented on <see cref="ParserContext"/>: on
     /// return, <see cref="ParserContext.Token"/> is the first token not

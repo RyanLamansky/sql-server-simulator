@@ -68,19 +68,8 @@ internal sealed class SpatialStaticCall : Expression
             return AggregateExpression.ParseSpatial(type, aggregate, methodName, context);
         }
 
-        var args = new List<Expression>();
         context.MoveNextRequired();
-        if (context.Token is not Operator { Character: ')' })
-        {
-            args.Add(Expression.Parse(context));
-            while (context.Token is Operator { Character: ',' })
-            {
-                context.MoveNextRequired();
-                args.Add(Expression.Parse(context));
-            }
-            if (context.Token is not Operator { Character: ')' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-        }
+        var args = Expression.ParseArgumentList(context);
         if (RequiredArgumentCount(methodName) is null)
         {
             // A name the type has no static method by is real's CLR

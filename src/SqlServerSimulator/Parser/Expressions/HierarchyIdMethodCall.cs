@@ -1,4 +1,3 @@
-using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -73,19 +72,8 @@ internal sealed class HierarchyIdMethodCall : Expression
         if (!TryGetMethod(methodName, out var method))
             throw new InvalidOperationException($"{methodName} is not a hierarchyid method.");
 
-        var args = new List<Expression>();
         context.MoveNextRequired();
-        if (context.Token is not Operator { Character: ')' })
-        {
-            args.Add(Expression.Parse(context));
-            while (context.Token is Operator { Character: ',' })
-            {
-                context.MoveNextRequired();
-                args.Add(Expression.Parse(context));
-            }
-            if (context.Token is not Operator { Character: ')' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-        }
+        var args = Expression.ParseArgumentList(context);
         // Real counts the arguments while compiling (probed 2026-10-07
         // against SQL Server 2025).
         var expected = method switch

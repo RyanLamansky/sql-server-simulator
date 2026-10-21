@@ -184,6 +184,11 @@ public sealed class SyntaxOutranksBindingTests
     [DataRow("select pi(@zz)", 137, "Must declare the scalar variable \"@zz\".")]
     [DataRow("select abs(@zz, 1)", 137, "Must declare the scalar variable \"@zz\".")]
     [DataRow("select pi(zzcol)", 174, "The pi function requires 0 argument(s).")]
+    [DataRow("select geometry::Point(1, 2 3)", 102, "Incorrect syntax near '3'.")]
+    [DataRow("select geometry::Point(1, 2)", 174, "The Point function requires 3 argument(s).")]
+    [DataRow("declare @g geometry = geometry::Point(1, 2, 0); select @g.STBuffer(1 2)", 102, "Incorrect syntax near '2'.")]
+    [DataRow("declare @h hierarchyid = '/1/'; select @h.GetAncestor(1 2)", 102, "Incorrect syntax near '2'.")]
+    [DataRow("declare @h hierarchyid = '/1/'; select @h.GetAncestor(1, 2 3)", 102, "Incorrect syntax near '3'.")]
     [DataRow("begin try select 1 end try begin catch select error_number(; end catch", 102, "Incorrect syntax near ';'.")]
     public void AMethodOrFunctionArgumentList_ParsesBeforeItsCountAndLiterals(string statement, int number, string message)
         => new Simulation().AssertSqlError(statement, number, message);

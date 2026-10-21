@@ -173,40 +173,19 @@ internal sealed class XmlMethodCall : Expression
         // SQL Server 2025).
         var arity = isValue ? 2 : 1;
         context.MoveNextRequired();
-        Token? argumentToken = null;
-        Expression? firstArg = null, secondArg = null;
-        var count = 0;
-        if (context.Token is not Operator { Character: ')' })
-        {
-            argumentToken = context.Token;
-            while (true)
-            {
-                var arg = Expression.Parse(context);
-                count++;
-                if (count == 1)
-                    firstArg = arg;
-                else if (count == 2)
-                    secondArg = arg;
-                if (context.Token is not Operator { Character: ',' })
-                    break;
-                context.MoveNextRequired();
-            }
-            if (context.Token is not Operator { Character: ')' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-        }
-        if (count != arity)
+        var argumentToken = context.Token;
+        var arguments = Expression.ParseArgumentList(context);
+        if (arguments.Count != arity)
             throw SimulatedSqlException.FunctionRequiresNArguments(methodName, arity);
 
         // Each of the four methods that reach here takes the XQuery
         // expression as its first argument; `.modify()`, the one that
         // doesn't, was refused above.
-        string? xqueryText = null;
+        var xqueryText = ConstantString(arguments[0], methodName, 1);
         SqlType valueType = SqlType.Xml;
         int? valueMaxLength = null;
-        if (firstArg is not null)
-            xqueryText = ConstantString(firstArg, methodName, 1);
-        if (isValue && secondArg is not null)
-            (valueType, valueMaxLength) = ResolveValueType(ConstantString(secondArg, methodName, 2), context.Batch);
+        if (isValue)
+            (valueType, valueMaxLength) = ResolveValueType(ConstantString(arguments[1], methodName, 2), context.Batch);
 
         // The argument is a compile-time literal, so the expression compiles
         // once here — which is where real settles its static XQuery
@@ -217,27 +196,24 @@ internal sealed class XmlMethodCall : Expression
         var receiverName = ResolveReceiverName(target, context);
         var display = DisplayMethod(receiverName, methodName);
         var accessorScope = new XmlSqlAccessorScope((isColumn, name) => ResolveAccessorType(isColumn, name, context, display));
-        XmlQueryExpr? xquery = null;
-        if (xqueryText is not null)
+        XmlQueryExpr xquery;
+        try
         {
-            try
+            var nodesRow = ReceiverNodesRow(target, context);
+            xquery = XmlQueryEngine.Compile(xqueryText, methodName, collection?.GetStaticTyping(), display, accessorScope, context.XmlNamespaces, ReceiverNodeType(target, context), nodesRow is null, nodesRow?.XmlNodesSchemaType);
+        }
+        catch (SimulatedSqlException ex) when (ex.XQueryOffset is { } offset)
+        {
+            // Real reports the line the argument's text places the error
+            // on, counted from the line the literal opens on (probed
+            // 2026-10-20 against SQL Server 2025).
+            var line = argumentToken!.LineNumber + xqueryText.AsSpan(0, Math.Min(offset, xqueryText.Length)).Count('\n');
+            foreach (var error in ex.Errors)
             {
-                var nodesRow = ReceiverNodesRow(target, context);
-                xquery = XmlQueryEngine.Compile(xqueryText, methodName, collection?.GetStaticTyping(), display, accessorScope, context.XmlNamespaces, ReceiverNodeType(target, context), nodesRow is null, nodesRow?.XmlNodesSchemaType);
+                if (error.LineNumber == 0)
+                    error.LineNumber = line;
             }
-            catch (SimulatedSqlException ex) when (ex.XQueryOffset is { } offset && argumentToken is not null)
-            {
-                // Real reports the line the argument's text places the error
-                // on, counted from the line the literal opens on (probed
-                // 2026-10-20 against SQL Server 2025).
-                var line = argumentToken.LineNumber + xqueryText.AsSpan(0, Math.Min(offset, xqueryText.Length)).Count('\n');
-                foreach (var error in ex.Errors)
-                {
-                    if (error.LineNumber == 0)
-                        error.LineNumber = line;
-                }
-                throw;
-            }
+            throw;
         }
         return new XmlMethodCall(target, methodName, method, xqueryText, xquery, valueType, valueMaxLength, collection, receiverName, [.. accessorScope.Accessors]);
     }

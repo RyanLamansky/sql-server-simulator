@@ -1,5 +1,4 @@
 using System.Collections.Frozen;
-using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 using SqlServerSimulator.Storage.Spatial;
 
@@ -337,19 +336,8 @@ internal sealed class SpatialMethodCall : Expression
     /// </summary>
     public static SpatialMethodCall Parse(Expression target, string memberName, ParserContext context)
     {
-        var args = new List<Expression>();
         context.MoveNextRequired();
-        if (context.Token is not Operator { Character: ')' })
-        {
-            args.Add(Expression.Parse(context));
-            while (context.Token is Operator { Character: ',' })
-            {
-                context.MoveNextRequired();
-                args.Add(Expression.Parse(context));
-            }
-            if (context.Token is not Operator { Character: ')' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-        }
+        var args = Expression.ParseArgumentList(context);
         return new SpatialMethodCall(target, memberName, [.. args], writtenAsMethod: true);
     }
 

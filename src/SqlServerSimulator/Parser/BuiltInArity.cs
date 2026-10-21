@@ -250,18 +250,8 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
     /// </summary>
     internal static void RequireNoArguments(ParserContext context, string name)
     {
-        if (context.Token is Operator { Character: ')' })
-            return;
-        while (true)
-        {
-            _ = Expression.Parse(context);
-            if (context.Token is not Operator { Character: ',' })
-                break;
-            context.MoveNextRequired();
-        }
-        throw context.Token is Operator { Character: ')' }
-            ? SimulatedSqlException.FunctionRequiresNArguments(name, 0)
-            : SimulatedSqlException.SyntaxErrorNear(context);
+        if (Expression.ParseArgumentList(context).Count > 0)
+            throw SimulatedSqlException.FunctionRequiresNArguments(name, 0);
     }
 
     /// <summary>

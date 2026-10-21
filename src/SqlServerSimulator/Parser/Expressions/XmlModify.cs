@@ -1,4 +1,3 @@
-using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -118,25 +117,10 @@ internal sealed class XmlModify : Expression
         // (Msg 8172) are checked (probed 2026-10-21 against SQL Server 2025:
         // `modify(zzz 'x')` is near 'x', `modify()` Msg 174).
         context.MoveNextRequired();
-        Expression? argument = null;
-        var count = 0;
-        if (context.Token is not Operator { Character: ')' })
-        {
-            while (true)
-            {
-                var parsed = Expression.Parse(context);
-                argument ??= parsed;
-                count++;
-                if (context.Token is not Operator { Character: ',' })
-                    break;
-                context.MoveNextRequired();
-            }
-            if (context.Token is not Operator { Character: ')' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-        }
-        if (count != 1)
+        var arguments = Expression.ParseArgumentList(context);
+        if (arguments.Count != 1)
             throw SimulatedSqlException.FunctionRequiresNArguments(methodName, 1);
-        var xquery = XmlMethodCall.ConstantString(argument!, methodName, 1);
+        var xquery = XmlMethodCall.ConstantString(arguments[0], methodName, 1);
         context.MoveNextOptional();
         return new XmlModify(
             instance,
