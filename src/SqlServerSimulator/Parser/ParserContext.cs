@@ -917,39 +917,6 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool StopExpressionAtBareColon;
 
     /// <summary>
-    /// Set for a statement whose parser leaves the cursor at its first
-    /// <em>un</em>-consumed token, so anything there that isn't a statement
-    /// boundary is unconsumed input rather than the parse's own tail.
-    /// </summary>
-    /// <remarks>
-    /// The dispatch loop can't tell the two apart from the cursor alone: most
-    /// parsers stop on the last token they consumed and need one advance,
-    /// while these stop past it. Advancing unconditionally is what let a stray
-    /// token vanish — <c>DECLARE @x int = 1 zzz</c> ran clean where real
-    /// raises Msg 102. Marking is opt-in per statement kind because it's a
-    /// claim about that parser's cursor discipline, verified against real
-    /// rather than assumed.
-    /// </remarks>
-    private bool statementOwnsItsTrailingToken;
-
-    /// <summary>
-    /// Declares that this statement's parser consumed everything it owns, so
-    /// a non-boundary token left behind is Msg 102.
-    /// </summary>
-    public void RejectTrailingToken() => this.statementOwnsItsTrailingToken = true;
-
-    /// <summary>
-    /// Reads and clears the flag. Clearing keeps it per-statement — one
-    /// statement's discipline says nothing about the next one's.
-    /// </summary>
-    public bool ConsumeRejectTrailingToken()
-    {
-        var value = this.statementOwnsItsTrailingToken;
-        this.statementOwnsItsTrailingToken = false;
-        return value;
-    }
-
-    /// <summary>
     /// Where a statement that is about to raise found its own end on a
     /// <c>(</c> opening the next statement (its start index), or -1: the
     /// cursor-recovery scan past a deferred statement otherwise reads that

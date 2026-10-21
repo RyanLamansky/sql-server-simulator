@@ -298,7 +298,6 @@ partial class Simulation
             };
             context.MoveNextOptional();
         }
-        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
 
@@ -366,7 +365,6 @@ partial class Simulation
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
         context.MoveNextOptional();
-        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
 
@@ -426,7 +424,6 @@ partial class Simulation
     {
         context.MoveNextRequired();
         var spec = ParseFileSpecification(context, FileSpecificationSite.ModifyFile);
-        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
 
@@ -543,7 +540,6 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
         context.MoveNextOptional();
-        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
 

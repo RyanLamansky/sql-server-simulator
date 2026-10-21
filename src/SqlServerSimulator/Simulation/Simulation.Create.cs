@@ -54,11 +54,11 @@ partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Trigger }:
                 return Simulation.TryParseCreateTrigger(context, isAlter: false, createOrAlter: false);
             case ReservedKeyword { Keyword: Keyword.Unique or Keyword.Clustered or Keyword.NonClustered or Keyword.Index }:
-                return RejectingTrailingToken(context, Simulation.TryParseCreateIndex(context));
+                return Simulation.TryParseCreateIndex(context);
             case UnquotedString { Span: var word } when word.Equals("COLUMNSTORE", StringComparison.OrdinalIgnoreCase):
-                return RejectingTrailingToken(context, Simulation.TryParseCreateIndex(context));
+                return Simulation.TryParseCreateIndex(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Type }:
-                return RejectingTrailingToken(context, TryParseCreateType(context));
+                return TryParseCreateType(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Sequence }:
                 return TryParseCreateSequence(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Partition }:
@@ -88,7 +88,7 @@ partial class Simulation
             case UnquotedString { ContextualKeyword: ContextualKeyword.FullText }:
                 return Simulation.TryParseCreateFullText(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Xml }:
-                return RejectingTrailingToken(context, Simulation.TryParseCreateXml(context));
+                return Simulation.TryParseCreateXml(context);
             case Name jsonWord when jsonWord.Value.Equals("JSON", StringComparison.OrdinalIgnoreCase):
                 return Simulation.TryParseCreateJsonIndex(context);
             case Name vectorWord when vectorWord.Value.Equals("VECTOR", StringComparison.OrdinalIgnoreCase):
@@ -102,7 +102,7 @@ partial class Simulation
             case Name securityWord when securityWord.Value.Equals("SECURITY", StringComparison.OrdinalIgnoreCase):
                 return TryParseCreateSecurityPolicy(context);
             case ReservedKeyword { Keyword: Keyword.Statistics }:
-                return RejectingTrailingToken(context, Simulation.TryParseCreateStatistics(context));
+                return Simulation.TryParseCreateStatistics(context);
             case Name assemblyWord when assemblyWord.Value.Equals("ASSEMBLY", StringComparison.OrdinalIgnoreCase):
                 return TryParseCreateAssembly(context);
             case Name aggregateWord when aggregateWord.Value.Equals("AGGREGATE", StringComparison.OrdinalIgnoreCase):

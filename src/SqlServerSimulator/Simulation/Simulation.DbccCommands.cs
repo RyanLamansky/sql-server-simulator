@@ -19,7 +19,6 @@ partial class Simulation
     /// and everything else when it runs: an unknown subcommand (Msg 2526), an
     /// option the subcommand doesn't take (Msg 2532), a wrong argument count
     /// (Msg 2583), a missing permission and a bad argument (Msg 2560).
-    /// The cursor is left on the statement's last token.
     /// </summary>
     private static List<SimulatedStatementOutcome> ParseDbccCommand(ParserContext context, BatchContext batch)
     {
@@ -27,7 +26,6 @@ partial class Simulation
         if (context.GetNextRequired() is not UnquotedString commandToken)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var arguments = new List<DbccArgument>();
-        var afterName = context.SaveCheckpoint();
         context.MoveNextOptional();
         if (context.Token is Operator { Character: '(' })
         {
@@ -45,7 +43,6 @@ partial class Simulation
                     context.MoveNextRequired();
                 }
             }
-            afterName = context.SaveCheckpoint();
             context.MoveNextOptional();
         }
 
@@ -58,7 +55,6 @@ partial class Simulation
                 if (context.GetNextRequired() is not Name option)
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 var parsed = ParseDbccOption(context, option.Value);
-                afterName = context.SaveCheckpoint();
                 context.MoveNextOptional();
                 if (parsed == DbccOptions.MaxDop)
                 {
@@ -67,7 +63,6 @@ partial class Simulation
                     if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } degree })
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     maxDop = degree.CoerceTo(SqlType.Int32).AsInt32;
-                    afterName = context.SaveCheckpoint();
                     context.MoveNextOptional();
                 }
                 else if (context.Token is Operator { Character: '=' })
@@ -79,7 +74,6 @@ partial class Simulation
                     break;
             }
         }
-        context.RestoreCheckpoint(afterName);
 
         // Under SET FMTONLY a DBCC statement neither runs nor reports.
         if (batch.IsSkipping || batch.Connection.FmtOnly)
@@ -336,21 +330,17 @@ partial class Simulation
     /// </summary>
     private static bool ParseCheckpoint(ParserContext context, BatchContext batch)
     {
-        var afterKeyword = context.SaveCheckpoint();
         if (context.GetNextOptional() is Numeric { Value: { IsNull: false } duration } numeric)
         {
             if (!SqlType.IsIntegerCategory(duration.Type) || duration.Type != SqlType.Int32 || duration.AsInt32 <= 0)
                 throw SimulatedSqlException.SyntaxErrorNear(numeric);
+            context.MoveNextOptional();
         }
         // A name after it is no duration either (probed 2026-10-17 against SQL
         // Server 2025), save a label and a word that may open a statement.
         else if (context.Token is Operator { Character: '-' or '+' } or Literal or AtPrefixedString or DelimitedIdentifier or UnquotedString { IsLabelDeclaration: false, ContextualKeyword: ContextualKeyword.NotAKeyword })
         {
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        }
-        else
-        {
-            context.RestoreCheckpoint(afterKeyword);
         }
 
         if (batch.IsSkipping)

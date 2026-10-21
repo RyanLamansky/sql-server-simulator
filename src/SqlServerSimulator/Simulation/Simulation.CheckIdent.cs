@@ -114,26 +114,16 @@ partial class Simulation
 
         // NO_INFOMSGS is the one option it takes; any other is Msg 2532.
         var informational = true;
-        var afterParen = context.SaveCheckpoint();
-        context.MoveNextOptional();
-        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+        if (context.MoveNext() && context.Token is ReservedKeyword { Keyword: Keyword.With })
         {
-            while (true)
+            do
             {
                 var option = context.GetNextRequired<Name>();
                 if (!BuiltInToken.Equals(option.Value, "NO_INFOMSGS"))
                     refusal ??= SimulatedSqlException.DbccWithOptionNotValid();
                 informational = false;
-                var afterOption = context.SaveCheckpoint();
-                if (context.MoveNext() && context.Token is Operator { Character: ',' })
-                    continue;
-                context.RestoreCheckpoint(afterOption);
-                break;
             }
-        }
-        else
-        {
-            context.RestoreCheckpoint(afterParen);
+            while (context.MoveNext() && context.Token is Operator { Character: ',' });
         }
 
         if (batch.IsSkipping)

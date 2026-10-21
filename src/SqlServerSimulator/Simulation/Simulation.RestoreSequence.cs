@@ -65,7 +65,6 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         }
         var options = ParseBackupOptions(context, batch, "RESTORE", verb);
-        context.RejectTrailingToken();
         if (batch.IsSkipping)
             return true;
 

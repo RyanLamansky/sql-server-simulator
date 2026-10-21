@@ -39,15 +39,15 @@ partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Function }:
                 return TryParseCreateFunction(context, isAlter: true, createOrAlter: false);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Sequence }:
-                return RejectingTrailingToken(context, TryParseAlterSequence(context));
+                return TryParseAlterSequence(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Partition }:
                 return TryParseAlterPartition(context);
             case ReservedKeyword { Keyword: Keyword.Schema }:
-                return TryParseAlterSchemaTransfer(context);
+                return PastLastToken(context, TryParseAlterSchemaTransfer(context));
             case ReservedKeyword { Keyword: Keyword.Table }:
                 return TryParseAlterTable(context);
             case ReservedKeyword { Keyword: Keyword.Index }:
-                return RejectingTrailingToken(context, TryParseAlterIndex(context));
+                return TryParseAlterIndex(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Role }:
                 return TryParseAlterRole(context);
             case ReservedKeyword { Keyword: Keyword.User }:
@@ -142,8 +142,8 @@ partial class Simulation
             }
             parsed = verb switch
             {
-                ReservedKeyword { Keyword: Keyword.Set } => TryParseAlterDatabaseSet(context, target),
-                ReservedKeyword { Keyword: Keyword.Collate } => TryParseAlterDatabaseCollate(context, target),
+                ReservedKeyword { Keyword: Keyword.Set } => PastLastToken(context, TryParseAlterDatabaseSet(context, target)),
+                ReservedKeyword { Keyword: Keyword.Collate } => PastLastToken(context, TryParseAlterDatabaseCollate(context, target)),
                 Name modify when BuiltInToken.Equals(modify.Value, "MODIFY") => context.GetNextRequired() switch
                 {
                     ReservedKeyword { Keyword: Keyword.File } => TryParseAlterDatabaseModifyFile(context, target),
@@ -217,7 +217,6 @@ partial class Simulation
         // anything is renamed (probed 2026-09-25).
         if (context.GetNextOptional() is Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
 
@@ -2165,7 +2164,7 @@ partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Set }:
                 if (withCheckExplicit.HasValue)
                     throw SimulatedSqlException.SyntaxErrorNear(context);
-                return TryParseAlterTableSetSystemVersioning(context, tableName);
+                return PastLastToken(context, TryParseAlterTableSetSystemVersioning(context, tableName));
             case ReservedKeyword { Keyword: Keyword.Add }:
                 {
                     // ADD defaults to validate; only explicit WITH NOCHECK skips.
@@ -2197,7 +2196,7 @@ partial class Simulation
                 if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Index })
                     return TryParseAlterTableAlterIndex(context, tableName);
                 context.RestoreCheckpoint(beforeAlterTarget);
-                return RejectingTrailingToken(context, TryParseAlterTableAlterColumn(context, tableName));
+                return TryParseAlterTableAlterColumn(context, tableName);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Rebuild }:
                 if (withCheckExplicit.HasValue)
                     throw SimulatedSqlException.SyntaxErrorNear(context);

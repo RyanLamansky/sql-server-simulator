@@ -381,4 +381,39 @@ public sealed class StatementBoundaryTests
     [DataRow("print 1 spatial_window_max_cells")]
     public void ALeftoverJoinOrSpatialHintWord_IsMsg102(string batch)
         => new Simulation().AssertSqlError(batch, 102);
+
+    /// <summary>
+    /// A token after a complete statement that begins no statement is Msg 102
+    /// at it, whatever the statement kind (probed 2026-10-21 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create queue q zzq", "zzq")]
+    [DataRow("create message type m 5", "5")]
+    [DataRow("create message type m; create contract c (m sent by any) zzq", "zzq")]
+    [DataRow("create queue q; create service s on queue q )", ")")]
+    [DataRow("create queue q; alter queue q with status = off zzq", "zzq")]
+    [DataRow("create fulltext catalog c zzq", "zzq")]
+    [DataRow("create user u without login; alter role db_datareader add member u zzq", "zzq")]
+    [DataRow("alter table t check constraint all zzq", "zzq")]
+    [DataRow("alter table t nocheck constraint all 5", "5")]
+    [DataRow("alter table t enable trigger all )", ")")]
+    [DataRow("alter table t rebuild 5", "5")]
+    [DataRow("declare c cursor for select a from t 5", "5")]
+    [DataRow("declare @x int; set @x = 1 zzq", "zzq")]
+    [DataRow("set nocount on 5", "5")]
+    [DataRow("set transaction isolation level read committed zzq", "zzq")]
+    [DataRow("alter database current set ansi_nulls on )", ")")]
+    [DataRow("dbcc useroptions zzq", "zzq")]
+    [DataRow("dbcc checktable ('t') with no_infomsgs 5", "5")]
+    [DataRow("checkpoint zzq", "zzq")]
+    [DataRow("truncate table t 5", "5")]
+    [DataRow("disable trigger all on t zzq", "zzq")]
+    public void AStrayTokenAfterAnyStatement_IsMsg102(string batch, string near)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int)");
+        simulation.AssertSqlError(batch, 102, $"Incorrect syntax near '{near}'.");
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from sys.service_queues where is_ms_shipped = 0"));
+    }
 }

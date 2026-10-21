@@ -62,7 +62,6 @@ partial class Simulation
                 context.RestoreCheckpoint(atWord);
             throw SimulatedSqlException.SyntaxErrorNear(context);
         }
-        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
 

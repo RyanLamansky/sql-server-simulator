@@ -35,9 +35,6 @@ partial class Simulation
         if (bare)
             loginLink = name;
         var (defaultSchema, _) = ParsePrincipalWithOptions(context, acceptsName: false, acceptsNullSchema: false, out _, out var defaultLanguage);
-        // A token past the statement is Msg 102 there (probed 2026-10-21
-        // against SQL Server 2025).
-        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
         context.CurrentDatabase.RejectWriteWhenReadOnly();
@@ -216,7 +213,6 @@ partial class Simulation
         if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var (defaultSchema, newName) = ParsePrincipalWithOptions(context, acceptsName: true, acceptsNullSchema: true, out var nullSchemaOption, out var defaultLanguage);
-        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
 
@@ -307,9 +303,6 @@ partial class Simulation
             ownerName = ownerToken.Value;
             context.MoveNextOptional();
         }
-        // A token past the name or the owner is Msg 102 there (probed
-        // 2026-10-21 against SQL Server 2025).
-        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
         context.CurrentDatabase.RejectWriteWhenReadOnly();
@@ -532,7 +525,6 @@ partial class Simulation
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
         {
             var (_, newName) = ParsePrincipalWithOptions(context);
-            context.RejectTrailingToken();
             if (context.Batch.IsSkipping || newName is null)
                 return true;
             context.CurrentDatabase.RejectWriteWhenReadOnly();

@@ -61,7 +61,6 @@ partial class Simulation
         };
         var name = ReadPartitionObjectName(context);
         context.MoveNextOptional();
-        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
 
@@ -186,7 +185,6 @@ partial class Simulation
             }
         }
         context.MoveNextOptional();
-        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
 
@@ -408,7 +406,6 @@ partial class Simulation
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
-        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
 
@@ -563,7 +560,6 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
         context.MoveNextOptional();
-        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
 
@@ -651,7 +647,6 @@ partial class Simulation
             filegroup = ReadFilegroupName(context);
             context.MoveNextOptional();
         }
-        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
 

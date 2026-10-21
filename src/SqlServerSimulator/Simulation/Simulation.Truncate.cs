@@ -51,11 +51,11 @@ partial class Simulation
 
         var name = BatchContext.TemporaryTableName(context, BatchContext.ParseObjectName(context));
         List<(Parser.Expression Low, Parser.Expression? High)>? partitions = null;
-        var afterName = context.SaveCheckpoint();
         if (context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.With })
+        {
             partitions = ParseTruncatePartitions(context);
-        else
-            context.RestoreCheckpoint(afterName);
+            context.MoveNextOptional();
+        }
 
         if (batch.IsSkipping)
             return;

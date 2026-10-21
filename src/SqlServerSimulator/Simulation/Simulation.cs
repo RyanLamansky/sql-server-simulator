@@ -3662,11 +3662,6 @@ public sealed partial class Simulation
             case Operator { Character: '(' }:
                 var selectStart = context.Token.StartIndex;
                 outcome = this.RunSelectStatement(batch, out var cutShort);
-                // A query stops at its first unconsumed token, so an operator
-                // left after it is Msg 102 there rather than swallowed
-                // (probed 2026-10-21 against SQL Server 2025: `… WHERE
-                // EXISTS (…) = 1` is near '=').
-                context.RejectTrailingToken();
                 // A query run under a query notification request subscribes.
                 if (connection.PendingQueryNotification is { } notification && !batch.IsSkipping && cutShort is null)
                     this.SubscribeQuery(batch, notification, context.Command.CommandText[selectStart..(context.Token?.StartIndex ?? context.Command.CommandText.Length)]);
@@ -3678,7 +3673,6 @@ public sealed partial class Simulation
 
             case ReservedKeyword { Keyword: Keyword.Insert }:
                 outcome = this.RunDmlStatement(context, ParseInsert);
-                context.RejectTrailingToken();
                 if (!batch.IsSkipping)
                 {
                     connection.LastStatementRowCount = outcome.RecordsAffected;
@@ -3690,7 +3684,6 @@ public sealed partial class Simulation
 
             case ReservedKeyword { Keyword: Keyword.Merge }:
                 outcome = this.RunDmlStatement(context, ParseMerge);
-                context.RejectTrailingToken();
                 if (!batch.IsSkipping)
                 {
                     connection.LastStatementRowCount = outcome.RecordsAffected;
@@ -3712,7 +3705,6 @@ public sealed partial class Simulation
 
             case ReservedKeyword { Keyword: Keyword.Update } when IsUpdateStatistics(context):
                 _ = TryParseUpdateStatistics(context);
-                context.RejectTrailingToken();
                 rowCount = 0;
                 // NORECOMPUTE surfaces in sys.stats.
                 if (!batch.IsSkipping)
@@ -3721,7 +3713,6 @@ public sealed partial class Simulation
 
             case ReservedKeyword { Keyword: Keyword.Update }:
                 outcome = this.RunDmlStatement(context, ParseUpdate);
-                context.RejectTrailingToken();
                 if (!batch.IsSkipping)
                 {
                     connection.LastStatementRowCount = outcome.RecordsAffected;
@@ -3733,7 +3724,6 @@ public sealed partial class Simulation
 
             case ReservedKeyword { Keyword: Keyword.Delete }:
                 outcome = this.RunDmlStatement(context, ParseDelete);
-                context.RejectTrailingToken();
                 if (!batch.IsSkipping)
                 {
                     connection.LastStatementRowCount = outcome.RecordsAffected;
@@ -3762,12 +3752,10 @@ public sealed partial class Simulation
 
             case ReservedKeyword { Keyword: Keyword.Break }:
                 ParseBreakStatement(batch);
-                context.RejectTrailingToken();
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Continue }:
                 ParseContinueStatement(batch);
-                context.RejectTrailingToken();
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Return }:
@@ -3781,10 +3769,6 @@ public sealed partial class Simulation
                     // itself starts skipping.
                     var returnRuns = !batch.IsSkipping;
                     var carriesStatus = ParseReturnStatement(batch);
-                    // A token after the returned value is a syntax error at it
-                    // (`RETURN 1 x` is Msg 102 near 'x'; probed 2026-09-30
-                    // against SQL Server 2025).
-                    context.RejectTrailingToken();
                     // A procedure's RETURN of a value is a SELECT-kind
                     // statement counting one row (probed 2026-09-28 against
                     // SQL Server 2025).
@@ -3801,24 +3785,20 @@ public sealed partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute }:
                 foreach (var o in ParseExec(batch))
                     yield return o;
-                context.RejectTrailingToken();
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Reconfigure }:
                 ParseReconfigureStatement(batch);
-                context.RejectTrailingToken();
                 rowCount = 0;
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Revert }:
                 RevertStatement(batch);
-                context.RejectTrailingToken();
                 rowCount = 0;
                 break;
 
             case ReservedKeyword { Keyword: Keyword.SetUser }:
                 SetUserStatement(batch);
-                context.RejectTrailingToken();
                 rowCount = 0;
                 break;
 
@@ -3826,7 +3806,6 @@ public sealed partial class Simulation
             // arms and the implicit EXEC a leading word reads as.
             case UnquotedString or ReservedKeyword { Keyword: Keyword.Begin or Keyword.End or Keyword.WaitFor } when BrokerStatementAt(context) is not BrokerStatement.None and var brokerStatement:
                 outcome = RunBrokerStatement(context, brokerStatement);
-                context.RejectTrailingToken();
                 if (!batch.IsSkipping)
                 {
                     connection.LastStatementRowCount = outcome.RecordsAffected;
@@ -3842,7 +3821,6 @@ public sealed partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Throw }:
                 ParseThrowStatement(batch);
-                context.RejectTrailingToken();
                 rowCount = 0;
                 break;
 
@@ -3856,25 +3834,24 @@ public sealed partial class Simulation
 
             case ReservedKeyword { Keyword: Keyword.Print }:
                 ParsePrintStatement(batch);
-                context.RejectTrailingToken();
                 rowCount = 0;
                 break;
 
             case ReservedKeyword { Keyword: Keyword.RaisError }:
                 ParseRaiserrorStatement(batch);
-                context.RejectTrailingToken();
                 rowCount = 0;
                 break;
 
             case ReservedKeyword { Keyword: Keyword.WaitFor }:
                 ParseWaitForStatement(batch);
-                context.RejectTrailingToken();
                 rowCount = 0;
                 break;
 
+            // The text-pointer statements stop on their own last token.
             case ReservedKeyword { Keyword: Keyword.ReadText }:
                 {
                     var readText = ParseReadTextStatement(batch);
+                    context.MoveNextOptional();
                     if (readText is not null)
                     {
                         connection.LastStatementRowCount = 1;
@@ -3890,6 +3867,7 @@ public sealed partial class Simulation
 
             case ReservedKeyword { Keyword: Keyword.WriteText }:
                 outcome = RunMutation(context, ParseWriteTextStatement);
+                context.MoveNextOptional();
                 if (outcome is SimulatedBulkTextRequest writeTextWaits)
                     yield return writeTextWaits;
                 else
@@ -3898,6 +3876,7 @@ public sealed partial class Simulation
 
             case ReservedKeyword { Keyword: Keyword.UpdateText }:
                 outcome = RunMutation(context, ParseUpdateTextStatement);
+                context.MoveNextOptional();
                 if (outcome is SimulatedBulkTextRequest updateTextWaits)
                     yield return updateTextWaits;
                 else
@@ -3911,7 +3890,6 @@ public sealed partial class Simulation
 
             case ReservedKeyword { Keyword: Keyword.Use }:
                 ParseUseStatement(batch);
-                context.RejectTrailingToken();
                 rowCount = 0;
                 break;
 
@@ -3933,7 +3911,6 @@ public sealed partial class Simulation
                         case ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction or Keyword.Distributed }:
                             if (TryParseBeginTransaction(context))
                                 rowCount = 0;
-                            context.RejectTrailingToken();
                             break;
                         case UnquotedString { ContextualKeyword: ContextualKeyword.Try }:
                             foreach (var o in ParseTryCatch(batch))
@@ -4017,13 +3994,8 @@ public sealed partial class Simulation
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Create } when TryParseCreate(context):
-            case ReservedKeyword { Keyword: Keyword.Drop } when RejectingTrailingToken(context, TryParseDrop(context)):
+            case ReservedKeyword { Keyword: Keyword.Drop } when TryParseDrop(context):
             case ReservedKeyword { Keyword: Keyword.Alter } when TryParseAlter(context):
-                // A CREATE TABLE reads its whole definition, so a token left
-                // after it is Msg 102 at it (probed 2026-10-21 against SQL
-                // Server 2025).
-                if (batch.CurrentStatement.CreatesTable)
-                    context.RejectTrailingToken();
                 batch.WalkMetDdl |= batch.CompilingForRun;
                 // DDL invalidates every cached plan parsed under the prior
                 // schema version. Skip-mode statements don't actually execute
@@ -4048,16 +4020,16 @@ public sealed partial class Simulation
                 }
                 break;
 
-            case ReservedKeyword { Keyword: Keyword.Commit } when RejectingTrailingToken(context, TryParseCommit(context)):
+            case ReservedKeyword { Keyword: Keyword.Commit } when TryParseCommit(context):
             case ReservedKeyword { Keyword: Keyword.Save } when TryParseSavepoint(context):
             case ReservedKeyword { Keyword: Keyword.Rollback } when TryParseRollbackTransaction(context):
-            case ReservedKeyword { Keyword: Keyword.Grant } when RejectingTrailingToken(context, TryParseGrantRevokeDeny(context, PermissionStatementKind.Grant)):
-            case ReservedKeyword { Keyword: Keyword.Revoke } when RejectingTrailingToken(context, TryParseGrantRevokeDeny(context, PermissionStatementKind.Revoke)):
-            case ReservedKeyword { Keyword: Keyword.Deny } when RejectingTrailingToken(context, TryParseGrantRevokeDeny(context, PermissionStatementKind.Deny)):
+            case ReservedKeyword { Keyword: Keyword.Grant } when TryParseGrantRevokeDeny(context, PermissionStatementKind.Grant):
+            case ReservedKeyword { Keyword: Keyword.Revoke } when TryParseGrantRevokeDeny(context, PermissionStatementKind.Revoke):
+            case ReservedKeyword { Keyword: Keyword.Deny } when TryParseGrantRevokeDeny(context, PermissionStatementKind.Deny):
                 rowCount = 0;
                 break;
-            case UnquotedString { ContextualKeyword: ContextualKeyword.Disable } when TryParseEnableOrDisableTrigger(context, disable: true):
-            case UnquotedString { ContextualKeyword: ContextualKeyword.Enable } when TryParseEnableOrDisableTrigger(context, disable: false):
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Disable } when PastLastToken(context, TryParseEnableOrDisableTrigger(context, disable: true)):
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Enable } when PastLastToken(context, TryParseEnableOrDisableTrigger(context, disable: false)):
                 rowCount = 0;
                 // A trigger's is_disabled surfaces in sys.triggers.
                 if (!batch.IsSkipping)
@@ -4095,7 +4067,6 @@ public sealed partial class Simulation
                         {
                             batch.CurrentStatement.SuppressErrorReset = true;
                         }
-                        context.RejectTrailingToken();
                     }
                 }
                 break;
@@ -4144,10 +4115,6 @@ public sealed partial class Simulation
                 RefuseUnbuiltStatement(context, verb: null);
                 foreach (var o in ParseExec(batch, implicitExec: true))
                     yield return o;
-                // As after an EXEC, a token the argument list doesn't take is
-                // Msg 102 (or 156 at a keyword) rather than the next statement
-                // (probed 2026-10-15 against SQL Server 2025: `foo bar baz`).
-                context.RejectTrailingToken();
                 break;
 
             // A stray END is named as a plain token, where any other keyword
@@ -4175,39 +4142,19 @@ public sealed partial class Simulation
         if (rowCount is { } count && !batch.IsSkipping)
             connection.LastStatementRowCount = count;
 
-        // Cursor normalization, and the batch's trailing-token rule.
-        //
-        // A statement parser leaves the cursor in one of two places: at its
-        // first un-consumed token (a `;`, the next statement's leading
-        // keyword, or null at end of input), or on the last token it did
-        // consume. The first is a statement boundary and needs nothing. The
-        // second needs one advance — and used to get it unconditionally,
-        // which is what silently swallowed a stray token after any parser of
-        // the first kind: `DECLARE @x int = 1 zzz` ran clean where real
-        // raises Msg 102 at the `zzz`.
-        //
-        // The two cases can't be told apart from the cursor alone, so the
-        // dispatch arm says which: a statement kind whose parser stops past
-        // its own input calls ParserContext.RejectTrailingToken, and a
-        // non-boundary token after one of those is unconsumed input — Msg 102
-        // naming it, real's own rule, probed per statement kind on
-        // 2026-08-06. Everything else keeps the advance.
-        // Read the flag unconditionally: it has to be cleared even when this
-        // statement ended on a boundary, or it would still be set when the
-        // next one finishes and would reject that statement's own tail.
-        var rejectTrailingToken = context.ConsumeRejectTrailingToken();
-        // A label begins the next statement as a keyword does (probed
-        // 2026-09-28 against SQL Server 2025: `DECLARE @i int = 0` and
-        // `GOTO l` each run on into a label on the next line).
-        if (!EndsStatement(context.Token) && !IsLabelDeclaration(context))
+        // Every statement parser stops at its first unconsumed token, so a
+        // token there that begins no statement is input the statement didn't
+        // take: Msg 102 at it, as real reports it. A label begins the next
+        // statement as a keyword does (probed 2026-09-28 against SQL Server
+        // 2025: `DECLARE @i int = 0` and `GOTO l` each run on into a label on
+        // the next line). A statement that ended the batch, jumped or
+        // returned out of a block leaves the cursor wherever that happened.
+        if (!EndsStatement(context.Token) && !IsLabelDeclaration(context)
+            && !batch.BatchAborted && batch.PendingGotoLabel is null && !batch.ReturnSignaled)
         {
-            if (rejectTrailingToken)
-            {
-                throw Selection.IsBareTableHintWord(context.Token)
-                    ? SimulatedSqlException.TableHintNeedsWithKeyword(context.Token!.Source)
-                    : SimulatedSqlException.SyntaxErrorNear(context);
-            }
-            context.MoveNextOptional();
+            throw Selection.IsBareTableHintWord(context.Token)
+                ? SimulatedSqlException.TableHintNeedsWithKeyword(context.Token!.Source)
+                : SimulatedSqlException.SyntaxErrorNear(context);
         }
     }
 
@@ -4340,8 +4287,8 @@ public sealed partial class Simulation
         // 2026-09-26), nor on an AS (`(SELECT 1) AS q` is near the
         // keyword 'as', probed 2026-09-30), nor on a closing paren
         // (`(SELECT 1))` and a CTE-led `… FROM c)` are near ')', probed
-        // 2026-10-01); any other token is left to the generic
-        // end-of-dispatch normalizer.
+        // 2026-10-01); any other token is left to the dispatch loop's
+        // trailing-token check.
         if (context.Token is (Numeric or Literal or Name or Operator { Character: ',' or ')' } or ReservedKeyword { Keyword: Keyword.As }) and not UnquotedString { IsLabelDeclaration: true })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         if (!batch.IsSkipping)
@@ -4932,15 +4879,15 @@ public sealed partial class Simulation
     }
 
     /// <summary>
-    /// Marks the statement as one whose parser stops at its first un-consumed
-    /// token, then passes <paramref name="parsed"/> straight through — for the
-    /// dispatch arms whose bodies are shared with statement kinds that don't
-    /// share that discipline, where the mark can't go on the arm itself.
+    /// Steps past the token a parser that reads up to its own last token stops
+    /// on, when it parsed, so the statement ends where the next one begins —
+    /// for the statement families whose inner parsers share that discipline
+    /// with clauses nested inside other statements.
     /// </summary>
-    private static bool RejectingTrailingToken(ParserContext context, bool parsed)
+    private static bool PastLastToken(ParserContext context, bool parsed)
     {
         if (parsed)
-            context.RejectTrailingToken();
+            context.MoveNextOptional();
         return parsed;
     }
 

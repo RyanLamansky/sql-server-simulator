@@ -236,9 +236,6 @@ partial class Simulation
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Catch })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
-        // A token after END CATCH is Msg 102 at it (probed 2026-10-21 against
-        // SQL Server 2025).
-        context.RejectTrailingToken();
         FunctionBodyShape.NoteSideEffect(batch, "END CATCH", FunctionBodyShape.ControlOperatorState, endCatch.LineNumber);
         // The construct's end leaves @@ROWCOUNT at 0, caught error or none,
         // where a block or an IF leaves its last statement's (probed

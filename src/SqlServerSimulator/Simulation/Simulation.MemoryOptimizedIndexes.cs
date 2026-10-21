@@ -61,7 +61,6 @@ partial class Simulation
             if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Index })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
-        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
         if (!context.Batch.TryResolveTable(tableName, out var table))
@@ -95,7 +94,6 @@ partial class Simulation
         if (context.GetNextOptional() is not ReservedKeyword { Keyword: Keyword.With })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var options = ParseOptionalIndexWithClause(context);
-        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
         if (!context.Batch.TryResolveTable(tableName, out var table))

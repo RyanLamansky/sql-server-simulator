@@ -110,7 +110,6 @@ partial class Simulation
             }
             context.MoveNextOptional();
         }
-        context.RejectTrailingToken();
         if (options.CodePageWritten is { } codePage)
             throw SimulatedSqlException.OptionNotSupportedOnPlatform(codePage);
 

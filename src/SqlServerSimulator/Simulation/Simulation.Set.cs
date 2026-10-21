@@ -36,12 +36,12 @@ partial class Simulation
         }
         return afterSet switch
         {
-            ReservedKeyword { Keyword: Keyword.Identity_Insert } => TryParseSetIdentityInsert(context),
+            ReservedKeyword { Keyword: Keyword.Identity_Insert } => PastLastToken(context, TryParseSetIdentityInsert(context)),
             AtPrefixedString variableToken => TryParseSetVariable(context, variableToken),
             // A built-in @@ function no SET can assign (probed 2026-10-04
             // against SQL Server 2025: SET @@ROWCOUNT is Msg 102 at it).
             DoubleAtPrefixedString builtIn => throw SimulatedSqlException.SyntaxErrorNear(builtIn),
-            _ => TryParseSetSessionOption(context, afterSet),
+            _ => PastLastToken(context, TryParseSetSessionOption(context, afterSet)),
         };
     }
 
@@ -1034,7 +1034,7 @@ partial class Simulation
 
         context.MoveNextRequired();
         if (context.Token is Operator { Character: '.' })
-            return RejectingTrailingToken(context, TryParseSetInstanceMember(context, variableToken, slot));
+            return TryParseSetInstanceMember(context, variableToken, slot);
         if (TryConsumeAssignmentOperator(context) is not char assignOp)
             return false;
 

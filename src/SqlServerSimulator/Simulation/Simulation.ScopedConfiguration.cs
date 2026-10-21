@@ -65,7 +65,6 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             _ = context.GetNextRequired();
             context.MoveNextOptional();
-            context.RejectTrailingToken();
             if (!context.Batch.IsSkipping)
                 throw SimulatedSqlException.DataWarehouseCompatibilityLevel();
             return true;
@@ -91,7 +90,6 @@ partial class Simulation
 
         if (forSecondary && option.PrimaryOnlyState != 0)
             throw SimulatedSqlException.ScopedConfigurationPrimaryOnly(option.PrimaryOnlyName, option.PrimaryOnlyState);
-        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
 
@@ -194,7 +192,6 @@ partial class Simulation
             withHandle = true;
             context.MoveNextOptional();
         }
-        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
         RejectScopedConfigurationWithoutPermission(context, context.CurrentDatabase);

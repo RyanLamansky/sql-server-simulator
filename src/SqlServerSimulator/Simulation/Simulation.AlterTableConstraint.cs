@@ -102,10 +102,6 @@ partial class Simulation
             context.MoveNextRequired();
         }
 
-        // The list ends at its first unconsumed token, so a stray one is
-        // Msg 102 / 156 there — `UNIQUE (w) WHERE …` names the WHERE (probed
-        // 2026-09-25 against SQL Server 2025).
-        context.RejectTrailingToken();
         // An online constraint is added alone (probed 2026-10-07 against SQL
         // Server 2025: beside a column, its own or another, or a second
         // constraint), refused as the batch compiles.
@@ -1371,7 +1367,6 @@ partial class Simulation
                     break;
                 context.MoveNextRequired();
             }
-            context.RejectTrailingToken();
             if (context.Batch.IsSkipping)
                 return true;
             var columnsUndo = ApplyAddedColumns(context, added, primaryKeyColumns: null);

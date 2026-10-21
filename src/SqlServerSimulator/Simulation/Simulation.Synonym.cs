@@ -27,7 +27,6 @@ partial class Simulation
         context.MoveNextRequired();
         var baseObject = BatchContext.ParseObjectName(context);
         context.MoveNextOptional();
-        context.RejectTrailingToken();
 
         if (context.Batch.IsSkipping)
             return true;

@@ -47,7 +47,6 @@ partial class Simulation
         var devices = ParseBackupDevices(context, batch, verb);
         var refused = new List<string>();
         var options = ParseBackupOptions(context, batch, "RESTORE", verb, refused, takesStats: form == "VERIFYONLY");
-        context.RejectTrailingToken();
         if (batch.IsSkipping)
             return true;
         if (refused.Count > 0)

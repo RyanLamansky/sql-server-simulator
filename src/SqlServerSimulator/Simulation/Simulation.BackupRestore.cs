@@ -187,7 +187,6 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var devices = ParseBackupDevices(context, batch, verb);
         var options = ParseBackupOptions(context, batch, "BACKUP", verb);
-        context.RejectTrailingToken();
         if (batch.IsSkipping)
             return true;
         if (!isLog && (options.NoRecovery || options.NoTruncate))

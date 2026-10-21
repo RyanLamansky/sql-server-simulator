@@ -55,10 +55,6 @@ partial class Simulation
         var options = context.Token is ReservedKeyword { Keyword: Keyword.With }
             ? ParseJsonIndexOptions(context)
             : new JsonIndexOptions();
-        // The next statement may follow at once; anything else is the
-        // dispatch loop's syntax error (probed 2026-10-19 against SQL Server
-        // 2025: a SELECT or a block's END follows, ON or WHERE is Msg 156).
-        context.RejectTrailingToken();
 
         if (context.Batch.IsSkipping)
             return true;

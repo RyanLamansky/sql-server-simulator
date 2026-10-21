@@ -90,16 +90,12 @@ partial class Simulation
         // Optional `WITH NO_INFOMSGS` — the lone WITH option for SHRINK —
         // silences SHRINKFILE's row as well as the messages.
         var informational = true;
-        var afterParen = context.SaveCheckpoint();
         context.MoveNextOptional();
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
         {
             _ = context.GetNextRequired<Name>();
             informational = false;
-        }
-        else
-        {
-            context.RestoreCheckpoint(afterParen);
+            context.MoveNextOptional();
         }
 
         if (batch.IsSkipping)
@@ -189,6 +185,7 @@ partial class Simulation
         // against SQL Server 2025).
         if (context.GetNextRequired() is Operator { Character: ')' })
         {
+            context.MoveNextOptional();
             if (batch.IsSkipping)
                 return true;
             throw SimulatedSqlException.FollowedByDbccCompleted(SimulatedSqlException.DbccWrongParameterCount(state: 5), batch.Connection.Language);
@@ -204,10 +201,9 @@ partial class Simulation
 
         bool header = false, density = false, histogram = false, statsStream = false;
         var informational = true;
-        var afterParen = context.SaveCheckpoint();
         if (context.MoveNext() && context.Token is ReservedKeyword { Keyword: Keyword.With })
         {
-            while (true)
+            do
             {
                 var option = context.GetNextRequired<Name>();
                 if (BuiltInToken.Equals(option.Value, "HISTOGRAM"))
@@ -222,16 +218,8 @@ partial class Simulation
                     statsStream = true;
                 else
                     throw UnlessANameFollows(context, SimulatedSqlException.WithOptionNotRecognized(option.Value));
-                var afterOption = context.SaveCheckpoint();
-                if (context.MoveNext() && context.Token is Operator { Character: ',' })
-                    continue;
-                context.RestoreCheckpoint(afterOption);
-                break;
             }
-        }
-        else
-        {
-            context.RestoreCheckpoint(afterParen);
+            while (context.MoveNext() && context.Token is Operator { Character: ',' });
         }
         if (!header && !density && !histogram)
             header = density = histogram = true;
@@ -546,7 +534,6 @@ partial class Simulation
         }
 
         var arguments = new List<Expression>(2);
-        var afterName = context.SaveCheckpoint();
         context.MoveNextOptional();
         if (context.Token is Operator { Character: '(' })
         {
@@ -558,7 +545,6 @@ partial class Simulation
             while (context.Token is Operator { Character: ',' });
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            afterName = context.SaveCheckpoint();
             context.MoveNextOptional();
         }
 
@@ -569,10 +555,7 @@ partial class Simulation
             if (!BuiltInToken.Equals(option.ToString(), "NO_INFOMSGS"))
                 throw SimulatedSqlException.DbccWithOptionNotValid();
             informational = false;
-        }
-        else
-        {
-            context.RestoreCheckpoint(afterName);
+            context.MoveNextOptional();
         }
 
         if (arguments.Count is 0 or > 2)
