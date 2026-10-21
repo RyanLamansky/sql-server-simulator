@@ -25,9 +25,16 @@ sealed class UnquotedString : Name
     }
 
     /// <summary>
+    /// Whether this is a <c>$</c>-word (<c>$action</c>, <c>$identity</c>,
+    /// <c>$partition</c> …), which real never reads as an alias. Only the
+    /// tokenizer's <c>$</c>-word path yields an unquoted token starting with
+    /// <c>$</c>, so a bracketed <c>[$x]</c> never is one.
+    /// </summary>
+    public bool IsDollarWord => this.Source[0] == '$';
+
+    /// <summary>
     /// Whether this is the <c>$partition</c> qualifier of a partition-function
-    /// call. Only the tokenizer's <c>$</c>-word path yields an unquoted token
-    /// starting with <c>$</c>, so a bracketed <c>[$partition]</c> never is.
+    /// call, a <see cref="IsDollarWord"/> spelled <c>$partition</c>.
     /// </summary>
     public bool IsDollarPartition => this.Source.Length == 10 && this.Source[0] == '$' && this.Source[1..].Equals("partition", StringComparison.OrdinalIgnoreCase);
 

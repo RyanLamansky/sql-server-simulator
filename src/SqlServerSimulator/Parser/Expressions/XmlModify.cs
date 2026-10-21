@@ -114,10 +114,29 @@ internal sealed class XmlModify : Expression
         // where the same element over untyped xml is Msg 2356.
         var collection = schemaCollection ?? XmlMethodCall.ResolveTargetSchemaCollection(instance, context);
 
+        // The argument list parses before its count (Msg 174) and its literal
+        // (Msg 8172) are checked (probed 2026-10-21 against SQL Server 2025:
+        // `modify(zzz 'x')` is near 'x', `modify()` Msg 174).
         context.MoveNextRequired();
-        var xquery = XmlMethodCall.ConstantString(Expression.Parse(context), methodName, 1);
+        Expression? argument = null;
+        var count = 0;
         if (context.Token is not Operator { Character: ')' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        {
+            while (true)
+            {
+                var parsed = Expression.Parse(context);
+                argument ??= parsed;
+                count++;
+                if (context.Token is not Operator { Character: ',' })
+                    break;
+                context.MoveNextRequired();
+            }
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+        if (count != 1)
+            throw SimulatedSqlException.FunctionRequiresNArguments(methodName, 1);
+        var xquery = XmlMethodCall.ConstantString(argument!, methodName, 1);
         context.MoveNextOptional();
         return new XmlModify(
             instance,

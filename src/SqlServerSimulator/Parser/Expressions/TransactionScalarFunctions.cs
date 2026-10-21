@@ -16,8 +16,7 @@ internal sealed class XactState : Expression
 {
     public XactState(ParserContext context)
     {
-        if (context.Token is not Tokens.Operator { Character: ')' })
-            throw SimulatedSqlException.FunctionRequiresNArguments("xact_state", 0);
+        BuiltInArity.RequireNoArguments(context, "xact_state");
         this.statementMark = context.Batch.CurrentStatement.TakeTransactionMark();
     }
 
@@ -58,8 +57,7 @@ internal sealed class RowCountBig : Expression
 {
     public RowCountBig(ParserContext context)
     {
-        if (context.Token is not Tokens.Operator { Character: ')' })
-            throw SimulatedSqlException.FunctionRequiresNArguments("rowcount_big", 0);
+        BuiltInArity.RequireNoArguments(context, "rowcount_big");
     }
 
     public override SqlValue Run(RuntimeContext runtime) =>

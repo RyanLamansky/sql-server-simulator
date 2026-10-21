@@ -173,7 +173,7 @@ public sealed class ErrorDiagnosticsTests
     [TestMethod]
     public void ThrowValueForm_ReportsThrowStatementLine()
     {
-        var ex = new Simulation().AssertSqlError("declare @x int\nthrow 51000, N'boom', 1", 51000);
+        var ex = new Simulation().AssertSqlError("declare @x int;\nthrow 51000, N'boom', 1", 51000);
         AreEqual(2, ex.LineNumber);
     }
 

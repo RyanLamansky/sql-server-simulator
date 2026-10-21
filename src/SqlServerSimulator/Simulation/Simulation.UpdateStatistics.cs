@@ -295,7 +295,7 @@ partial class Simulation
                     statsStream = true;
                     break;
                 case Name name:
-                    throw SimulatedSqlException.UnrecognizedUpdateStatisticsOption(name.Value);
+                    throw UnlessANameFollows(context, SimulatedSqlException.UnrecognizedUpdateStatisticsOption(name.Value));
                 default:
                     throw SimulatedSqlException.SyntaxErrorNear(context);
             }

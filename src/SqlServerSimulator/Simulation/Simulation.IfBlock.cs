@@ -98,7 +98,7 @@ partial class Simulation
         try
         {
             batch.SkipModeFlag = thenSkip;
-            foreach (var o in DispatchOneStatement(batch, requireSemicolonBeforeCte: false, atBatchStart: false))
+            foreach (var o in DispatchOneStatement(batch, afterUnterminatedStatement: false, atBatchStart: false))
                 yield return o;
 
             hadElse = TryConsumeSeparatorsBeforeElse(context);
@@ -119,7 +119,7 @@ partial class Simulation
                     || bindError is not null
                     || condResult
                     || batch.LoopControl != LoopControl.None;
-                foreach (var o in DispatchOneStatement(batch, requireSemicolonBeforeCte: false, atBatchStart: false))
+                foreach (var o in DispatchOneStatement(batch, afterUnterminatedStatement: false, atBatchStart: false))
                     yield return o;
             }
         }
@@ -339,7 +339,7 @@ partial class Simulation
                 if (batch.FramesUnderNoExec)
                     yield return StatementDone(batch, StatementDoneKind.Condition);
                 batch.SkipModeFlag = true;
-                foreach (var o in DispatchOneStatement(batch, requireSemicolonBeforeCte: false, atBatchStart: false))
+                foreach (var o in DispatchOneStatement(batch, afterUnterminatedStatement: false, atBatchStart: false))
                     yield return o;
             }
             else
@@ -385,7 +385,7 @@ partial class Simulation
                         batch.SkipModeFlag = true;
                         try
                         {
-                            foreach (var o in DispatchOneStatement(batch, requireSemicolonBeforeCte: false, atBatchStart: false))
+                            foreach (var o in DispatchOneStatement(batch, afterUnterminatedStatement: false, atBatchStart: false))
                                 yield return o;
                         }
                         finally
@@ -395,7 +395,7 @@ partial class Simulation
                         break;
                     }
 
-                    foreach (var o in DispatchOneStatement(batch, requireSemicolonBeforeCte: false, atBatchStart: false))
+                    foreach (var o in DispatchOneStatement(batch, afterUnterminatedStatement: false, atBatchStart: false))
                         yield return o;
 
                     // RETURN, GOTO, a batch-ending error and an error a TRY

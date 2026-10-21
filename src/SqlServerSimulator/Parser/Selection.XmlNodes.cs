@@ -66,7 +66,7 @@ internal sealed partial class Selection
             nodesCall = parsed;
         }
 
-        var (alias, columnName) = ConsumeNodesAlias(context);
+        var (alias, columnName) = ConsumeNodesAlias(context, nodesCall);
         var plan = FromXmlNodes(nodesCall, columnName);
         // Each row's value is a node of the target instance, so it carries the
         // target's schema binding — real types a `.value()` against it the
@@ -97,28 +97,59 @@ internal sealed partial class Selection
     /// Consumes the mandatory <c>[AS] table_alias(column_alias)</c> clause that
     /// follows a <c>.nodes(...)</c> source. On entry the cursor is on the
     /// optional <c>AS</c> / the alias name; on return it sits on the first
-    /// token past the closing <c>)</c>.
+    /// token past the closing <c>)</c>. A column's rowset may open its column
+    /// list with no alias, which names the table <c>''</c>.
     /// </summary>
-    private static (string Alias, string ColumnName) ConsumeNodesAlias(ParserContext context)
+    private static (string Alias, string ColumnName) ConsumeNodesAlias(ParserContext context, XmlMethodCall nodesCall)
     {
-        // Without its column list the rowset is Msg 318, and with more than
-        // one column Msg 8159 (probed 2026-10-02 against SQL Server 2025).
-        if (context.Token is ReservedKeyword { Keyword: Keyword.As })
-            context.MoveNextRequired();
-        if (context.Token is not Name aliasName)
-            throw SimulatedSqlException.TableValuedMethodNeedsAlias();
-        if (context.GetNextOptional() is not Operator { Character: '(' })
-            throw SimulatedSqlException.TableValuedMethodNeedsAlias();
+        // Without its column list a variable's rowset is Msg 318, while a
+        // column's reads as a function named after it, Msg 208, and with more
+        // than one column either is Msg 8159 (probed 2026-10-02 against SQL
+        // Server 2025). A bare column list after a column's nodes() names the
+        // table '', so two of them in one FROM are Msg 1011, while AS before it
+        // is Msg 102, and a name after the alias is the syntax error at it
+        // ahead of either refusal (probed 2026-10-21).
+        var columnTarget = nodesCall.Target is not VariableReference;
+        string? alias = null;
+        if (columnTarget && context.Token is Operator { Character: '(' })
+        {
+            alias = "";
+        }
+        else
+        {
+            var hasAs = context.Token is ReservedKeyword { Keyword: Keyword.As };
+            if (hasAs)
+                context.MoveNextRequired();
+            if (context.Token is Name aliasName)
+            {
+                alias = aliasName.Value;
+                context.MoveNextOptional();
+            }
+            else if (hasAs)
+            {
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+            if (context.Token is not Operator { Character: '(' })
+            {
+                if (alias is not null && context.Token is Name)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                throw columnTarget && nodesCall.Target is Reference { ReferencedName: var targetName }
+                    ? SimulatedSqlException.InvalidObjectName(targetName.WithAddedPart("nodes"))
+                    : SimulatedSqlException.TableValuedMethodNeedsAlias();
+            }
+            if (alias is null)
+                throw SimulatedSqlException.TableValuedMethodNeedsAlias();
+        }
         context.MoveNextRequired();
         if (context.Token is not Name columnName)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
         if (context.Token is Operator { Character: ',' })
-            throw SimulatedSqlException.HasFewerColumnsThanColumnList(aliasName.Value);
+            throw SimulatedSqlException.HasFewerColumnsThanColumnList(alias);
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
-        return (aliasName.Value, columnName.Value);
+        return (alias, columnName.Value);
     }
 
     private static IEnumerable<byte[]> EnumerateXmlNodesRows(

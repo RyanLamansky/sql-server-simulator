@@ -1,4 +1,3 @@
-using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -145,7 +144,6 @@ internal static class ErrorFunctionCtor
 
     public static void EnsureNoArgs(ParserContext context, string name)
     {
-        if (context.Token is not Operator { Character: ')' })
-            throw SimulatedSqlException.FunctionRequiresNArguments(name, 0);
+        BuiltInArity.RequireNoArguments(context, name);
     }
 }

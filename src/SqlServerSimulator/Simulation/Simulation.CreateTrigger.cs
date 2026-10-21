@@ -460,10 +460,12 @@ partial class Simulation
     private static bool TryParseEnableOrDisableTrigger(ParserContext context, bool disable)
     {
         // Cursor is on DISABLE / ENABLE (ContextualKeyword). Advance and
-        // require TRIGGER.
+        // require TRIGGER: real reads the word as this statement's even before
+        // a procedure of its name, so anything else is the syntax error at it
+        // (probed 2026-10-21 against SQL Server 2025).
         context.MoveNextRequired();
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Trigger })
-            return false;
+            throw SimulatedSqlException.SyntaxErrorNear(context);
 
         context.MoveNextRequired();
 

@@ -2492,14 +2492,15 @@ public sealed partial class Simulation
     /// <see cref="CreateResultSetsForCommand"/>) or the matching keyword
     /// (when <paramref name="endKeyword"/> is <c>END</c> — block-scoped
     /// call from <see cref="ParseBeginBlock"/>). Handles statement-separator
-    /// (<c>;</c>) draining and the CTE-must-be-separated rule
-    /// (<c>requireSemicolonBeforeCte</c>); the body of each statement is
+    /// (<c>;</c>) draining and the rule that a CTE or a THROW must follow a
+    /// <c>;</c> rather than another statement, a label aside
+    /// (<c>afterUnterminatedStatement</c>); the body of each statement is
     /// dispatched by <see cref="DispatchOneStatement"/>.
     /// </summary>
     internal IEnumerable<SimulatedStatementOutcome> DispatchStatementsUntil(BatchContext batch, Keyword? endKeyword)
     {
         var context = batch.Parser;
-        var requireSemicolonBeforeCte = false;
+        var afterUnterminatedStatement = false;
         // A bare object name is an implicit EXECUTE only as the literal first
         // statement of a batch (probe-confirmed against SQL Server 2025:
         // `sp_who` works, `SELECT 1; sp_who` and even a leading `;sp_who` raise
@@ -2597,7 +2598,7 @@ public sealed partial class Simulation
 
                 if (context.Token is Operator { Character: ';' })
                 {
-                    requireSemicolonBeforeCte = false;
+                    afterUnterminatedStatement = false;
                     atBatchStart = false;
                     context.MoveNextOptional();
                     continue;
@@ -2616,9 +2617,13 @@ public sealed partial class Simulation
                     if (batch.CancelledAtStatementBoundary())
                         yield break;
                 }
-                foreach (var outcome in DispatchOneStatement(batch, requireSemicolonBeforeCte, atBatchStart))
+                // A label leaves the rule as it found it (probed 2026-10-21
+                // against SQL Server 2025: `l: WITH …` and `PRINT 1 l: THROW …`
+                // both run).
+                var labelStatement = IsLabelDeclaration(context);
+                foreach (var outcome in DispatchOneStatement(batch, afterUnterminatedStatement, atBatchStart))
                     yield return outcome;
-                requireSemicolonBeforeCte = true;
+                afterUnterminatedStatement = !labelStatement;
                 atBatchStart = false;
                 batch.HasDispatchedStatement = true;
                 if (!batch.CurrentStatement.DeclaresOnly)
@@ -2664,10 +2669,10 @@ public sealed partial class Simulation
     /// for cursor-advance + name resolution, but no result reaches the
     /// client) and the <c>LastStatementRowCount</c> update is skipped.
     /// </summary>
-    private IEnumerable<SimulatedStatementOutcome> DispatchOneStatement(BatchContext batch, bool requireSemicolonBeforeCte, bool atBatchStart) =>
+    private IEnumerable<SimulatedStatementOutcome> DispatchOneStatement(BatchContext batch, bool afterUnterminatedStatement, bool atBatchStart) =>
         batch.BindErrors is { } report
-            ? DetachedFrom(batch, report, this.DispatchFramedStatement(batch, requireSemicolonBeforeCte, atBatchStart))
-            : this.DispatchFramedStatement(batch, requireSemicolonBeforeCte, atBatchStart);
+            ? DetachedFrom(batch, report, this.DispatchFramedStatement(batch, afterUnterminatedStatement, atBatchStart))
+            : this.DispatchFramedStatement(batch, afterUnterminatedStatement, atBatchStart);
 
     /// <summary>
     /// Runs a statement nested in one being read for its whole bind error
@@ -2706,7 +2711,7 @@ public sealed partial class Simulation
     /// through its <see cref="StatementLifecycle"/>, then sends what its
     /// <see cref="StatementEnding"/> owes.
     /// </summary>
-    private IEnumerable<SimulatedStatementOutcome> DispatchFramedStatement(BatchContext batch, bool requireSemicolonBeforeCte, bool atBatchStart)
+    private IEnumerable<SimulatedStatementOutcome> DispatchFramedStatement(BatchContext batch, bool afterUnterminatedStatement, bool atBatchStart)
     {
         // A statement inside a block, a TRY, an IF or a WHILE is a point a
         // MARS request steps aside at, as one at a batch's own level is —
@@ -2732,8 +2737,8 @@ public sealed partial class Simulation
             IEnumerator<SimulatedStatementOutcome>? body = null;
             try
             {
-                body = lifecycle.StartStreaming(this, batch, requireSemicolonBeforeCte, atBatchStart);
-                while (lifecycle.StreamNext(this, batch, body, requireSemicolonBeforeCte, atBatchStart))
+                body = lifecycle.StartStreaming(this, batch, afterUnterminatedStatement, atBatchStart);
+                while (lifecycle.StreamNext(this, batch, body, afterUnterminatedStatement, atBatchStart))
                 {
                     // What the body queued goes out ahead of what it sends
                     // next, as a statement's queued messages precede its
@@ -2765,7 +2770,7 @@ public sealed partial class Simulation
             _ = Interlocked.Increment(ref this.StatementThreadRuns);
             try
             {
-                foreach (var sent in coroutine.Run(this.RunBoxed(box, batch, outcomes, requireSemicolonBeforeCte, atBatchStart)))
+                foreach (var sent in coroutine.Run(this.RunBoxed(box, batch, outcomes, afterUnterminatedStatement, atBatchStart)))
                     yield return sent;
             }
             finally
@@ -2779,7 +2784,7 @@ public sealed partial class Simulation
         {
             try
             {
-                lifecycle.Run(this, batch, outcomes, requireSemicolonBeforeCte, atBatchStart);
+                lifecycle.Run(this, batch, outcomes, afterUnterminatedStatement, atBatchStart);
             }
             finally
             {
@@ -2878,7 +2883,7 @@ public sealed partial class Simulation
                     cutShortRows.ErrorCaught = CaughtByTryFrame(batch, cutShort);
                 }
                 settled = true;
-                lifecycle.SettleStream(this, batch, stream, requireSemicolonBeforeCte, atBatchStart);
+                lifecycle.SettleStream(this, batch, stream, afterUnterminatedStatement, atBatchStart);
             }
             finally
             {
@@ -2945,7 +2950,7 @@ public sealed partial class Simulation
         {
             batch.Parser.RestoreCheckpoint(lifecycle.StatementStart);
             batch.BulkTextReply = resumed;
-            foreach (var outcome in this.DispatchFramedStatement(batch, requireSemicolonBeforeCte, atBatchStart))
+            foreach (var outcome in this.DispatchFramedStatement(batch, afterUnterminatedStatement, atBatchStart))
                 yield return outcome;
         }
     }
@@ -3566,7 +3571,7 @@ public sealed partial class Simulation
         context.CtePrefixLeadsSelectStatement = context.Token is ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' };
     }
 
-    private IEnumerable<SimulatedStatementOutcome> DispatchOneStatementCore(BatchContext batch, bool requireSemicolonBeforeCte, bool atBatchStart)
+    private IEnumerable<SimulatedStatementOutcome> DispatchOneStatementCore(BatchContext batch, bool afterUnterminatedStatement, bool atBatchStart)
     {
         var context = batch.Parser;
         var connection = context.Connection;
@@ -3593,7 +3598,7 @@ public sealed partial class Simulation
         // keyword; the switch below runs unchanged.
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
         {
-            if (requireSemicolonBeforeCte)
+            if (afterUnterminatedStatement)
                 throw SimulatedSqlException.CteRequiresPrecedingSemicolon();
             // A statement replaying its cached plan leaves its prefix unparsed,
             // the cursor already on the statement's keyword.
@@ -3829,6 +3834,12 @@ public sealed partial class Simulation
                 }
                 break;
 
+            // THROW follows a `;`, opens its block or is an IF / ELSE / WHILE
+            // body: after another statement it is Msg 102 at it (probed
+            // 2026-10-21 against SQL Server 2025: `PRINT 1 THROW 50001, 'x', 1`
+            // and `END THROW …` are near 'throw').
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Throw } when afterUnterminatedStatement:
+                throw SimulatedSqlException.SyntaxErrorNear(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Throw }:
                 ParseThrowStatement(batch);
                 context.RejectTrailingToken();
@@ -4191,7 +4202,11 @@ public sealed partial class Simulation
         if (!EndsStatement(context.Token) && !IsLabelDeclaration(context))
         {
             if (rejectTrailingToken)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
+            {
+                throw Selection.IsBareTableHintWord(context.Token)
+                    ? SimulatedSqlException.TableHintNeedsWithKeyword(context.Token!.Source)
+                    : SimulatedSqlException.SyntaxErrorNear(context);
+            }
             context.MoveNextOptional();
         }
     }
@@ -4509,8 +4524,8 @@ public sealed partial class Simulation
     internal long StatementThreadRuns;
 
     /// <summary>The run of a statement on its own thread, over its boxed lifecycle.</summary>
-    private Action RunBoxed(StatementLifecycleBox box, BatchContext batch, List<SimulatedStatementOutcome> outcomes, bool requireSemicolonBeforeCte, bool atBatchStart) =>
-        () => box.Lifecycle.Run(this, batch, outcomes, requireSemicolonBeforeCte, atBatchStart);
+    private Action RunBoxed(StatementLifecycleBox box, BatchContext batch, List<SimulatedStatementOutcome> outcomes, bool afterUnterminatedStatement, bool atBatchStart) =>
+        () => box.Lifecycle.Run(this, batch, outcomes, afterUnterminatedStatement, atBatchStart);
 
     /// <summary>
     /// Whether the statement at the cursor runs on a thread of its own
@@ -4898,6 +4913,22 @@ public sealed partial class Simulation
                 batch.PrincipalReadWhileParsing ??= PlanCacheCaptureAudit.EndPrincipalWatch(principalWatch);
 #endif
         }
+    }
+
+    /// <summary>
+    /// The refusal of an option word no statement takes, cursor on the word —
+    /// unless a name follows it, which is the syntax error at that name, since
+    /// real parses the list before it judges the words (probed 2026-10-21
+    /// against SQL Server 2025: <c>DBCC CHECKTABLE ('t') WITH zzz NO_INFOMSGS</c>
+    /// is near 'NO_INFOMSGS', <c>WITH zzz</c> alone Msg 195).
+    /// </summary>
+    private static SimulatedSqlException UnlessANameFollows(ParserContext context, SimulatedSqlException refusal)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        if (context.MoveNext() && context.Token is Name)
+            return SimulatedSqlException.SyntaxErrorNear(context);
+        context.RestoreCheckpoint(checkpoint);
+        return refusal;
     }
 
     /// <summary>

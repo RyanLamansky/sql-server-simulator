@@ -340,6 +340,8 @@ partial class Simulation
         do
         {
             var token = context.GetNextRequired();
+            if (token is not (Name or ReservedKeyword))
+                throw SimulatedSqlException.SyntaxErrorNear(context);
             var source = token.Source;
             var written = token is ReservedKeyword ? source.ToString().ToUpperInvariant() : source.ToString();
             var upper = buffer[..Math.Min(source.Length, buffer.Length)];
@@ -399,7 +401,7 @@ partial class Simulation
                     recorded = "STATS_STREAM";
                     break;
                 default:
-                    throw SimulatedSqlException.UnrecognizedCreateStatisticsOption(written);
+                    throw UnlessANameFollows(context, SimulatedSqlException.UnrecognizedCreateStatisticsOption(written));
             }
             RecordOption(seen, recorded);
             context.MoveNextOptional();

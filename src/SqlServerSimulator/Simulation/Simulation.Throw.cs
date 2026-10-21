@@ -58,6 +58,11 @@ partial class Simulation
         // Re-raise form: bare THROW followed by a statement boundary.
         if (IsStatementBoundary(context.Token))
         {
+            // Another THROW can't follow without a `;`, which outranks the
+            // bare form's own refusal (probed 2026-10-21 against SQL Server
+            // 2025: `THROW THROW` outside a CATCH is near the second 'throw').
+            if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Throw })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
             // Compile-time check (fires even in skipped branches, matching
             // real SQL Server's behavior for Msg 178 / Msg 135).
             if (batch.CatchDepth == 0)

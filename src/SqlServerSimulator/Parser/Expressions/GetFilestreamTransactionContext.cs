@@ -14,8 +14,7 @@ internal sealed class GetFilestreamTransactionContext : Expression
 {
     public GetFilestreamTransactionContext(ParserContext context)
     {
-        if (context.Token is not Tokens.Operator { Character: ')' })
-            throw SimulatedSqlException.FunctionRequiresNArguments("get_filestream_transaction_context", 0);
+        BuiltInArity.RequireNoArguments(context, "get_filestream_transaction_context");
     }
 
     public override SqlValue Run(RuntimeContext runtime) => throw SimulatedSqlException.FilestreamAccessNotEnabled();

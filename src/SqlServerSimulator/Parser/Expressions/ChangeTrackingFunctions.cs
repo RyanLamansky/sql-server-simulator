@@ -11,8 +11,7 @@ internal sealed class ChangeTrackingCurrentVersion : Expression
 {
     public ChangeTrackingCurrentVersion(ParserContext context)
     {
-        if (context.Token is not Tokens.Operator { Character: ')' })
-            throw SimulatedSqlException.FunctionRequiresNArguments("change_tracking_current_version", 0);
+        BuiltInArity.RequireNoArguments(context, "change_tracking_current_version");
     }
 
     public override SqlValue Run(RuntimeContext runtime)

@@ -1034,7 +1034,7 @@ partial class Simulation
 
         context.MoveNextRequired();
         if (context.Token is Operator { Character: '.' })
-            return TryParseSetInstanceMember(context, variableToken, slot);
+            return RejectingTrailingToken(context, TryParseSetInstanceMember(context, variableToken, slot));
         if (TryConsumeAssignmentOperator(context) is not char assignOp)
             return false;
 

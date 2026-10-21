@@ -159,6 +159,10 @@ partial class Simulation
         if (context.Token is UnquotedString word && Collation.Baseline.Equals(word.Value, "XMLNAMESPACES"))
         {
             context.XmlNamespaces = ForXmlNamespaces.Parse(context);
+            // A name after the clause is the syntax error at it, ahead of the
+            // query's own checks (probed 2026-10-21 against SQL Server 2025).
+            if (context.Token is Name)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
             if (context.Token is not Operator { Character: ',' })
                 return;
             context.MoveNextRequired();

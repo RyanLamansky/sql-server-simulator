@@ -13,8 +13,7 @@ internal sealed class Pi : Expression
 {
     public Pi(ParserContext context)
     {
-        if (context.Token is not Tokens.Operator { Character: ')' })
-            throw SimulatedSqlException.FunctionRequiresNArguments("pi", 0);
+        BuiltInArity.RequireNoArguments(context, "pi");
     }
 
     public override SqlValue Run(RuntimeContext runtime) => SqlValue.FromDouble(Math.PI);

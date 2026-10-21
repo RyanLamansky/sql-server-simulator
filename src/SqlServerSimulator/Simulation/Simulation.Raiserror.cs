@@ -129,7 +129,7 @@ partial class Simulation
                         withSetError = true;
                         break;
                     case UnquotedString option:
-                        throw SimulatedSqlException.WithOptionNotRecognized(option.Value);
+                        throw UnlessANameFollows(context, SimulatedSqlException.WithOptionNotRecognized(option.Value));
                     default:
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                 }

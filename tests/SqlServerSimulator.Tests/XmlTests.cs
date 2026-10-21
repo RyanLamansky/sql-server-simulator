@@ -1032,6 +1032,41 @@ public sealed class XmlTests
     }
 
     [TestMethod]
+    public void Nodes_OfAColumn_TakesABareColumnList_NamingTheTableEmpty()
+    {
+        var sim = new Simulation();
+        AreEqual("1,2", sim.ExecuteScalar("""
+            select string_agg(c.value('.', 'int'), ',') from (select cast('<r><i>1</i><i>2</i></r>' as xml) x) d cross apply x.nodes('/r/i') (c)
+            """));
+        sim.AssertSqlError("select 1 from (select cast('<r/>' as xml) x) d cross apply x.nodes('/r') (c) cross apply c.nodes('.') (e)", 1011,
+            "The correlation name '' is specified multiple times in a FROM clause.");
+        sim.AssertSqlError("select 1 from (select cast('<r/>' as xml) x) d cross apply x.nodes('/r') (c, e)", 8159,
+            "'' has fewer columns than were specified in the column list.");
+        sim.AssertSqlError("select 1 from (select cast('<r/>' as xml) x) d cross apply x.nodes('/r') as (c)", 102, "Incorrect syntax near '('.");
+        _ = sim.AssertSqlError("declare @x xml = '<a/>'; select 1 from @x.nodes('/a') (c)", 318);
+    }
+
+    [TestMethod]
+    public void Nodes_OfAColumnWithoutAColumnList_ReadsAsAMissingObject()
+    {
+        using var connection = new Simulation().CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "select 'a'; select 1 from (select cast('<r/>' as xml) x) d cross apply d.x.nodes('/r') t";
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual("a", reader.GetString(0));
+        AreEqual("Invalid object name 'd.x.nodes'.", ThrowsExactly<SimulatedSqlException>(() => reader.NextResult()).Message);
+    }
+
+    [TestMethod]
+    [DataRow("select 1 from (select cast('<r/>' as xml) x) d cross apply x.nodes('/r') t c)", "c")]
+    [DataRow("select 1 from (select cast('<r/>' as xml) x) d cross apply x.nodes('/r') zzz t (c)", "t")]
+    [DataRow("declare @x xml = '<r/>'; select 1 from @x.nodes('/r') t t (c)", "t")]
+    public void Nodes_ANameAfterTheAlias_IsTheSyntaxErrorAtIt(string statement, string near)
+        => new Simulation().AssertSqlError(statement, 102, $"Incorrect syntax near '{near}'.");
+
+    [TestMethod]
     [DataRow("1")]
     [DataRow("(1, 2)")]
     [DataRow("data(/a)")]

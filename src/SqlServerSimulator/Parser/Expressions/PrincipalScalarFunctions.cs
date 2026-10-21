@@ -278,8 +278,7 @@ internal sealed class OriginalLogin : Expression
 {
     public OriginalLogin(ParserContext context)
     {
-        if (context.Token is not Tokens.Operator { Character: ')' })
-            throw SimulatedSqlException.FunctionRequiresNArguments("original_login", 0);
+        BuiltInArity.RequireNoArguments(context, "original_login");
     }
 
     public override SqlValue Run(RuntimeContext runtime) =>
@@ -307,8 +306,7 @@ internal sealed class HostName : Expression
 {
     public HostName(ParserContext context)
     {
-        if (context.Token is not Tokens.Operator { Character: ')' })
-            throw SimulatedSqlException.FunctionRequiresNArguments("host_name", 0);
+        BuiltInArity.RequireNoArguments(context, "host_name");
     }
 
     public override SqlValue Run(RuntimeContext runtime) =>
@@ -332,8 +330,7 @@ internal sealed class AppName : Expression
 {
     public AppName(ParserContext context)
     {
-        if (context.Token is not Tokens.Operator { Character: ')' })
-            throw SimulatedSqlException.FunctionRequiresNArguments("app_name", 0);
+        BuiltInArity.RequireNoArguments(context, "app_name");
     }
 
     public override SqlValue Run(RuntimeContext runtime) =>

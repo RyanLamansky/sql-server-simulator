@@ -57,7 +57,7 @@ partial class Simulation
             {
                 if (context.GetNextRequired() is not Name option)
                     throw SimulatedSqlException.SyntaxErrorNear(context);
-                var parsed = ParseDbccOption(option.Value);
+                var parsed = ParseDbccOption(context, option.Value);
                 afterName = context.SaveCheckpoint();
                 context.MoveNextOptional();
                 if (parsed == DbccOptions.MaxDop)
@@ -173,7 +173,7 @@ partial class Simulation
     /// takes, all of which the parser knows whichever command they follow.
     /// Anything else is Msg 195 — <c>MAXDOP</c> too unless a value follows.
     /// </summary>
-    private static DbccOptions ParseDbccOption(string option)
+    private static DbccOptions ParseDbccOption(ParserContext context, string option)
     {
         Span<char> upper = stackalloc char[option.Length];
         _ = option.AsSpan().ToUpperInvariant(upper);
@@ -195,7 +195,7 @@ partial class Simulation
             "PHYSICAL_ONLY" => DbccOptions.PhysicalOnly,
             "TABLERESULTS" => DbccOptions.TableResults,
             "TABLOCK" => DbccOptions.TabLock,
-            _ => throw SimulatedSqlException.WithOptionNotRecognized(option),
+            _ => throw UnlessANameFollows(context, SimulatedSqlException.WithOptionNotRecognized(option)),
         };
     }
 

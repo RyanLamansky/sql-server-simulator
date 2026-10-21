@@ -16,8 +16,7 @@ internal sealed class CurrentTimeZone : Expression
 
     public CurrentTimeZone(ParserContext context, bool id)
     {
-        if (context.Token is not Tokens.Operator { Character: ')' })
-            throw SimulatedSqlException.FunctionRequiresNArguments(id ? "current_timezone_id" : "current_timezone", 0);
+        BuiltInArity.RequireNoArguments(context, id ? "current_timezone_id" : "current_timezone");
         this.id = id;
     }
 
@@ -45,8 +44,7 @@ internal sealed class HostId : Expression
 {
     public HostId(ParserContext context)
     {
-        if (context.Token is not Tokens.Operator { Character: ')' })
-            throw SimulatedSqlException.FunctionRequiresNArguments("host_id", 0);
+        BuiltInArity.RequireNoArguments(context, "host_id");
     }
 
     public override SqlValue Run(RuntimeContext runtime)
@@ -77,8 +75,7 @@ internal sealed class PublishingServerName : Expression
 {
     public PublishingServerName(ParserContext context)
     {
-        if (context.Token is not Tokens.Operator { Character: ')' })
-            throw SimulatedSqlException.FunctionRequiresNArguments("publishingservername", 0);
+        BuiltInArity.RequireNoArguments(context, "publishingservername");
     }
 
     public override SqlValue Run(RuntimeContext runtime) =>

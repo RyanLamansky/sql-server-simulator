@@ -1410,17 +1410,23 @@ partial class Simulation
                 }
                 if (statement is IndexOptionStatement.CreateIndex or IndexOptionStatement.AlterIndexRebuild or IndexOptionStatement.AlterTable)
                     ValidateIndexOptionValue(context, name, statement);
-                // A number ends its entry, a duration's unit aside (probed
-                // 2026-10-21 against SQL Server 2025: `FILLFACTOR = 80 80` is
-                // near the second '80').
-                if (valueToken is Numeric)
+                // A number or word ends its entry, but for a duration's unit,
+                // ONLINE = ON's nested list and a compression's ON PARTITIONS
+                // (probed 2026-10-21 against SQL Server 2025: `FILLFACTOR = 80
+                // 80` is near the second '80', `SORT_IN_TEMPDB = ON ON` near the
+                // keyword).
+                if (valueToken is Numeric or ReservedKeyword { Keyword: Keyword.On or Keyword.Off } or UnquotedString)
                 {
                     var entry = context.SaveCheckpoint();
                     _ = context.MoveNext() && context.MoveNext() && context.MoveNext();
                     var endsEntry = context.Token switch
                     {
                         Operator { Character: ',' or ')' } => true,
-                        UnquotedString { Span: var unit } => unit.Equals("MINUTES", StringComparison.OrdinalIgnoreCase) || unit.Equals("MINUTE", StringComparison.OrdinalIgnoreCase),
+                        Operator { Character: '(' } => valueToken is ReservedKeyword { Keyword: Keyword.On } && name.Equals("ONLINE", StringComparison.OrdinalIgnoreCase),
+                        ReservedKeyword { Keyword: Keyword.On } => valueToken is not Numeric
+                            && (name.Equals("DATA_COMPRESSION", StringComparison.OrdinalIgnoreCase) || name.Equals("XML_COMPRESSION", StringComparison.OrdinalIgnoreCase)),
+                        UnquotedString { Span: var unit } => valueToken is Numeric
+                            && (unit.Equals("MINUTES", StringComparison.OrdinalIgnoreCase) || unit.Equals("MINUTE", StringComparison.OrdinalIgnoreCase)),
                         _ => false,
                     };
                     if (!endsEntry)

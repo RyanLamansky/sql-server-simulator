@@ -22,8 +22,24 @@ partial class Simulation
         {
             ReservedKeyword { Keyword: Keyword.Function } => TryParseCreatePartitionFunction(context),
             Name word when word.Value.Equals("SCHEME", StringComparison.OrdinalIgnoreCase) => TryParseCreatePartitionScheme(context),
-            _ => false,
+            _ => throw PartitionKindMissing(context),
         };
+
+    /// <summary>
+    /// The syntax error where <c>PARTITION</c> isn't followed by
+    /// <c>FUNCTION</c> or <c>SCHEME</c>, cursor on the word in their place:
+    /// real reads a name there and reports a keyword after it, else the word
+    /// itself (probed 2026-10-21 against SQL Server 2025: <c>CREATE PARTITION
+    /// zz FUNCTION</c> is near the keyword 'function', <c>CREATE PARTITION
+    /// schemex zps</c> near 'schemex').
+    /// </summary>
+    private static SimulatedSqlException PartitionKindMissing(ParserContext context)
+    {
+        var word = context.Token;
+        return word is Name && context.GetNextOptional() is ReservedKeyword keyword
+            ? SimulatedSqlException.SyntaxErrorNearKeyword(keyword)
+            : SimulatedSqlException.SyntaxErrorNear(word);
+    }
 
     /// <summary>Routes <c>ALTER PARTITION FUNCTION</c> / <c>ALTER PARTITION SCHEME</c>, cursor on <c>PARTITION</c>.</summary>
     private static bool TryParseAlterPartition(ParserContext context) =>
@@ -31,7 +47,7 @@ partial class Simulation
         {
             ReservedKeyword { Keyword: Keyword.Function } => TryParseAlterPartitionFunction(context),
             Name word when word.Value.Equals("SCHEME", StringComparison.OrdinalIgnoreCase) => TryParseAlterPartitionScheme(context),
-            _ => false,
+            _ => throw PartitionKindMissing(context),
         };
 
     /// <summary>Routes <c>DROP PARTITION FUNCTION</c> / <c>DROP PARTITION SCHEME</c>, cursor on <c>PARTITION</c>.</summary>
@@ -41,10 +57,8 @@ partial class Simulation
         {
             ReservedKeyword { Keyword: Keyword.Function } => true,
             Name word when word.Value.Equals("SCHEME", StringComparison.OrdinalIgnoreCase) => false,
-            _ => (bool?)null,
+            _ => throw PartitionKindMissing(context),
         };
-        if (isFunction is null)
-            return false;
         var name = ReadPartitionObjectName(context);
         context.MoveNextOptional();
         context.RejectTrailingToken();
@@ -55,7 +69,7 @@ partial class Simulation
         database.RejectWriteWhenReadOnly();
         if (!PermissionEnforcement.HoldsDatabasePermission(context.Batch, database, "ALTER ANY DATASPACE"))
             throw SimulatedSqlException.DataspacePermissionDenied();
-        if (isFunction.Value)
+        if (isFunction)
         {
             if (!database.PartitionFunctions.TryGetValue(name, out var function))
                 throw SimulatedSqlException.PartitionObjectNotFound("drop", "function", name);

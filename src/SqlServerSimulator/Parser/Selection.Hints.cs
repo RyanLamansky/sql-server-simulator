@@ -126,6 +126,20 @@ internal sealed partial class Selection
         TableHintNames.GetAlternateLookup<ReadOnlySpan<char>>();
 
     /// <summary>
+    /// Whether <paramref name="token"/> is a table-hint word written bare,
+    /// which real names in Msg 1018 rather than Msg 102 when it is a
+    /// statement's leftover token — <c>REMOTE</c>, a join hint too, and
+    /// <c>SPATIAL_WINDOW_MAX_CELLS</c> aside (probed 2026-10-21 against SQL
+    /// Server 2025: <c>PRINT 1 NOLOCK</c> is Msg 1018, <c>PRINT 1 REMOTE</c>
+    /// Msg 102).
+    /// </summary>
+    internal static bool IsBareTableHintWord(Token? token) =>
+        token is UnquotedString or ReservedKeyword
+        && TableHintLookup.ContainsKey(token.Source)
+        && !token.Source.Equals("REMOTE", StringComparison.OrdinalIgnoreCase)
+        && !token.Source.Equals("SPATIAL_WINDOW_MAX_CELLS", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Valid <c>OPTION (USE HINT('name'))</c> hint names — the rows of
     /// <c>sys.dm_exec_valid_use_hints</c> on SQL Server 2025 in its order,
     /// which the view lists (probed 2026-07-16 and 2026-10-15). Case-insensitive (real accepts a lowercase argument). An

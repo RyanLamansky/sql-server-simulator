@@ -17,8 +17,7 @@ internal sealed class MinActiveRowVersion : Expression
 
     public MinActiveRowVersion(ParserContext context)
     {
-        if (context.Token is not Tokens.Operator { Character: ')' })
-            throw SimulatedSqlException.FunctionRequiresNArguments("min_active_rowversion", 0);
+        BuiltInArity.RequireNoArguments(context, "min_active_rowversion");
     }
 
     public override SqlValue Run(RuntimeContext runtime)

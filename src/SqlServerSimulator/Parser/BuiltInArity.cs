@@ -184,8 +184,9 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
     /// side with no comma between them is Msg 102 near the second, which
     /// real's grammar meets before any count (probed 2026-10-16 against SQL
     /// Server 2025: <c>ISNULL(1 'x')</c> is near <c>'x'</c>, not Msg 174). Read
-    /// by parsing each argument in turn; a list whose arguments raise anything
-    /// else is left to the count.
+    /// by parsing each argument in turn. An undeclared variable among them is
+    /// Msg 137 ahead of the count too (probed 2026-10-21: <c>ABS(@zz, 1)</c>);
+    /// a list whose arguments raise anything else is left to the count.
     /// </summary>
     private static void RefuseAdjacentOperands(ParserContext context)
     {
@@ -204,7 +205,7 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
                 break;
             }
         }
-        catch (SimulatedSqlException)
+        catch (SimulatedSqlException error) when (error.Number != 137)
         {
             return;
         }
@@ -238,6 +239,29 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
             4 => exact,
             _ => SimulatedSqlException.Aggregate([exact, range]),
         };
+    }
+
+    /// <summary>
+    /// Refuses any argument to a function that takes none, cursor on the
+    /// token after its <c>(</c>. The list parses first, so its own syntax
+    /// error or an undeclared variable in it outranks Msg 174 (probed
+    /// 2026-10-21 against SQL Server 2025: <c>PI(1</c> is near '1',
+    /// <c>PI(@zz)</c> Msg 137, <c>PI(zzcol)</c> Msg 174).
+    /// </summary>
+    internal static void RequireNoArguments(ParserContext context, string name)
+    {
+        if (context.Token is Operator { Character: ')' })
+            return;
+        while (true)
+        {
+            _ = Expression.Parse(context);
+            if (context.Token is not Operator { Character: ',' })
+                break;
+            context.MoveNextRequired();
+        }
+        throw context.Token is Operator { Character: ')' }
+            ? SimulatedSqlException.FunctionRequiresNArguments(name, 0)
+            : SimulatedSqlException.SyntaxErrorNear(context);
     }
 
     /// <summary>

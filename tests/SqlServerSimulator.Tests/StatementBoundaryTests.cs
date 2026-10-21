@@ -341,4 +341,44 @@ public sealed class StatementBoundaryTests
     [DataRow("alter zzbogus index all on zt rebuild")]
     public void AWordNamingNoObjectType_IsMsg343(string statement)
         => new Simulation().AssertSqlError(statement, 343, "Unknown object type 'zzbogus' used in a CREATE, DROP, or ALTER statement.");
+
+    [TestMethod]
+    [DataRow("print 1 throw 50001, 'x', 1")]
+    [DataRow("declare @a int throw 50001, 'x', 1")]
+    [DataRow("begin print 1 end throw 50001, 'x', 1")]
+    [DataRow("begin try print 1 end try begin catch end catch throw 50001, 'x', 1")]
+    [DataRow("begin try select 1/0 end try begin catch print 1 throw end catch")]
+    [DataRow("throw throw")]
+    public void AThrowAfterAnotherStatementWithoutASemicolon_IsASyntaxError(string batch)
+        => new Simulation().AssertSqlError(batch, 102, "Incorrect syntax near 'throw'.");
+
+    [TestMethod]
+    [DataRow("throw 50001, 'x', 1")]
+    [DataRow("print 1; throw 50001, 'x', 1")]
+    [DataRow("begin throw 50001, 'x', 1 end")]
+    [DataRow("if 1 = 1 throw 50001, 'x', 1")]
+    [DataRow("if 1 = 0 print 1 else throw 50001, 'x', 1")]
+    [DataRow("while 1 = 1 throw 50001, 'x', 1")]
+    [DataRow("print 1 l: throw 50001, 'x', 1")]
+    public void AThrowOpeningItsListOrBodyOrAfterALabel_Runs(string batch)
+        => new Simulation().AssertSqlError(batch, 50001, "x");
+
+    [TestMethod]
+    public void ACteAfterALabel_NeedsNoSemicolon()
+        => AreEqual(1, new Simulation().ExecuteScalar("print 1 l: with c as (select 1 a) select a from c"));
+
+    [TestMethod]
+    [DataRow("print 1 nolock", "nolock")]
+    [DataRow("print 1 index(1)", "index")]
+    [DataRow("raiserror ('x', 10, 1) nowait", "nowait")]
+    [DataRow("raiserror ('x', 10, 1) with nowait readpast", "readpast")]
+    public void ALeftoverTableHintWord_IsMsg1018(string batch, string near)
+        => new Simulation().AssertSqlError(batch, 1018,
+            $"Incorrect syntax near '{near}'. If this is intended as a part of a table hint, A WITH keyword and parenthesis are now required. See SQL Server Books Online for proper syntax.");
+
+    [TestMethod]
+    [DataRow("print 1 remote")]
+    [DataRow("print 1 spatial_window_max_cells")]
+    public void ALeftoverJoinOrSpatialHintWord_IsMsg102(string batch)
+        => new Simulation().AssertSqlError(batch, 102);
 }

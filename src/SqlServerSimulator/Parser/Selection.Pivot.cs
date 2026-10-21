@@ -472,7 +472,7 @@ internal sealed partial class Selection
     private static void ExpectOperator(Token? token, char character)
     {
         if (token is not Operator op || op.Character != character)
-            throw SimulatedSqlException.SyntaxErrorNear(token);
+            throw token is ReservedKeyword keyword ? SimulatedSqlException.SyntaxErrorNearKeyword(keyword) : SimulatedSqlException.SyntaxErrorNear(token);
     }
 
     /// <summary>

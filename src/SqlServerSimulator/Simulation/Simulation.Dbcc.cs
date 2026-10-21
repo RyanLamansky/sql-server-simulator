@@ -221,7 +221,7 @@ partial class Simulation
                 else if (BuiltInToken.Equals(option.Value, "STATS_STREAM"))
                     statsStream = true;
                 else
-                    throw SimulatedSqlException.WithOptionNotRecognized(option.Value);
+                    throw UnlessANameFollows(context, SimulatedSqlException.WithOptionNotRecognized(option.Value));
                 var afterOption = context.SaveCheckpoint();
                 if (context.MoveNext() && context.Token is Operator { Character: ',' })
                     continue;

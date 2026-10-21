@@ -1,4 +1,3 @@
-using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -30,8 +29,7 @@ internal sealed class NewSequentialId : Expression
 
     public NewSequentialId(ParserContext context)
     {
-        if (context.Token is not Operator { Character: ')' })
-            throw SimulatedSqlException.FunctionRequiresNArguments("newsequentialid", 0);
+        BuiltInArity.RequireNoArguments(context, "newsequentialid");
         // Inside a scalar-UDF / multi-statement-TVF body being bound, real's
         // answer is the side-effecting-operator rule instead — Msg 443 naming
         // 'newsequentialid' (probe-confirmed for both kinds, and for a call in

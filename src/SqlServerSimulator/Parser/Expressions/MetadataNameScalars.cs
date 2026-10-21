@@ -197,8 +197,7 @@ internal sealed class OriginalDbName : Expression
 {
     public OriginalDbName(ParserContext context)
     {
-        if (context.Token is not Tokens.Operator { Character: ')' })
-            throw SimulatedSqlException.FunctionRequiresNArguments("original_db_name", 0);
+        BuiltInArity.RequireNoArguments(context, "original_db_name");
     }
 
     public override SqlValue Run(RuntimeContext runtime) =>

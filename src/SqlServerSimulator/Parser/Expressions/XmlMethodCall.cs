@@ -167,39 +167,46 @@ internal sealed class XmlMethodCall : Expression
         var isValue = method == XmlMethod.Value;
 
         // `value` takes two arguments and the other three one; any other
-        // count is Msg 174 before either is read (probed 2026-10-02 against
+        // count is Msg 174 before either is read, though only once the list
+        // parses — a stray token in it is the syntax error at it, as is one
+        // ahead of a string literal (probed 2026-10-02 and 2026-10-21 against
         // SQL Server 2025).
         var arity = isValue ? 2 : 1;
-        var checkpoint = context.SaveCheckpoint();
         context.MoveNextRequired();
-        if (BuiltInArity.CountArguments(context) is >= 0 and var count && count != arity)
-            throw SimulatedSqlException.FunctionRequiresNArguments(methodName, arity);
-        context.RestoreCheckpoint(checkpoint);
-
-        context.MoveNextRequired();
-        string? xqueryText = null;
         Token? argumentToken = null;
-        SqlType valueType = SqlType.Xml;
-        int? valueMaxLength = null;
+        Expression? firstArg = null, secondArg = null;
+        var count = 0;
         if (context.Token is not Operator { Character: ')' })
         {
-            // Each of the four methods that reach here takes the XQuery
-            // expression as its first argument; `.modify()`, the one that
-            // doesn't, was refused above.
             argumentToken = context.Token;
-            var firstArg = Expression.Parse(context);
-            xqueryText = ConstantString(firstArg, methodName, 1);
-
-            while (context.Token is Operator { Character: ',' })
+            while (true)
             {
+                var arg = Expression.Parse(context);
+                count++;
+                if (count == 1)
+                    firstArg = arg;
+                else if (count == 2)
+                    secondArg = arg;
+                if (context.Token is not Operator { Character: ',' })
+                    break;
                 context.MoveNextRequired();
-                var nextArg = Expression.Parse(context);
-                if (isValue)
-                    (valueType, valueMaxLength) = ResolveValueType(ConstantString(nextArg, methodName, 2), context.Batch);
             }
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
+        if (count != arity)
+            throw SimulatedSqlException.FunctionRequiresNArguments(methodName, arity);
+
+        // Each of the four methods that reach here takes the XQuery
+        // expression as its first argument; `.modify()`, the one that
+        // doesn't, was refused above.
+        string? xqueryText = null;
+        SqlType valueType = SqlType.Xml;
+        int? valueMaxLength = null;
+        if (firstArg is not null)
+            xqueryText = ConstantString(firstArg, methodName, 1);
+        if (isValue && secondArg is not null)
+            (valueType, valueMaxLength) = ResolveValueType(ConstantString(secondArg, methodName, 2), context.Batch);
 
         // The argument is a compile-time literal, so the expression compiles
         // once here — which is where real settles its static XQuery

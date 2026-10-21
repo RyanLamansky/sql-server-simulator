@@ -65,8 +65,7 @@ internal sealed class ContextInfoFunction : Expression
 {
     public ContextInfoFunction(ParserContext context)
     {
-        if (context.Token is not Tokens.Operator { Character: ')' })
-            throw SimulatedSqlException.FunctionRequiresNArguments("context_info", 0);
+        BuiltInArity.RequireNoArguments(context, "context_info");
     }
 
     public override SqlValue Run(RuntimeContext runtime)
@@ -161,8 +160,7 @@ internal sealed class CurrentTransactionId : Expression
 {
     public CurrentTransactionId(ParserContext context)
     {
-        if (context.Token is not Tokens.Operator { Character: ')' })
-            throw SimulatedSqlException.FunctionRequiresNArguments("current_transaction_id", 0);
+        BuiltInArity.RequireNoArguments(context, "current_transaction_id");
     }
 
     public override SqlValue Run(RuntimeContext runtime) =>
@@ -186,8 +184,7 @@ internal sealed class CurrentRequestId : Expression
 {
     public CurrentRequestId(ParserContext context)
     {
-        if (context.Token is not Tokens.Operator { Character: ')' })
-            throw SimulatedSqlException.FunctionRequiresNArguments("current_request_id", 0);
+        BuiltInArity.RequireNoArguments(context, "current_request_id");
     }
 
     public override SqlValue Run(RuntimeContext runtime) => SqlValue.FromInt32(runtime.Batch.Connection.ExecutingRequest?.RequestId ?? 0);

@@ -483,7 +483,7 @@ partial class Simulation
         /// instead (<see cref="Streams"/>, <see cref="StreamNext"/>), which is
         /// what lets the request pause between them.
         /// </remarks>
-        public void Run(Simulation simulation, BatchContext batch, List<SimulatedStatementOutcome> outcomes, bool requireSemicolonBeforeCte, bool atBatchStart)
+        public void Run(Simulation simulation, BatchContext batch, List<SimulatedStatementOutcome> outcomes, bool afterUnterminatedStatement, bool atBatchStart)
         {
             var connection = batch.Connection;
             var ran = false;
@@ -498,7 +498,7 @@ partial class Simulation
                         batch.SkipModeFlag = true;
                         try
                         {
-                            foreach (var _ in simulation.DispatchOneStatementCore(batch, requireSemicolonBeforeCte, atBatchStart))
+                            foreach (var _ in simulation.DispatchOneStatementCore(batch, afterUnterminatedStatement, atBatchStart))
                             {
                             }
                         }
@@ -510,7 +510,7 @@ partial class Simulation
                     }
                     if (connection.ImplicitTransactions && connection.CurrentTransaction is null && OpensImplicitTransactionAsDdl(batch.Parser))
                         batch.BeginImplicitTransaction();
-                    foreach (var outcome in simulation.DispatchOneStatementCore(batch, requireSemicolonBeforeCte, atBatchStart))
+                    foreach (var outcome in simulation.DispatchOneStatementCore(batch, afterUnterminatedStatement, atBatchStart))
                     {
                         if (outcome is SimulatedSqlResultSet && ResultsDisallowed(connection))
                             throw SimulatedSqlException.TriggerReturnedResultSet();
@@ -531,7 +531,7 @@ partial class Simulation
                     // which wins unless it defers the statement.
                     if (batch.CurrentStatement.PendingCompileRefusal is { } pending && batch.IsSkipping && !DefersWithItsStatement(batch, thrown))
                         thrown = pending;
-                    this.RouteError(batch, this.SettleError(simulation, batch, thrown, requireSemicolonBeforeCte, atBatchStart));
+                    this.RouteError(batch, this.SettleError(simulation, batch, thrown, afterUnterminatedStatement, atBatchStart));
                 }
                 ran = true;
             }
@@ -573,7 +573,7 @@ partial class Simulation
         /// <c>@@ROWCOUNT</c>, then the error a row raised, settled and routed
         /// as <see cref="Run"/> settles one, then <see cref="Leave"/>.
         /// </summary>
-        public void SettleStream(Simulation simulation, BatchContext batch, ResultStream stream, bool requireSemicolonBeforeCte, bool atBatchStart)
+        public void SettleStream(Simulation simulation, BatchContext batch, ResultStream stream, bool afterUnterminatedStatement, bool atBatchStart)
         {
             try
             {
@@ -582,7 +582,7 @@ partial class Simulation
                 stream.EndWrite(commit: stream.Error is null);
                 batch.Connection.LastStatementRowCount = stream.Error is null ? stream.StatementRowCount(batch) : 0;
                 if (stream.Error is { } error)
-                    this.RouteError(batch, this.SettleError(simulation, batch, error, requireSemicolonBeforeCte, atBatchStart));
+                    this.RouteError(batch, this.SettleError(simulation, batch, error, afterUnterminatedStatement, atBatchStart));
             }
             finally
             {
@@ -606,11 +606,11 @@ partial class Simulation
         /// statement or a call: no database DDL refusal or implicit
         /// transaction opens at either.
         /// </remarks>
-        public IEnumerator<SimulatedStatementOutcome> StartStreaming(Simulation simulation, BatchContext batch, bool requireSemicolonBeforeCte, bool atBatchStart)
+        public IEnumerator<SimulatedStatementOutcome> StartStreaming(Simulation simulation, BatchContext batch, bool afterUnterminatedStatement, bool atBatchStart)
         {
             this.streamOpen = true;
             batch.StreamingFrames++;
-            return simulation.DispatchOneStatementCore(batch, requireSemicolonBeforeCte, atBatchStart).GetEnumerator();
+            return simulation.DispatchOneStatementCore(batch, afterUnterminatedStatement, atBatchStart).GetEnumerator();
         }
 
         /// <summary>
@@ -626,7 +626,7 @@ partial class Simulation
         /// error has reached the client already, ahead of it, as real streams
         /// it.
         /// </remarks>
-        public bool StreamNext(Simulation simulation, BatchContext batch, IEnumerator<SimulatedStatementOutcome> body, bool requireSemicolonBeforeCte, bool atBatchStart)
+        public bool StreamNext(Simulation simulation, BatchContext batch, IEnumerator<SimulatedStatementOutcome> body, bool afterUnterminatedStatement, bool atBatchStart)
         {
             var more = false;
             try
@@ -646,7 +646,7 @@ partial class Simulation
                     more = false;
                     if (batch.CurrentStatement.PendingCompileRefusal is { } pending && batch.IsSkipping && !DefersWithItsStatement(batch, thrown))
                         thrown = pending;
-                    this.RouteError(batch, this.SettleError(simulation, batch, thrown, requireSemicolonBeforeCte, atBatchStart));
+                    this.RouteError(batch, this.SettleError(simulation, batch, thrown, afterUnterminatedStatement, atBatchStart));
                 }
             }
             finally
@@ -711,7 +711,7 @@ partial class Simulation
         /// the error is attributed to, and the rollbacks real performs before
         /// the error reaches anyone.
         /// </summary>
-        private SimulatedSqlException SettleError(Simulation simulation, BatchContext batch, SimulatedSqlException thrown, bool requireSemicolonBeforeCte, bool atBatchStart)
+        private SimulatedSqlException SettleError(Simulation simulation, BatchContext batch, SimulatedSqlException thrown, bool afterUnterminatedStatement, bool atBatchStart)
         {
             var connection = batch.Connection;
 
@@ -728,7 +728,7 @@ partial class Simulation
             if (batch.InlinedCalls is { Body: false } inlined && !thrown.BindReportSettled && BindErrorReport.StartsReport(thrown))
                 inlined.TruncateTo(this.inlinedCallsBefore);
             if (!thrown.BindReportSettled)
-                (ex, this.resumedAtStatementEnd) = simulation.ReportEveryBindError(batch, thrown, this.StatementStart, requireSemicolonBeforeCte, atBatchStart);
+                (ex, this.resumedAtStatementEnd) = simulation.ReportEveryBindError(batch, thrown, this.StatementStart, afterUnterminatedStatement, atBatchStart);
 
             // A statement that declared it owns its trailing token and then
             // raised — while it ran, or in the re-read — never reached the

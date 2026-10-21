@@ -2544,6 +2544,11 @@ internal sealed partial class Selection
                 case Name or Literal { Value.Type.Category: SqlTypeCategory.String } or ReservedKeyword { Keyword: Keyword.As } when expressions[^1] is StarProjection:
                     throw SimulatedSqlException.SyntaxErrorNear(context);
 
+                // A $-word is never an alias (probed 2026-10-21 against SQL
+                // Server 2025: `SELECT 1 $identity` is Msg 102 at it).
+                case UnquotedString { IsDollarWord: true }:
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+
                 case Name name:
                     expressions[^1] = AssignColumnAlias(expressions[^1], name.Value);
                     continue;
@@ -3018,6 +3023,7 @@ internal sealed partial class Selection
     /// </summary>
     private static string ReadAliasName(Token token) => token switch
     {
+        UnquotedString { IsDollarWord: true } => throw SimulatedSqlException.SyntaxErrorNear(token),
         Name name => name.Value,
         Literal { Value.Type.Category: SqlTypeCategory.String } literal => literal.Value.AsString,
         // A reserved keyword can't stand in as an alias, and real names it:

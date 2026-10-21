@@ -24,7 +24,7 @@ partial class Simulation
     /// back unchanged, with the parser where it failed.
     /// </remarks>
     private (SimulatedSqlException Error, bool ResumedAtStatementEnd) ReportEveryBindError(
-        BatchContext batch, SimulatedSqlException first, ParserContext.Checkpoint start, bool requireSemicolonBeforeCte, bool atBatchStart)
+        BatchContext batch, SimulatedSqlException first, ParserContext.Checkpoint start, bool afterUnterminatedStatement, bool atBatchStart)
     {
         first.BindReportSettled = true;
         if (batch.BindErrors is not null
@@ -40,7 +40,7 @@ partial class Simulation
         var inlinedCallsBefore = batch.InlinedCalls?.Calls.Count ?? 0;
         var (report, stopper, completed) = ReadForBindErrors(batch, start, () =>
         {
-            foreach (var _ in this.DispatchOneStatementCore(batch, requireSemicolonBeforeCte, atBatchStart))
+            foreach (var _ in this.DispatchOneStatementCore(batch, afterUnterminatedStatement, atBatchStart))
             {
                 // Skip mode yields nothing; the enumeration drives the parse.
             }

@@ -934,7 +934,10 @@ internal abstract class Expression : ExpressionNode
     /// <param name="expression">The expression to wrap.</param>
     /// <param name="name">The name to assign.</param>
     /// <returns>The named expression.</returns>
-    public static Expression AssignName(Expression expression, Name name) => new NamedExpression(expression, name.Value);
+    public static Expression AssignName(Expression expression, Name name) =>
+        name is UnquotedString { IsDollarWord: true }
+            ? throw SimulatedSqlException.SyntaxErrorNear(name)
+            : new NamedExpression(expression, name.Value);
 
     /// <summary>
     /// Evaluates the expression with explicit access to both per-row column
