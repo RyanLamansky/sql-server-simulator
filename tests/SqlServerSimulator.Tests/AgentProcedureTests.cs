@@ -76,6 +76,22 @@ public sealed class AgentProcedureTests
         AreEqual("1:1;2:;3:515", simulation.ExecuteScalar("select string_agg(concat(n, ':', rc), ';') within group (order by n) from codes"));
     }
 
+    /// <summary>
+    /// <c>sp_add_operator</c>'s <c>@enabled</c> is 0 or 1, checked by
+    /// <c>sp_verify_operator</c> at its line 38 (probed 2026-10-21 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void AddOperator_EnabledOutOfRange_IsMsg14266()
+    {
+        var simulation = new Simulation();
+        var ex = simulation.AssertSqlError("exec msdb.dbo.sp_add_operator @name = N'op', @enabled = 7", 14266);
+        AreEqual("The specified '@enabled' is invalid (valid values are: 0, 1).", ex.Errors[0].Message);
+        AreEqual("sp_verify_operator", ex.Errors[0].Procedure);
+        AreEqual(38, ex.Errors[0].LineNumber);
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from msdb.dbo.sysoperators where name = N'op'"));
+    }
+
     [TestMethod]
     public void AgentRefusal_CaughtByATry_LeavesTheReturnCode()
         => AreEqual("14262|sp_verify_job_identifiers|67|42", new Simulation().ExecuteScalar("""

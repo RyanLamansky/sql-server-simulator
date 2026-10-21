@@ -259,18 +259,20 @@ internal sealed class XmlSchemaCollection(
     private const string XsdNamespace = "http://www.w3.org/2001/XMLSchema";
 
     /// <summary>
-    /// Checks the schema documents an <c>ALTER … ADD</c> brings: text that
-    /// holds no <c>xsd:schema</c> document is Msg 2378, and a global element,
-    /// type or attribute this collection already declares in the same
-    /// namespace is Msg 6310.
+    /// The schema documents <paramref name="text"/> holds, for a <c>CREATE</c>
+    /// or an <c>ALTER … ADD</c>: text holding an element that is no
+    /// <c>xsd:schema</c> document, or none at all, is Msg 2378 (probed
+    /// 2026-10-21 against SQL Server 2025 for both statements). Null when the
+    /// object model can't read a schema document there, which the compile
+    /// checks refuse as real does.
     /// </summary>
-    public void RejectRedeclaredComponents(string addedText)
+    public static List<System.Xml.Schema.XmlSchema>? ReadSchemaDocuments(string text)
     {
-        var added = new List<System.Xml.Schema.XmlSchema>();
+        var documents = new List<System.Xml.Schema.XmlSchema>();
         try
         {
             var settings = new XmlReaderSettings { ConformanceLevel = ConformanceLevel.Fragment };
-            using var reader = XmlReader.Create(new System.IO.StringReader(addedText), settings);
+            using var reader = XmlReader.Create(new System.IO.StringReader(text), settings);
             _ = reader.Read();
             while (!reader.EOF)
             {
@@ -282,7 +284,7 @@ internal sealed class XmlSchemaCollection(
                 if (reader.NamespaceURI != XsdNamespace || reader.LocalName != "schema")
                     throw SimulatedSqlException.XmlSchemaDocumentExpected();
                 if (ReadSchemaDocument(reader) is { } schema)
-                    added.Add(schema);
+                    documents.Add(schema);
             }
         }
         catch (XmlException)
@@ -291,12 +293,21 @@ internal sealed class XmlSchemaCollection(
         }
         catch (System.Xml.Schema.XmlSchemaException)
         {
-            // A schema document the object model can't read is left to the
-            // compile checks, whose refusals real raises for it.
-            return;
+            return null;
         }
-        if (added.Count == 0)
-            throw SimulatedSqlException.XmlSchemaDocumentExpected();
+        return documents.Count == 0 ? throw SimulatedSqlException.XmlSchemaDocumentExpected() : documents;
+    }
+
+    /// <summary>
+    /// Checks the schema documents an <c>ALTER … ADD</c> brings
+    /// (<see cref="ReadSchemaDocuments"/>): a global element, type or
+    /// attribute this collection already declares in the same namespace is
+    /// Msg 6310.
+    /// </summary>
+    public void RejectRedeclaredComponents(string addedText)
+    {
+        if (ReadSchemaDocuments(addedText) is not { } added)
+            return;
 
         var existing = this.GetCompiledSchemas();
         if (existing is null)

@@ -258,6 +258,7 @@ partial class Simulation
 
         // The text is read as XML first, its parse errors real's own.
         _ = XmlWellFormedness.Canonical(xsdText, SqlType.IsNationalStringCategory(literalValue.Type));
+        _ = XmlSchemaCollection.ReadSchemaDocuments(xsdText);
         RejectSchemaText(context, xsdText, existingText: null);
         var documents = XmlSchemaComponentBuilder.CountDocuments(xsdText);
         var componentCount = XmlSchemaComponentBuilder.Build(xsdText, [new(documents, 0)]).Components.Count;

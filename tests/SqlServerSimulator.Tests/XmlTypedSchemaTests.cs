@@ -286,6 +286,16 @@ public sealed class XmlTypedSchemaTests
             "Specified collection 'nope' cannot be altered because it does not exist or you do not have permission.");
     }
 
+    /// <summary>
+    /// CREATE refuses text holding anything but schema documents as ALTER's ADD
+    /// does (probed 2026-10-21 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create xml schema collection x2 as '<x/>'")]
+    [DataRow("create xml schema collection x2 as N'<xsd:schema xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\"/><x/>'")]
+    public void Create_TextWithAnElementThatIsNoSchema_IsMsg2378(string statement) =>
+        Error(statement, 2378, "Expected XML schema document");
+
     [TestMethod]
     public void AlterAdd_AComponentOfAnotherKind_IsNotARedeclaration() =>
         AreEqual(1, Scalar("""

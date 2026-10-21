@@ -30,7 +30,8 @@ partial class Simulation
 
     /// <summary>
     /// <c>sp_add_operator</c>: a new operator, after <c>sp_verify_operator</c>'s
-    /// checks — a name no operator holds (Msg 14261), pager days 0 to 127 and
+    /// checks — a name no operator holds (Msg 14261), <c>@enabled</c> 0 or 1
+    /// (14266, probed 2026-10-21 against SQL Server 2025), pager days 0 to 127 and
     /// pager hours of day (14266), and an operator category that exists
     /// (14262) — filed under <c>[Uncategorized]</c> by default.
     /// </summary>
@@ -42,6 +43,8 @@ partial class Simulation
         var name = call.Text(0)!.Trim();
         if (this.AgentScalar(batch, "select id from dbo.sysoperators where name = @name", ("name", SqlValue.FromNVarchar(name))) is not null)
             throw SimulatedSqlException.AgentAlreadyExists("@name", name).AtAgentSite(31, "sp_verify_operator");
+        if (call.Int(1) is not (0 or 1))
+            throw SimulatedSqlException.AgentInvalidValue("@enabled", "0, 1").AtAgentSite(38, "sp_verify_operator");
         if (call.Int(10) is < 0 or > 127)
             throw SimulatedSqlException.AgentInvalidValue("@pager_days", "0..127 [1 = Sunday .. 64 = Saturday]").AtAgentSite(45, "sp_verify_operator");
         string[] times = ["@weekday_pager_start_time", "@weekday_pager_end_time", "@saturday_pager_start_time", "@saturday_pager_end_time", "@sunday_pager_start_time", "@sunday_pager_end_time"];
