@@ -241,7 +241,7 @@ The per-statement dispatch normalizer advances one token past a parser that stop
 **The statement kind now declares its own cursor discipline.**
 A parser leaves the cursor in one of two places — at its first *un*-consumed token, or on the last token it consumed — and the two can't be told apart from the cursor alone, which is why the advance used to be unconditional.
 A dispatch arm whose parser does the former calls `ParserContext.RejectTrailingToken()`, and a non-boundary token left after one of those is **Msg 102** naming it; everything else keeps the advance.
-Marked kinds, each probe-confirmed against SQL Server 2025 (2026-08-06) by placing a stray identifier after it: `INSERT` / `UPDATE` / `DELETE` / `MERGE`, `DECLARE`, `PRINT`, `RAISERROR`, `THROW`, `WAITFOR`, `EXEC`, `RECONFIGURE`, `REVERT`, `USE`, `COMMIT`, `GRANT` / `REVOKE` / `DENY`, and `DROP`.
+Marked kinds, each probe-confirmed against SQL Server 2025 (2026-08-06) by placing a stray identifier after it: `SELECT` (whose own check names a stray name, value, comma, `AS` or `)`, and the mark an operator — `… WHERE EXISTS (…) = 1` is near `'='`, probed 2026-10-21), `INSERT` / `UPDATE` / `DELETE` / `MERGE`, `DECLARE`, `PRINT`, `RAISERROR`, `THROW`, `WAITFOR`, `EXEC`, `RECONFIGURE`, `REVERT`, `USE`, `COMMIT`, `GRANT` / `REVOKE` / `DENY`, and `DROP`.
 `SET`, `CREATE` and `ALTER` are deliberately unmarked — those parsers do end on their last consumed token, and `SET NOCOUNT ON zzz` is already rejected because the dispatch loop reads the leftover `zzz` as a statement of its own.
 
 Two mechanics are load-bearing.

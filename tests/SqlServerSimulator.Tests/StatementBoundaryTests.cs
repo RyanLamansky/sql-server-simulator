@@ -227,4 +227,13 @@ public sealed class StatementBoundaryTests
     [DataRow("select a from (values (1)) v (a) where a = 1, 5")]
     public void SelectFollowedByAComma_RaisesMsg102AtTheComma(string sql)
         => new Simulation().AssertSqlError(sql, 102, "Incorrect syntax near ','.");
+
+    [TestMethod]
+    [DataRow("select 1 where exists (select 1) = 1", "=")]
+    [DataRow("select 1 where 'a' like 'a' = 1", "=")]
+    [DataRow("select 1 where 1 = 1 <", "<")]
+    [DataRow("select 1 from (values (1)) v(a) =", "=")]
+    [DataRow("select 1 a where 1 = 1 option (recompile) >", ">")]
+    public void AnOperatorAfterAQuery_IsASyntaxErrorAtTheOperator(string batch, string near)
+        => new Simulation().AssertSqlError(batch, 102, $"Incorrect syntax near '{near}'.");
 }

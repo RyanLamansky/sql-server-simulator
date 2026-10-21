@@ -404,8 +404,6 @@ A table named in another database lists nothing; one that doesn't resolve, or a 
 - **The rest of the part-of-speech lexicon** (probed 2026-10-06 against SQL Server 2025): real inflects nearly every noise word — `use` finds `used`, `after` finds `afters`, a pronoun reaches its case forms (`he`, `him`, `his`) — where only the irregular table's lemmas expand here; it reads some `-ed` forms as adjectives of their own (`exposed` finds `expose` but not `exposé`); it strips a three-letter plural (`ams` finds `am`); and it lists every paradigm a lemma has in `sys.dm_fts_parser` (`leaf` gets `leafed`, `foot` gets `footing`), where the stemmer here matches those forms but lists only the row.
   Its regular forms come from the lexicon too, so a listing differs where a rule can't tell (probed 2026-10-07 against SQL Server 2025): a final consonant doubles in a word of one syllable here (`stop` → `stopped`) but real doubles `admit`, `commit` and `prefer` too, lists `travelled` beside `traveled`, doesn't double `quit`'s vowel pair yet lists `quitted`, gives `hit`, `cut`, `set` and `put` no `-ed` form, lists `shown`, withholds the possessives of `admit`, `quit`, `prefer` and `beg`, and gives a single letter its plural possessive (`x` → `x's`, `xs'`) and `i` its pronoun forms.
   A search whose expansion reaches a noise word (`FREETEXT(b, 'saw')`, through `see`) reports real's noise-word informational message there, which the simulator doesn't.
-- **A predicate compared to a value** (`CONTAINS(body, 'x') = 1`) is Msg 102 near `1` here and near `=` on real.
-- **`ALTER TABLE … ALTER COLUMN` of the key index's column** names the key as `The object` in its Msg 5074, where real names it `The index` once a full-text index uses it.
 
 ## BACPAC round-trip
 

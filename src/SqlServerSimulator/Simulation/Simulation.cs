@@ -3656,6 +3656,11 @@ public sealed partial class Simulation
             case Operator { Character: '(' }:
                 var selectStart = context.Token.StartIndex;
                 outcome = this.RunSelectStatement(batch, out var cutShort);
+                // A query stops at its first unconsumed token, so an operator
+                // left after it is Msg 102 there rather than swallowed
+                // (probed 2026-10-21 against SQL Server 2025: `… WHERE
+                // EXISTS (…) = 1` is near '=').
+                context.RejectTrailingToken();
                 // A query run under a query notification request subscribes.
                 if (connection.PendingQueryNotification is { } notification && !batch.IsSkipping && cutShort is null)
                     this.SubscribeQuery(batch, notification, context.Command.CommandText[selectStart..(context.Token?.StartIndex ?? context.Command.CommandText.Length)]);

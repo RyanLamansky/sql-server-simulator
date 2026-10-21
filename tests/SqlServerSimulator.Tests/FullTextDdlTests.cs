@@ -433,6 +433,14 @@ public sealed class FullTextDdlTests
     }
 
     [TestMethod]
+    public void Altering_The_Key_Column_Names_The_Key_As_An_Index()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(KeyTable, "create fulltext catalog c as default", "create fulltext index on dbo.k (a) key index pk_k");
+        AreEqual("The index 'pk_k' is dependent on column 'id'.", sim.AssertSqlError("alter table dbo.k alter column id bigint not null", 5074).Errors[0].Message);
+    }
+
+    [TestMethod]
     public void Dropping_A_Type_Column_Is_Msg_5074_Naming_The_Table()
     {
         var sim = new Simulation();

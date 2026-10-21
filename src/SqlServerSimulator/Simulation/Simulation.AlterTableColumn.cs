@@ -1397,8 +1397,13 @@ partial class Simulation
         foreach (var kc in table.KeyConstraints)
         {
             var keyCounts = kc.Kind == KeyConstraintKind.PrimaryKey ? includePrimaryKey : includeUniqueKeys;
+            // The full-text index's key is named as the index it is (probed
+            // 2026-10-21 against SQL Server 2025).
             if ((keyCounts && storageOrdinal >= 0 && Array.IndexOf(kc.StorageOrdinals, storageOrdinal) >= 0) || ReferenceEquals(kc.Partitioning?.Column, col))
-                blockers.Add((kc.Name, objectKind, 4, kc.ObjectId));
+            {
+                var keysFullText = table.FullTextIndex is { } fullText && collation.Equals(kc.Name, fullText.KeyIndexName);
+                blockers.Add((kc.Name, keysFullText ? SimulatedSqlException.AlterColumnBlockerKind.Index : objectKind, 4, kc.ObjectId));
+            }
         }
         // A spatial index depends on its column whatever the change (probed
         // 2026-10-05 against SQL Server 2025).
