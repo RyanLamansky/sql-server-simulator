@@ -26,6 +26,11 @@ public sealed class RealsOwnRefusalTests
     [DataRow("restore headeronly from disk = 'x.bak' with stats, restricted_user, keep_cdc, replace, recovery, norecovery, keep_replication, new_broker", 3032, 2,
         "One or more of the options (stats, norecovery, broker_option, keep_replication, recovery, restricted_user, replace, keep_cdc) are not supported for this statement. Review the documentation for supported options.")]
     [DataRow("backup log nosuch to disk = 'x.bak'", 911, 10, "Database 'nosuch' does not exist. Make sure that the name is entered correctly.")]
+    [DataRow("backup log d with truncate_only", 155, 1, "'truncate_only' is not a recognized BACKUP option.")]
+    [DataRow("backup log d with no_log", 3032, 2, "One or more of the options (no_log) are not supported for this statement. Review the documentation for supported options.")]
+    [DataRow("backup log d to disk = 'x.bak' with no_log, stats, metadata_only", 3032, 2,
+        "One or more of the options (snapshot, no_log) are not supported for this statement. Review the documentation for supported options.")]
+    [DataRow("create database d; backup database d", 3207, 3, "Backup or restore requires at least one backup device. Rerun your statement specifying a backup device.")]
     [DataRow("exec sp_executesql N'select ''a'' c' with result sets ((c varchar(10) collate Bogus_CI_AS))", 448, 2, "Invalid collation 'Bogus_CI_AS'.")]
     [DataRow("create database d collate Bogus_CI_AS", 448, 3, "Invalid collation 'Bogus_CI_AS'.")]
     [DataRow("select hierarchyid::parse('/1/')", 6506, 10, "Could not find method 'parse' for type 'Microsoft.SqlServer.Types.SqlHierarchyId' in assembly 'Microsoft.SqlServer.Types'")]

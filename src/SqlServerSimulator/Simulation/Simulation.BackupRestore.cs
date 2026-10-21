@@ -170,7 +170,7 @@ partial class Simulation
     }
 
     /// <summary>
-    /// <c>BACKUP { DATABASE | LOG } name TO DISK = path [WITH …]</c>, entered
+    /// <c>BACKUP { DATABASE | LOG } name [TO DISK = path] [WITH …]</c>, entered
     /// on <c>BACKUP</c>.
     /// </summary>
     private bool ParseBackup(ParserContext context, BatchContext batch)
@@ -183,9 +183,9 @@ partial class Simulation
         var verb = isLog ? "BACKUP LOG" : "BACKUP DATABASE";
         context.MoveNextRequired();
         var databaseName = ParseBackupOperand(context, batch);
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.To })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        var devices = ParseBackupDevices(context, batch, verb);
+        // The device list is optional to real's grammar, whose options are
+        // checked without one; the statement then fails as it runs.
+        var devices = context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.To } ? ParseBackupDevices(context, batch, verb) : [];
         var refused = new List<string>();
         var options = ParseBackupOptions(context, batch, "BACKUP", verb, refused);
         RefuseOptionsNotTaken(refused);
@@ -733,6 +733,8 @@ partial class Simulation
     /// <summary>The one disk device a statement names; more is striped media, which isn't modeled.</summary>
     private static BackupDeviceTarget SingleDevice(List<BackupDeviceTarget> devices, string verb)
     {
+        if (devices.Count == 0)
+            throw SimulatedSqlException.BackupNeedsADevice(verb);
         if (devices.Count != 1)
             throw new NotSupportedException($"{verb} to or from striped media (more than one device) isn't modeled by the simulator.");
         return devices[0].Path.Length == 0 ? throw SimulatedSqlException.ZeroLengthBackupDevice(verb) : devices[0];
@@ -830,7 +832,7 @@ partial class Simulation
     /// order they were written in (probed 2026-10-21 against SQL Server 2025).
     /// </summary>
     private static readonly string[] OptionsNotTakenOrder =
-        ["stats", "norecovery", "no_truncate", "snapshot", "broker_option", "keep_replication", "recovery", "restricted_user", "replace", "keep_cdc", "mediapassword", "password", "standby"];
+        ["stats", "norecovery", "no_truncate", "snapshot", "no_log", "broker_option", "keep_replication", "recovery", "restricted_user", "replace", "keep_cdc", "mediapassword", "password", "standby"];
 
     /// <summary>
     /// Raises Msg 3032 for the options a form gathered as not taken, which real
@@ -897,13 +899,19 @@ partial class Simulation
                 // The options a BACKUP form knows but doesn't take, gathered
                 // for Msg 3032 (probed 2026-10-21 against SQL Server 2025).
                 case "NORECOVERY" or "NO_TRUNCATE" when verb == "BACKUP DATABASE":
-                case "METADATA_ONLY" when verb == "BACKUP LOG":
+                case "METADATA_ONLY" or "NO_LOG" when verb == "BACKUP LOG":
                     refused!.Add(name switch
                     {
                         "METADATA_ONLY" => "snapshot",
                         "NORECOVERY" => "norecovery",
+                        "NO_LOG" => "no_log",
                         _ => "no_truncate",
                     });
+                    break;
+                // The log truncation option of old, which BACKUP DATABASE and
+                // RESTORE still parse and ignore (probed 2026-10-21 against
+                // SQL Server 2025).
+                case "NO_LOG":
                     break;
                 case "MEDIAPASSWORD" or "PASSWORD" when !restore:
                 case "STANDBY" when verb == "BACKUP DATABASE":

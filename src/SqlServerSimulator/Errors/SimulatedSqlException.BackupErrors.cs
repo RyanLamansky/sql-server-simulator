@@ -158,6 +158,10 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException BackupDeviceDoesNotExist(string name, string verb) =>
         FollowedByBackupTerminating(new($"Backup device '{name}' does not exist. To view existing backup devices, use the sys.backup_devices catalog view. To create a new backup device use either sp_addumpdevice or SQL Server Management Studio.", 3206, 16, 1), verb);
 
+    /// <summary>Msg 3207 then Msg 3013: a <c>BACKUP</c> naming no device, which real's grammar allows (probed 2026-10-21 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException BackupNeedsADevice(string verb) =>
+        FollowedByBackupTerminating(new("Backup or restore requires at least one backup device. Rerun your statement specifying a backup device.", 3207, 16, 3), verb);
+
     /// <summary>Mimics SQL Server error 3044: <c>DISK = N''</c>.</summary>
     internal static SimulatedSqlException ZeroLengthBackupDevice(string verb) =>
         FollowedByBackupTerminating(new("Invalid zero-length device name. Reissue the BACKUP statement with a valid device name.", 3044, 16, 1), verb);
