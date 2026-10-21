@@ -25,6 +25,32 @@ public sealed class ServerPermissionEnforcementTests
         return sim;
     }
 
+    /// <summary>
+    /// A server-scope <c>GRANT</c> / <c>DENY</c> / <c>REVOKE</c> to <c>sa</c> or
+    /// the caller's own login is the class-0 Msg 4624 that the database-scope
+    /// path gives, applying nothing (probed 2026-10-21 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("grant control server to sa")]
+    [DataRow("deny control server to sa")]
+    [DataRow("revoke control server from sa")]
+    public void ServerGrantToSa_IsTheProtectedTargetInfoMessage(string statement)
+    {
+        using var connection = (SimulatedDbConnection)WithLogin().CreateOpenConnection();
+        _ = connection.CreateCommand("use master").ExecuteNonQuery();
+        var messages = new List<(int Number, byte Class)>();
+        connection.InfoMessage += (_, e) => messages.AddRange(e.Errors.Cast<SimulatedError>().Select(error => (error.Number, error.Class)));
+        _ = connection.CreateCommand(statement).ExecuteNonQuery();
+        CollectionAssert.AreEqual(new[] { (4624, (byte)0) }, messages);
+        AreEqual(0, connection.CreateCommand("select count(*) from sys.server_permissions p join sys.server_principals s on s.principal_id = p.grantee_principal_id where s.name = 'sa' and p.permission_name = 'CONTROL SERVER'").ExecuteScalar());
+    }
+
+    /// <summary>A server-scope grant to public is applied, where sa is refused.</summary>
+    [TestMethod]
+    public void ServerGrantToPublic_Applies() =>
+        AreEqual(1, WithLogin("grant view server state to public").ExecuteScalar(
+            "select count(*) from sys.server_permissions p join sys.server_principals s on s.principal_id = p.grantee_principal_id where s.name = 'public' and p.permission_name = 'VIEW SERVER STATE'"));
+
     // ---- login gate (in-process front door) ----
 
     private static SimulatedSqlException OpenFails(Simulation sim, string user, string password)

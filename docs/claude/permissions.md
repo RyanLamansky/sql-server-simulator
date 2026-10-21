@@ -587,6 +587,7 @@ Server scope outlives any database, so its registries live on `Simulation`.
   Legal only when the current database is `master` (**Msg 4621**, severity 16 **state 10**, no trailing period — elsewhere), stored in `Simulation.ServerPermissions`, which starts with real's class-100 rows: `sa`'s `CONNECT SQL`, `public`'s `VIEW ANY DATABASE` and the [Windows logins'](#windows-logins) seven.
   `CREATE LOGIN` auto-seeds a `CONNECT SQL` G row (N4b).
   **Server-scope DENY replaces the prior G row** (N4 — divergent from database scope, where G + D coexist); REVOKE removes the rows.
+  A server-scope grant to `sa` or the caller's own login is refused with the same class-0 **Msg 4624** notice the database-scope path gives, applying nothing (probed 2026-10-21 against SQL Server 2025); a grant to `public` applies.
   Every stored row is enforced — see [Server permissions and the fixed server roles](#server-permissions-and-the-fixed-server-roles).
   - **Class 100** (`class_desc` `SERVER`, `major_id` 0) — the ON-less and `ON SERVER::` forms.
     `ON SERVER::<name>` is an **alias of the ON-less form and its name is ignored** (probe-confirmed: real accepts any name there and stores the same row).

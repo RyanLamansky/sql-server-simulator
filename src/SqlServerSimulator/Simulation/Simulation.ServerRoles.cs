@@ -724,8 +724,19 @@ partial class Simulation
         }
 
         var grantee = new List<int>(granteeNames.Count);
+        var callerLogin = context.Connection.Security.Effective.LoginName;
         foreach (var granteeName in granteeNames)
         {
+            // sa and the caller's own login are off limits at server scope,
+            // as sa / dbo / sys / self are at database scope — the same class-0
+            // Msg 4624, the statement applying nothing (probed 2026-10-21
+            // against SQL Server 2025).
+            if (BuiltInToken.Comparer.Equals(granteeName, "sa") || BuiltInToken.Comparer.Equals(granteeName, callerLogin))
+            {
+                context.Batch.AppendInfoError(@class: 0, state: 2, number: 4624,
+                    message: "Cannot grant, deny, or revoke permissions to sa, dbo, entity owner, information_schema, sys, or yourself.");
+                return;
+            }
             if (!simulation.TryResolveServerPrincipalId(granteeName, out var id))
                 throw SimulatedSqlException.CannotFindLogin(granteeName);
             grantee.Add(id);
