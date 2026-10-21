@@ -3058,7 +3058,16 @@ public sealed class SimulatedDbConnection : DbConnection
     }
 
     /// <summary>Closes each reader still open, the latest first (see <see cref="openReaders"/>).</summary>
-    private void CloseOpenReaders()
+    private void CloseOpenReaders() => this.EndOpenReaders(abandon: false);
+
+    /// <summary>
+    /// Ends each reader still open without running the rest of its batch, as
+    /// real ends the request of a session whose client went away: the
+    /// abandoned-session sweep, whose session no client will read again.
+    /// </summary>
+    internal void AbandonOpenReaders() => this.EndOpenReaders(abandon: true);
+
+    private void EndOpenReaders(bool abandon)
     {
         object[] open;
         lock (this.openReaders)
@@ -3075,7 +3084,10 @@ public sealed class SimulatedDbConnection : DbConnection
                 WeakReference<SimulatedDbDataReader> weak => weak.TryGetTarget(out var alive) ? alive : null,
                 _ => null,
             };
-            reader?.Close();
+            if (abandon)
+                reader?.Abandon();
+            else
+                reader?.Close();
         }
     }
 

@@ -302,6 +302,30 @@ public sealed class AbandonedSessionReclamationTests
     }
 
     /// <summary>
+    /// The batch of a reader collected with its connection runs no further:
+    /// the statement after the result never runs, as real ends the request of
+    /// a session whose client went away, where a <c>Close</c> runs it.
+    /// </summary>
+    [TestMethod]
+    public void GarbageCollected_SuspendedReader_RunsNothingMoreOfItsBatch()
+    {
+        var simulation = new Simulation();
+        using var observer = simulation.CreateDbConnection();
+        observer.Open();
+        Exec(observer, "CREATE TABLE dbo.big (k int PRIMARY KEY, v char(2000) NOT NULL); INSERT dbo.big SELECT value, 'x' FROM generate_series(1, 200); CREATE TABLE dbo.l (v int)");
+
+        var session = LeakSuspendedReader(simulation, "SELECT * FROM dbo.big; INSERT dbo.l VALUES (1)");
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        AreEqual(1, simulation.ReclaimAbandonedSessions());
+        IsTrue(session.Reclaimed);
+        AreEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM dbo.l"), null));
+        AreEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks WHERE resource_type <> 'DATABASE'"), null));
+    }
+
+    /// <summary>
     /// A reader abandoned partway through a trigger's rows — the firing
     /// statement waiting on its own thread, which keeps the session reachable
     /// — lets the statement notice it's gone: the statement ends, its writes
@@ -348,15 +372,15 @@ public sealed class AbandonedSessionReclamationTests
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static SessionToken LeakSuspendedReader(Simulation simulation)
+    private static SessionToken LeakSuspendedReader(Simulation simulation, string? batch = null)
     {
         // Abandoning the connection and its reader undisposed is the scenario under test.
         var connection = simulation.CreateDbConnection();
         connection.Open();
-        var transaction = connection.BeginTransaction(System.Data.IsolationLevel.RepeatableRead);
         var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = "SELECT * FROM dbo.big";
+        if (batch is null)
+            command.Transaction = connection.BeginTransaction(System.Data.IsolationLevel.RepeatableRead);
+        command.CommandText = batch ?? "SELECT * FROM dbo.big";
         var reader = command.ExecuteReader();
         IsTrue(reader.Read());
         return connection.Session;

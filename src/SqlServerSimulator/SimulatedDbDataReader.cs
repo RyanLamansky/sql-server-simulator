@@ -222,10 +222,11 @@ public sealed class SimulatedDbDataReader : DbDataReader
 
     /// <summary>
     /// Ends the reader when its session closes under it with a statement
-    /// still producing rows: the outcome stream is disposed, which abandons
-    /// the statement and gives back what it held, and nothing more runs.
+    /// still producing rows, or is reclaimed abandoned: the outcome stream is
+    /// disposed, which abandons the statement and gives back what it held,
+    /// and nothing more runs.
     /// </summary>
-    private void Abandon()
+    internal void Abandon()
     {
         if (this.closed)
             return;

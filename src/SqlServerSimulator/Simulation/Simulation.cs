@@ -1274,7 +1274,10 @@ public sealed partial class Simulation
             // The session's own Close + Dispose, not a cleanup routine of its
             // own: an abandoned session has to end exactly the way a closed one
             // does, and the moment the two paths diverge one of them starts
-            // leaking what the other releases.
+            // leaking what the other releases. Its readers alone end
+            // differently: no client reads them again, so the rest of their
+            // batches never runs, where a Close runs it to its end.
+            connection.AbandonOpenReaders();
             using (connection)
                 connection.Close();
             reclaimed++;
