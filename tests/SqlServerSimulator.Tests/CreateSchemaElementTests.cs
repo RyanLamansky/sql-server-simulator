@@ -56,11 +56,23 @@ public sealed class CreateSchemaElementTests
         AreEqual(0, simulation.ExecuteScalar("select count(*) from sys.schemas where name = 's1'"));
     }
 
+    /// <summary>
+    /// <c>CREATE SCHEMA AUTHORIZATION owner</c> creates no schema and checks no
+    /// owner; its elements land where they would outside it (probed
+    /// 2026-10-21 against SQL Server 2025).
+    /// </summary>
     [TestMethod]
-    public void AuthorizationWithoutAName_NamesTheSchemaAfterTheOwner()
-        // `CREATE SCHEMA AUTHORIZATION dbo` claims the name `dbo`, which is
-        // then the reserved-name refusal.
-        => AreEqual(2760, new Simulation().AssertSqlError("create schema authorization dbo", 2760).Number);
+    public void AuthorizationWithoutAName_CreatesNoSchema()
+    {
+        var simulation = new Simulation();
+        var before = simulation.ExecuteScalar("select count(*) from sys.schemas");
+        simulation.ExecuteBatches(
+            "create schema authorization dbo",
+            "create schema authorization nobody",
+            "create schema authorization dbo create table t (a int)");
+        AreEqual(before, simulation.ExecuteScalar("select count(*) from sys.schemas"));
+        AreEqual("dbo", simulation.ExecuteScalar("select schema_name(schema_id) from sys.tables where name = 't'"));
+    }
 
     [TestMethod]
     public void DuplicateSchema_ReportsMsg2714ThenMsg2759()

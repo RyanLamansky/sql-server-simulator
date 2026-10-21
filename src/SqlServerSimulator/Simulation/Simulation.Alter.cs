@@ -39,7 +39,7 @@ partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Function }:
                 return TryParseCreateFunction(context, isAlter: true, createOrAlter: false);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Sequence }:
-                return TryParseAlterSequence(context);
+                return RejectingTrailingToken(context, TryParseAlterSequence(context));
             case UnquotedString { ContextualKeyword: ContextualKeyword.Partition }:
                 return TryParseAlterPartition(context);
             case ReservedKeyword { Keyword: Keyword.Schema }:
@@ -1514,6 +1514,11 @@ partial class Simulation
             any = true;
         }
     optionsRead:
+        // A word no option opens is the syntax error at it, ahead of the
+        // empty list's refusal (probed 2026-10-21 against SQL Server 2025:
+        // `ALTER SEQUENCE s s RESTART` is near 's').
+        if (!EndsStatement(context.Token) && !IsLabelDeclaration(context))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
         if (!any)
             throw SimulatedSqlException.AlterSequenceWithoutOptions();
         if (context.Batch.IsSkipping)

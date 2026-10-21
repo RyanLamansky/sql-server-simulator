@@ -435,4 +435,13 @@ public sealed class OpenJsonTests
         _ = AssertSqlError("select * from openjson('[1]') with (id int collate Nope_CI_AS)", 448);
         _ = AssertSqlError("select * from openjson('[1]') with (id decimal(10, 2) collate Latin1_General_CI_AS)", 156);
     }
+
+    /// <summary>An empty object root reads no row under WITH, where an empty object an array holds reads one (probed 2026-10-21 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("openjson(N'{}') with (a int)", 0)]
+    [DataRow("openjson(N'{\"a\":{}}', '$.a') with (a int)", 0)]
+    [DataRow("openjson(N'{\"x\":1}') with (a int)", 1)]
+    [DataRow("openjson(N'[{}]') with (a int)", 1)]
+    public void AnEmptyObjectRoot_ReadsNoRowUnderWith(string source, int rows)
+        => AreEqual(rows, new Simulation().ExecuteScalar($"select count(*) from {source}"));
 }

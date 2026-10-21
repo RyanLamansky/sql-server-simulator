@@ -292,6 +292,14 @@ partial class Simulation
             context.RestoreCheckpoint(afterTypeName);
         }
 
+        // A plain name after the type is the syntax error at it ahead of the
+        // type's lookup (probed 2026-10-21 against SQL Server 2025: `AS nosuch
+        // bigint` is near 'bigint').
+        var beforeFollower = context.SaveCheckpoint();
+        if (context.MoveNext() && context.Token is Name and not UnquotedString { ContextualKeyword: ContextualKeyword.Start or ContextualKeyword.Increment or ContextualKeyword.MinValue or ContextualKeyword.MaxValue or ContextualKeyword.No or ContextualKeyword.Cycle or ContextualKeyword.Cache })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.RestoreCheckpoint(beforeFollower);
+
         var (resolved, _, _, _) = ResolveTypeReference(
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
             index: 1, TypeSpecSite.Scalar, columnName: typeName.Value);

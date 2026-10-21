@@ -147,6 +147,25 @@ public sealed class SyntaxOutranksBindingTests
             """, 16949, "The variable '@c' is a cursor variable, but it is used in a place where a cursor variable is not valid.");
 
     [TestMethod]
+    [DataRow("select 1 union all 1 + 1 from zt", 102, "Incorrect syntax near '1'.")]
+    [DataRow("select id from zt with (nolock zzbogus, index(1))", 321, "\"zzbogus\" is not a recognized table hints option.")]
+    [DataRow("select id from zt with (, index(1))", 102, "Incorrect syntax near ','.")]
+    [DataRow("select * from zt t1 inner hash zzbogus join zt t2 on t1.id = t2.id", 155, "'hash' is not a recognized join option.")]
+    [DataRow("select * from zt t1 left zzbogus outer join zt t2 on t1.id = t2.id", 156, "Incorrect syntax near the keyword 'outer'.")]
+    [DataRow("select top zzbogus (1) id from zt order by a", 102, "Incorrect syntax near 'zzbogus'.")]
+    [DataRow("select id from zt for zzbogus xml path('r')", 102, "Incorrect syntax near 'zzbogus'.")]
+    [DataRow("create sequence zsq as zzbogus bigint", 102, "Incorrect syntax near 'bigint'.")]
+    [DataRow("create sequence zsq; alter sequence zsq zsq restart", 102, "Incorrect syntax near 'zsq'.")]
+    public void QueryAndSequenceGrammar_ReportsRealsError(string statement, int number, string message)
+        => new Simulation().AssertSqlError(Fixture + statement, number, message);
+
+    [TestMethod]
+    [DataRow("select count(*) x group by ()")]
+    [DataRow("select count(*) x having count(*) > 0")]
+    public void AnAliasedFromlessSelect_TakesGroupByAndHaving(string statement)
+        => AreEqual(1, new Simulation().ExecuteScalar(statement));
+
+    [TestMethod]
     [DataRow("exec sp_executesql N'select @p', N'@p int', @p 1", "1")]
     [DataRow("exec sp_executesql N'select 1', N'@p int', @p @q = 1", "@q")]
     [DataRow("exec sp_help @p 1", "1")]

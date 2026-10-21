@@ -181,10 +181,14 @@ internal sealed partial class Selection
         // (paths relative to the element), an object root yields a single
         // row (paths relative to the root). The default (key, value, type)
         // schema instead unfolds the root — one row per array element or
-        // per object property.
+        // per object property. An empty object root yields no row, where an
+        // empty object an array holds still yields its row (probed 2026-10-21
+        // against SQL Server 2025: `{}` and `$.a` over `{"a":{}}` read no
+        // row, `[{}]` reads one).
         if (root.ValueKind == JsonValueKind.Object && withColumns is not null)
         {
-            yield return BuildOpenJsonRow(root, withColumns, schema, key: "", jsonValue.Type);
+            if (root.EnumerateObject().MoveNext())
+                yield return BuildOpenJsonRow(root, withColumns, schema, key: "", jsonValue.Type);
         }
         else if (root.ValueKind == JsonValueKind.Array)
         {

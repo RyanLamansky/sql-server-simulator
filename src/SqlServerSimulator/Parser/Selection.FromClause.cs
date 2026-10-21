@@ -2653,17 +2653,32 @@ internal sealed partial class Selection
         algorithm = JoinHintAlgorithm(context.Token, out remote);
         if (algorithm == JoinAlgorithms.None && !remote)
         {
-            // Only a bare identifier reaches Msg 155; a reserved keyword here
-            // is the ordinary "that isn't JOIN" syntax error the caller raises.
+            // Only a bare identifier reaches Msg 155, and only where JOIN or
+            // another name follows it; before anything else the syntax error
+            // is at that token (probed 2026-10-21 against SQL Server 2025:
+            // `LEFT zz OUTER JOIN` is Msg 156 near OUTER). A reserved keyword
+            // here is the ordinary "that isn't JOIN" syntax error the caller
+            // raises.
             if (context.Token is UnquotedString word)
-                throw SimulatedSqlException.NotARecognizedJoinOption(word.Value);
+            {
+                context.MoveNextRequired();
+                throw context.Token is ReservedKeyword { Keyword: Keyword.Join } or Name
+                    ? SimulatedSqlException.NotARecognizedJoinOption(word.Value)
+                    : SimulatedSqlException.SyntaxErrorNear(context);
+            }
             return;
         }
         if (remote && outer)
             throw SimulatedSqlException.RemoteHintOnOuterJoin();
+        var hintText = context.Token!.Source.ToString();
         context.MoveNextRequired();
         if (JoinHintAlgorithm(context.Token, out var again) != JoinAlgorithms.None || again)
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        // A hint with a name rather than JOIN after it is itself refused as
+        // the word that opens no join (probed 2026-10-21 against SQL Server
+        // 2025: `INNER HASH zz JOIN` is Msg 155 on 'hash').
+        if (context.Token is Name)
+            throw SimulatedSqlException.NotARecognizedJoinOption(hintText);
         // A hint fixes the join order, which real reports with Msg 8625 as
         // the statement compiles (probed 2026-10-01 against SQL Server 2025);
         // the statement's end sends it, an OPTION (FORCE ORDER) withholding it.

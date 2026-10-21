@@ -81,6 +81,7 @@ Specific mappings:
   Other strings — including `'{"x":1}'` literals — go through the quote-and-escape path.
 
 `OPENJSON(json [, doc_path]) [WITH (col TYPE [path] [AS JSON], …)]` — rowset-returning, structurally a new FromSource kind.
+Under `WITH` an object root is one row, an empty object root none, while an empty object an array holds is still its element's row (probed 2026-10-21 against SQL Server 2025).
 The default schema is `key nvarchar(4000)` NOT NULL in `Latin1_General_BIN2` — so it compares and sorts binary, and a longer name is cut to 4000 characters — `value nvarchar(max)` in the document's collation and `type tinyint` NOT NULL, and no OPENJSON column is updatable (probed 2026-09-28 and 2026-10-02 against SQL Server 2025).
 A document of any other type is read as the `nvarchar` it converts to (`OPENJSON(1)` is Msg 13609 at `'1'`, a binary its bytes as UTF-16), and a NULL document path — a literal while binding, a variable when it runs — is Msg 8116 State 9 naming `OPENJSON`.
 A `WITH` list may name a column twice (`WITH (id int, id int)`): the name reads the first, and `SELECT *` returns both, the later one held under a name no reference spells (`Selection.ShadowedColumnName`).

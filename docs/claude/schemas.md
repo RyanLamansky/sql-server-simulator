@@ -238,7 +238,7 @@ Default class is `OBJECT` (the bare form with no prefix).
 `ALTER AUTHORIZATION ON SCHEMA::` moves it later, and every object in the schema without an explicit owner follows — see [`permissions.md`](permissions.md#ownership).
 Any database principal will do, roles included.
 A principal the database doesn't carry is **Msg 15151**'s *user* variant (`Cannot find the user 'nobody', …`, distinct from the object variant a `GRANT` element reports), and a principal that owns a schema cannot be dropped — `DROP USER` / `DROP ROLE` is **Msg 15138** (`The database principal owns a schema in the database, and cannot be dropped.`).
-Written without a schema name the clause supplies one: `CREATE SCHEMA AUTHORIZATION dbo` claims the name `dbo`, which is then the ordinary reserved-name Msg 2760.
+Written without a schema name the statement creates no schema and checks no owner — `CREATE SCHEMA AUTHORIZATION dbo` and `… AUTHORIZATION nobody` both succeed with `sys.schemas` unchanged — and its elements are created as they would be outside it, a `CREATE TABLE t` in `dbo` (probed 2026-10-21 against SQL Server 2025).
 
 **Every failure the statement meets as it runs carries a trailing Msg 2759** (`CREATE SCHEMA failed due to previous errors.`) — the duplicate-name Msg 2714, the owner's Msg 15151 and an element's own error alike — and the statement is **atomic**: an element that raises leaves neither the schema, its earlier elements nor the permission rows an earlier `GRANT` / `DENY` element wrote behind.
 A syntax error inside the element list is the batch's parse failing instead, and stands alone (probed 2026-09-26).

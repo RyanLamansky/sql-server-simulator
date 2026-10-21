@@ -919,6 +919,12 @@ internal sealed partial class Selection
                 context.ForBrowseSeen = true;
                 bareProjectionStatement = false;
             }
+            // A word no FOR clause opens is the syntax error at it (probed
+            // 2026-10-21 against SQL Server 2025: `FOR zz XML …` is near 'zz').
+            else if (context.Token is Name)
+            {
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
             else
             {
                 context.RestoreCheckpoint(atFor);
@@ -1052,6 +1058,10 @@ internal sealed partial class Selection
                     throw SimulatedSqlException.SetOperatorAllNotSupported("EXCEPT", 2);
             }
 
+            // A branch opens with SELECT or a parenthesis (probed 2026-10-21
+            // against SQL Server 2025: `… UNION ALL 1 + 1 FROM t` is Msg 102
+            // near '1').
+            RejectBranchWithoutSelect(context);
             Selection right;
             using (ParserScope.Enter(ref context.LaterSetOperationBranch, true))
                 right = ParseIntersectChain(context, scope, isFirstBranch: false);
@@ -1149,6 +1159,12 @@ internal sealed partial class Selection
         return ParseIntersectChainCore(context, scope, isFirstBranch, sequenceDrawsBefore);
     }
 
+    private static void RejectBranchWithoutSelect(ParserContext context)
+    {
+        if (context.Token is not (ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' }))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
     private static Selection ParseIntersectChainCore(ParserContext context, QueryScope scope, bool isFirstBranch, int sequenceDrawsBefore)
     {
         var ordersBranches = BranchesOrderThemselves(context, scope);
@@ -1159,6 +1175,7 @@ internal sealed partial class Selection
             RejectSequenceDrawUnderSetOperator(context, sequenceDrawsBefore);
             if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.All })
                 throw SimulatedSqlException.SetOperatorAllNotSupported("INTERSECT", 1);
+            RejectBranchWithoutSelect(context);
             Selection right;
             using (ParserScope.Enter(ref context.LaterSetOperationBranch, true))
                 right = ParseSetOpBranch(context, scope, allowOrderBy: ordersBranches);
@@ -2053,8 +2070,9 @@ internal sealed partial class Selection
                 // A string literal is no legacy count either (`TOP '1'`, Msg 102
                 // near it; probed 2026-09-24).
                 // Nor is a variable: `TOP @n` is Msg 102 near it, where `TOP (@n)`
-                // counts (probed 2026-10-01 against SQL Server 2025).
-                if (context.MoveNextRequiredReturnSelf().Token is Operator { Character: '+' or '-' or '~' } or Literal { Value.Type.Category: SqlTypeCategory.String } or AtPrefixedString)
+                // counts (probed 2026-10-01 against SQL Server 2025), or a name
+                // (`TOP x (1)`, probed 2026-10-21).
+                if (context.MoveNextRequiredReturnSelf().Token is Operator { Character: '+' or '-' or '~' } or Literal { Value.Type.Category: SqlTypeCategory.String } or AtPrefixedString or Name)
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 topExpression = Expression.ParsePrimary(context);
             }
@@ -2264,6 +2282,8 @@ internal sealed partial class Selection
                 // post-expression handlers, which consume the clause and its
                 // OFFSET / FETCH tail. Sorting is a no-op on the one
                 // synthesized row, but the clause must parse rather than raise.
+                case ReservedKeyword { Keyword: Keyword.Group }:
+                case ReservedKeyword { Keyword: Keyword.Having }:
                 case ReservedKeyword { Keyword: Keyword.Order }:
                 case ReservedKeyword { Keyword: Keyword.Where }:
                 case Name when IsWindowClauseAhead(context):

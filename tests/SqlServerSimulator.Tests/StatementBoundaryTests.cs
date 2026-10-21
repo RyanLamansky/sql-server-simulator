@@ -273,6 +273,7 @@ public sealed class StatementBoundaryTests
     [DataRow("create index zix on zt (b) with (= 80)", "=")]
     [DataRow("create index zix on zt (b) with (fillfactor = 80 80)", "80")]
     [DataRow("begin try select 1 end try begin catch end catch zzbogus", "zzbogus")]
+    [DataRow("create sequence zsq; alter sequence zsq restart with 5 no cycle zzbogus", "zzbogus")]
     [DataRow("save tran s1 zzbogus", "zzbogus")]
     [DataRow("rollback tran s1 zzbogus", "zzbogus")]
     [DataRow("rollback zzbogus", "zzbogus")]

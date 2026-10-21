@@ -78,14 +78,16 @@ partial class Simulation
         // CREATE SCHEMA at all; hand the token back to the dispatcher.
         if (schemaName is null && ownerName is null)
             return false;
-        // `CREATE SCHEMA AUTHORIZATION <owner>` names the schema after its
-        // owner, which is how the ownerless form of the grammar stays
-        // unambiguous.
-        schemaName ??= ownerName!;
-
         try
         {
-            _ = this.CreateSchemaBody(context, schemaName, ownerName);
+            // `CREATE SCHEMA AUTHORIZATION <owner>` creates no schema and
+            // checks no owner: its elements are created as they would be
+            // outside one (probed 2026-10-21 against SQL Server 2025: the
+            // schema count is unchanged, a missing user raises nothing, and
+            // `CREATE TABLE t` inside it lands in dbo).
+            _ = schemaName is null
+                ? this.ParseSchemaElements(context, elementScope: null)
+                : this.CreateSchemaBody(context, schemaName, ownerName);
         }
         catch (SimulatedSqlException exception) when (!context.Batch.IsSkipping || exception.Class != 15)
         {

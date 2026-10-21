@@ -523,8 +523,10 @@ internal sealed partial class Selection
                 return;
             }
             // Real takes a hint written straight after another without the
-            // comma (probed 2026-10-05 against SQL Server 2025).
-            if (context.Token is not null && TableHintLookup.ContainsKey(context.Token.Source))
+            // comma (probed 2026-10-05 against SQL Server 2025), so a name
+            // there is read as one, an unknown one Msg 321 (probed
+            // 2026-10-21).
+            if (context.Token is Name || (context.Token is not null && TableHintLookup.ContainsKey(context.Token.Source)))
                 continue;
             if (context.Token is not Operator { Character: ',' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -759,7 +761,10 @@ internal sealed partial class Selection
     /// </summary>
     private static void ConsumeOneTableHint(ParserContext context, ref TableHintInfo info, bool legacyForm)
     {
-        if (context.Token is null)
+        // Only a word can name a hint: anything else is the syntax error at
+        // it (probed 2026-10-21 against SQL Server 2025: `WITH (, INDEX (1))`
+        // is near ',').
+        if (context.Token is null or Operator or Numeric or Literal)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var sourceSpan = context.Token.Source;
         if (!TableHintLookup.TryGetValue(sourceSpan, out var kind))
