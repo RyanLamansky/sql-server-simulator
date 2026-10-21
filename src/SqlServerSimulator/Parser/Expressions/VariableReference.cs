@@ -40,6 +40,7 @@ internal sealed class VariableReference : Expression
         if (context.VariablesRefusedIn is { } statement)
             throw SimulatedSqlException.VariablesNotAllowed(statement);
         context.SimpleParameterizationBlocked = true;
+        context.NoteVariableRead(raw);
         this.declarationSnapshot = context.Batch.DeclarationSnapshotOf(this.VariableName, slot);
         this.DeclaredType = slot.DeclaredType;
         this.spelledNumeric = slot.SpelledNumeric;

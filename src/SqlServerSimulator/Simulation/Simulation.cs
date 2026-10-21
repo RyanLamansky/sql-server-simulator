@@ -3368,6 +3368,8 @@ public sealed partial class Simulation
             // A table hint's index and granularity refusals (probed 2026-10-16
             // against SQL Server 2025).
             || ex.Number is 307 or 308 or 309 or 315 or 316 or 362 or 363 or 365 or 651
+            // OPTION clause refusals (probed 2026-10-21 against SQL Server 2025).
+            || ex.Number is 322 || ex is { Number: 2560, State: 151 }
             // A MATCH's binding refusals (probed 2026-10-11 against SQL Server 2025).
             || ex.Number is 13900 or 13901 or 13902 or 13903 or 13905 or 13906 or 13920 or 13940 or 13948 or 13949 or 13950 or 13952 or 13953 or 13954 or 13957 or 13961 or 13962 or 13964 or 13965;
 

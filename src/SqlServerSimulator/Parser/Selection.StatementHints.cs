@@ -203,7 +203,11 @@ partial class Selection
                 ExpectSecondWord(context, hint, "GROUP");
                 return;
             case "QUERYTRACEON":
-                _ = ReadOptionInteger(context, hint);
+                // A flag past 17799 is the DBCC TRACEON family's Msg 2560, at
+                // state 151, while the batch compiles (probed 2026-10-21
+                // against SQL Server 2025).
+                if (ReadOptionInteger(context, hint) > 17799)
+                    throw SimulatedSqlException.DbccParameterIsIncorrect(1, 151);
                 context.MoveNextRequired();
                 return;
             case "RECOMPILE":
@@ -329,6 +333,8 @@ partial class Selection
                 throw SimulatedSqlException.MustDeclareScalarVariable(name);
             if (!(clause.OptimizedVariables ??= new(BatchContext.VariableNameComparer)).Add(name))
                 throw SimulatedSqlException.OptimizeForVariableRepeated("@" + name);
+            if (!context.ReadsVariable(name))
+                throw SimulatedSqlException.OptimizeForVariableUnused("@" + name);
             var after = context.GetNextRequired();
             if (IsWord(after, "UNKNOWN"))
             {

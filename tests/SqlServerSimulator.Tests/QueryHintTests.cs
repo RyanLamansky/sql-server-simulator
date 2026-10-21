@@ -1264,4 +1264,63 @@ public sealed class QueryHintTests
         _ = simulation.AssertSqlError("select * from vi with (noexpand, forceseek)", 8622);
         _ = simulation.AssertSqlError("select * from vi with (noexpand, forceseek) where v = 1", 8622);
     }
+
+    /// <summary>
+    /// A table hint takes a value only where real's grammar gives it one —
+    /// <c>SPATIAL_WINDOW_MAX_CELLS = n</c> — and no argument list but
+    /// <c>INDEX</c>'s and <c>FORCESEEK</c>'s (probed 2026-10-21 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from t with (nolock = 5)", 321, 21, "\"nolock\" is not a recognized table hints option.")]
+    [DataRow("select * from t with (tablock = x)", 321, 1, "\"tablock\" is not a recognized table hints option.")]
+    [DataRow("select * from t with (forcescan = 1)", 321, 21, "\"forcescan\" is not a recognized table hints option.")]
+    [DataRow("select * from t with (forceseek = 1)", 321, 21, "\"forceseek\" is not a recognized table hints option.")]
+    [DataRow("select * from t with (spatial_window_max_cells)", 321, 1, "\"spatial_window_max_cells\" is not a recognized table hints option.")]
+    [DataRow("select * from t with (spatial_window_max_cells = 'x')", 102, 1, "Incorrect syntax near 'x'.")]
+    [DataRow("select * from t with (spatial_window_max_cells = -1)", 102, 1, "Incorrect syntax near '-'.")]
+    [DataRow("select * from t with (nolock (1))", 102, 1, "Incorrect syntax near ')'.")]
+    [DataRow("select * from t with (nolock ())", 102, 1, "Incorrect syntax near ')'.")]
+    [DataRow("select * from t with (tablock (a, b))", 102, 1, "Incorrect syntax near ','.")]
+    public void ATableHintsPayloadOutsideItsGrammar_IsRealsError(string query, int number, int state, string message)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int primary key)");
+        var ex = simulation.AssertSqlError(query, number);
+        AreEqual(message, ex.Errors[0].Message);
+        AreEqual((byte)state, ex.State);
+    }
+
+    [TestMethod]
+    public void SpatialWindowMaxCells_TakesANumber()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int primary key)");
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from t with (spatial_window_max_cells = 5)"));
+    }
+
+    /// <summary>
+    /// An <c>OPTIMIZE FOR</c> variable the statement doesn't read is Msg 322,
+    /// and a <c>QUERYTRACEON</c> flag past 17799 Msg 2560 at state 151, each
+    /// while the batch compiles, so nothing in it runs and no TRY catches it
+    /// (probed 2026-10-21 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("declare @p int = 1; select 1 a where 1 = 1 option (optimize for (@p = 1))", 322, 1, "The variable \"@p\" is specified in the OPTIMIZE FOR clause, but is not used in the query.")]
+    [DataRow("declare @p int = 1, @q int; select 1 a where @q = 1 option (optimize for (@q unknown, @p = 1))", 322, 1, "The variable \"@p\" is specified in the OPTIMIZE FOR clause, but is not used in the query.")]
+    [DataRow("select 1 a option (querytraceon 17800)", 2560, 151, "Parameter 1 is incorrect for this DBCC statement.")]
+    public void AnOptionClauseRealRefusesWhileCompiling_EndsTheBatch(string statement, int number, int state, string message)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table ran (a int)");
+        var ex = simulation.AssertSqlError($"insert ran values (1); begin try {statement} end try begin catch insert ran values (2) end catch", number);
+        AreEqual(message, ex.Errors[0].Message);
+        AreEqual((byte)state, ex.State);
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from ran"));
+    }
+
+    [TestMethod]
+    [DataRow("declare @p int = 1; select 1 a where @p = 1 option (optimize for (@p = 1))")]
+    [DataRow("select 1 a option (querytraceon 17799)")]
+    public void AnOptionClauseRealTakes_Runs(string statement) => AreEqual(1, new Simulation().ExecuteScalar(statement));
 }

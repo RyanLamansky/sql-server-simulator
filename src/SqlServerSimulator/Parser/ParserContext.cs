@@ -804,6 +804,31 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public int SequenceOverStatementStart = -1;
 
     /// <summary>
+    /// The variables the statement starting at <see cref="StatementVariablesStart"/>
+    /// reads, against which its <c>OPTIMIZE FOR</c> is checked (Msg 322).
+    /// </summary>
+    public HashSet<string>? StatementVariables;
+
+    /// <summary>The statement <see cref="StatementVariables"/> belongs to.</summary>
+    public int StatementVariablesStart = -1;
+
+    /// <summary>Notes that the statement being parsed reads <paramref name="name"/> (<see cref="StatementVariables"/>).</summary>
+    public void NoteVariableRead(string name)
+    {
+        var statement = this.Batch.CurrentStatement.StartIndex;
+        if (this.StatementVariablesStart != statement)
+        {
+            this.StatementVariablesStart = statement;
+            this.StatementVariables?.Clear();
+        }
+        _ = (this.StatementVariables ??= new(BatchContext.VariableNameComparer)).Add(name);
+    }
+
+    /// <summary>Whether the statement being parsed reads <paramref name="name"/> (<see cref="NoteVariableRead"/>).</summary>
+    public bool ReadsVariable(string name) =>
+        this.StatementVariablesStart == this.Batch.CurrentStatement.StartIndex && this.StatementVariables is { } read && read.Contains(name);
+
+    /// <summary>
     /// A reference wrote an <c>OVER</c> definition that differs from an earlier
     /// one's. Real judges that after every refusal above (a clause, a row
     /// limit, an <c>ORDER BY</c>, a conditional arm) has had its say, so the

@@ -1557,8 +1557,8 @@ partial class SimulatedSqlException
     /// Wording is verbatim from the probe (2026-05-14 against SQL Server
     /// 2025), including the surrounding double-quotes on the offending name.
     /// </summary>
-    internal static SimulatedSqlException UnrecognizedTableHint(ReadOnlySpan<char> hintName) =>
-        new($"\"{new string(hintName)}\" is not a recognized table hints option.", 321, 15, 1);
+    internal static SimulatedSqlException UnrecognizedTableHint(ReadOnlySpan<char> hintName, byte state = 1) =>
+        new($"\"{new string(hintName)}\" is not a recognized table hints option.", 321, 15, state);
 
     /// <summary>
     /// Mimics SQL Server's Msg 10715 — fired when an <c>OPTION (USE HINT(...))</c>

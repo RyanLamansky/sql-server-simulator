@@ -840,14 +840,15 @@ internal sealed partial class Selection
                 context.SimpleParameterizationBlocked = true;
                 info.IndexHint = true;
                 info.ForceScan = true;
-                context.MoveNextRequired();
-                return;
+                break;
 
             case TableHintKind.ForceSeek:
                 context.SimpleParameterizationBlocked = true;
                 info.IndexHint = true;
                 info.ForceSeek = true;
                 context.MoveNextRequired();
+                if (context.Token is Operator { Character: '=' })
+                    RefuseHintValue(context, sourceSpan);
                 if (context.Token is Operator { Character: '(' })
                 {
                     // FORCESEEK's nested form names an index —
@@ -881,18 +882,33 @@ internal sealed partial class Selection
                 return;
         }
         context.MoveNextRequired();
+        // SPATIAL_WINDOW_MAX_CELLS alone takes a value, a number, and no other
+        // hint here takes an argument list: an `= value` is the hint named as
+        // unrecognized (state 21 for a number), a list the syntax error at the
+        // token after its first (probed 2026-10-21 against SQL Server 2025).
+        var takesValue = sourceSpan.Equals("SPATIAL_WINDOW_MAX_CELLS", StringComparison.OrdinalIgnoreCase);
         if (context.Token is Operator { Character: '=' })
         {
-            context.MoveNextRequired();
+            if (!takesValue)
+                RefuseHintValue(context, sourceSpan);
+            if (context.GetNextRequired() is not Numeric)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
             return;
         }
+        if (takesValue)
+            throw SimulatedSqlException.UnrecognizedTableHint(sourceSpan);
         if (context.Token is Operator { Character: '(' })
         {
-            SkipBalancedParens(context);
-            context.MoveNextRequired();
+            if (context.GetNextRequired() is not Operator { Character: ')' })
+                context.MoveNextRequired();
+            throw SimulatedSqlException.SyntaxErrorNear(context);
         }
     }
+
+    /// <summary>A hint that takes no value given one with <c>=</c>, cursor on the <c>=</c>: named as unrecognized, at state 21 when the value is a number.</summary>
+    private static void RefuseHintValue(ParserContext context, ReadOnlySpan<char> hint) =>
+        throw SimulatedSqlException.UnrecognizedTableHint(hint, state: context.GetNextRequired() is Numeric ? (byte)21 : (byte)1);
 
     /// <summary>
     /// Captures the argument list for an <c>INDEX</c> hint. Cursor on entry:

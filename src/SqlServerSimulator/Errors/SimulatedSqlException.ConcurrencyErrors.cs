@@ -403,6 +403,10 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException OptimizeForValueNotLiteral(string variable) =>
         new($"The compile-time variable value for '{variable}' in the OPTIMIZE FOR clause must be a literal.", 320, 15, 1);
 
+    /// <summary>Msg 322: an <c>OPTIMIZE FOR</c> variable the statement doesn't read (probed 2026-10-21 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException OptimizeForVariableUnused(string variable) =>
+        new($"The variable \"{variable}\" is specified in the OPTIMIZE FOR clause, but is not used in the query.", 322, 16, 1);
+
     /// <summary>Msg 4131 — one variable given twice across the <c>OPTIMIZE FOR</c> clauses.</summary>
     internal static SimulatedSqlException OptimizeForVariableRepeated(string variable) =>
         new($"A compile-time literal value is specified more than once for the variable \"{variable}\" in one or more OPTIMIZE FOR clauses.", 4131, 16, 1);
