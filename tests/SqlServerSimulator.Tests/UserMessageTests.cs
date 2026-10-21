@@ -159,6 +159,9 @@ public sealed class UserMessageTests
         var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("raiserror(50015, 16, 1, N'abc')").ExecuteNonQuery());
         AreEqual(2787, ex.Number);
         AreEqual((byte)2, ex.State);
+        // Real words Msg 2787 in the session language ("Spécification de format
+        // non valide : '3!'." under French); the simulator's system diagnostics
+        // stay English, the documented gap in scalars.md's SET LANGUAGE section.
         AreEqual("Invalid format specification: '3!'.", ex.Errors[0].Message);
         StartsWith("Error: 50015, Severity: 16, State: 1. (Params:). The error is printed in terse mode", (string)connection.CreateCommand("select formatmessage(50015, N'abc')").ExecuteScalar()!);
     }
