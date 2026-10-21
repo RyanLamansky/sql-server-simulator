@@ -507,6 +507,8 @@ public class OrderByTests
     [DataRow("select a x, max(b) x from t group by a order by x", "209")]
     [DataRow("select distinct a, a from t order by a", "209")]
     [DataRow("select a, a from t union all select 1, 2 order by a", "209")]
+    [DataRow("select 1 a, 2 a order by a", "209")]
+    [DataRow("select 1 a, 2 a from t order by a", "209")]
     [DataRow("select x1, a x, b x from t order by x, x2", "207 209 207")]
     [DataRow("select x1, x1 from t order by x1", "207 207 209")]
     public void OrderBy_NameSharedBySelectItems_IsAmbiguous(string sql, string numbers)
@@ -515,6 +517,38 @@ public class OrderByTests
         _ = sim.ExecuteNonQuery("create table t (a int, b int)");
         var ex = sim.AssertSqlError(sql, int.Parse(numbers.Split(' ')[0], System.Globalization.CultureInfo.InvariantCulture));
         AreEqual(numbers, string.Join(" ", ex.Errors.Cast<SimulatedError>().Select(error => error.Number)));
+    }
+
+    /// <summary>
+    /// A FROM-less SELECT binds its ORDER BY terms as one over a FROM does, and
+    /// one assigning variables takes no ORDER BY (probed 2026-10-21 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1 a order by b", "207")]
+    [DataRow("select 1 a where 1 = 0 order by b", "207")]
+    [DataRow("select 1 a order by x.b", "4104")]
+    [DataRow("select 1 a order by a + 1", "207")]
+    [DataRow("declare @v int; select @v = 1 order by 1", "156")]
+    [DataRow("declare @v int; select @v = 1 where 1 = 1 order by 1", "156")]
+    [DataRow("declare @v int; select top 1 @v = 1 order by 1", "156")]
+    [DataRow("declare @v int; select @v = 1, 2 order by 1", "141 156")]
+    public void FromlessOrderBy_BindsItsTerms(string sql, string numbers)
+    {
+        var ex = new Simulation().AssertSqlError(sql, int.Parse(numbers.Split(' ')[0], System.Globalization.CultureInfo.InvariantCulture));
+        AreEqual(numbers, string.Join(" ", ex.Errors.Cast<SimulatedError>().Select(error => error.Number)));
+    }
+
+    [TestMethod]
+    [DataRow("select 1 a order by a", 1)]
+    [DataRow("select 1 a order by 1", 1)]
+    [DataRow("select (select top 1 1 a order by t.a) from t", 1)]
+    [DataRow("select (select top 1 1 b order by a) from t", 1)]
+    public void FromlessOrderBy_BindsANameItCanReach(string sql, int expected)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int); insert t values (1)");
+        AreEqual(expected, sim.ExecuteScalar(sql));
     }
 
     [TestMethod]

@@ -2531,7 +2531,7 @@ internal sealed partial class Selection
                 // ORDER BY after it — never an alias, even where one could
                 // stand (probed 2026-09-29 against SQL Server 2025).
                 case Name when IsWindowClauseAhead(context):
-                    ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope, []);
+                    ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope, [], expressions);
                     goto ExitWhileTokenLoop;
 
                 // `name:` is a GOTO label ending the statement, never an alias.
@@ -2674,12 +2674,12 @@ internal sealed partial class Selection
                 // ConsumeWhereAndOrderBy already reads them in grammar order
                 // from whichever of the three the cursor sits on.
                 case ReservedKeyword { Keyword: Keyword.Where or Keyword.Group or Keyword.Having }:
-                    ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope, []);
+                    ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope, [], expressions);
                     goto ExitWhileTokenLoop;
 
                 case ReservedKeyword { Keyword: Keyword.Order }:
                     if (allowOrderBy || scope.RefusesTrailingClauses)
-                        ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope, []);
+                        ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope, [], expressions);
                     // When this branch is part of a set-op chain, leave
                     // the cursor on ORDER for the top-level driver to
                     // consume (or for the outer caller to error on, per
@@ -3126,7 +3126,7 @@ internal sealed partial class Selection
     /// the lookahead contract, and an extra advance here would silently swallow
     /// the next clause's opening keyword.
     /// </remarks>
-    private static void ConsumeWhereAndOrderBy(ParserContext context, FromClause fromClause, bool allowOrderBy, QueryScope scope, FromSource[] localSources)
+    private static void ConsumeWhereAndOrderBy(ParserContext context, FromClause fromClause, bool allowOrderBy, QueryScope scope, FromSource[] localSources, List<Expression>? fromlessProjection = null)
     {
         using var clause = ParserScope.Enter(ref context.InliningClause, InliningClause.Other);
         // A parenthesized INSERT source's own query may not carry an ORDER BY
@@ -3211,8 +3211,17 @@ internal sealed partial class Selection
         // top-level driver consumes it after combining branches and applies
         // the sort to the combined result. Per SQL Server, per-branch
         // ORDER BY is rejected (Msg 156).
-        if (allowOrderBy && context.Token is ReservedKeyword { Keyword: Keyword.Order })
+        if (allowOrderBy && context.Token is ReservedKeyword { Keyword: Keyword.Order } order)
         {
+            // A FROM-less SELECT assigning variables takes no ORDER BY, after
+            // the assignment's own complaint about a select list mixing in
+            // retrieval (probed 2026-10-21 against SQL Server 2025).
+            if (fromlessProjection is not null && fromlessProjection.Exists(static item => item is AssignmentExpression))
+            {
+                throw fromlessProjection.TrueForAll(static item => item is AssignmentExpression)
+                    ? SimulatedSqlException.SyntaxErrorNearKeyword(order)
+                    : SimulatedSqlException.Aggregate([SimulatedSqlException.SelectAssignmentMixedWithRetrieval(), SimulatedSqlException.SyntaxErrorNearKeyword(order)]);
+            }
             context.Batch.BindErrors?.EnterClause(context.Token, BindClause.OrderBy);
             if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -4151,6 +4160,27 @@ internal sealed partial class Selection
 
         var isBareConstantRow = !containsSubquery && topCount is null && offsetCount is null && fetchCount is null
             && excluders.TrueForAll(excluder => ConstantFolding.TryFoldPredicate(excluder, parseBatch.Parser, out var folded) && folded == true);
+        // An ORDER BY term binds as on the FROM path: a bare name to the select
+        // item it names, ambiguous when two share it, and anything else to an
+        // enclosing query or not at all (probed 2026-10-21 against SQL Server
+        // 2025: SELECT 1 a, 2 a ORDER BY a is Msg 209, SELECT 1 a ORDER BY b
+        // Msg 207 and ORDER BY x.b Msg 4104).
+        foreach (var spec in orderBy)
+        {
+            if (spec.IsOrdinal || spec.Expr is not { } written)
+                continue;
+            var sharing = 0;
+            if (spec.MayNameAlias && UnwrapParentheses(written) is Reference { ReferencedName: { ImmediateQualifier: null } name })
+            {
+                foreach (var columnName in columnNames)
+                {
+                    if (BuiltInToken.Equals(columnName, name.Leaf) && ++sharing == 2)
+                        throw SimulatedSqlException.AmbiguousColumnName(name.Leaf);
+                }
+            }
+            if (sharing == 0)
+                _ = written.GetSqlType(parseBatch, TypeResolver);
+        }
         RefuseRepeatedOrderTerms([], orderBy, expressions, columnNames);
         return new Selection(schema, columnNames,
             hasOrderBy: orderBy.Count > 0,
