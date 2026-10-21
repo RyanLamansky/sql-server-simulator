@@ -171,4 +171,15 @@ public sealed class ReturnStatementTests
     [TestMethod]
     public void ReturnValueInUntakenIf_BeforeFollowingStmt_StillMsg178()
         => new Simulation().AssertSqlError("if 1=0 return 5; select 'ok'", 178);
+
+    /// <summary>
+    /// Reported at the RETURN's own line, however far its value runs and
+    /// wherever the next statement starts (probed 2026-10-21 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("print 0\nreturn\n5 +\n1\n\nselect 'end'")]
+    [DataRow("print 0\nreturn 5\n\n\nselect 'end'")]
+    public void ReturnValue_Msg178_AtTheReturnsLine(string batch)
+        => AreEqual(2, new Simulation().AssertSqlError(batch, 178).LineNumber);
 }

@@ -511,7 +511,7 @@ partial class Simulation
         // so the value's own parse errors (Msg 102, 137, 195) come first,
         // while its binder errors never do (probed 2026-10-06 against SQL
         // Server 2025).
-        static SimulatedSqlException RefusedReturnValue(ParserContext context)
+        static SimulatedSqlException RefusedReturnValue(ParserContext context, Token returnKeyword)
         {
             var start = context.SaveCheckpoint();
             try
@@ -541,12 +541,16 @@ partial class Simulation
             // Read as a misplaced procedure's body, it names that procedure,
             // as the Msg 111 did (probed 2026-10-19 against SQL Server 2025).
             var refused = SimulatedSqlException.ReturnWithValueNotAllowed();
+            // At the RETURN's own line, however far the value runs (probed
+            // 2026-10-21 against SQL Server 2025).
+            refused.Errors[0].LineNumber = returnKeyword.LineNumber;
             if (context.Batch.MisplacedModuleProcedure is { Length: > 0 } procedure)
                 refused.Errors[0].Procedure = procedure;
             return refused;
         }
 
         var context = batch.Parser;
+        var returnKeyword = context.Token!;
         context.MoveNextOptional(); // consume RETURN
 
         // Value form is legal inside a scalar UDF body (UdfFrame non-null)
@@ -558,7 +562,7 @@ partial class Simulation
             // Dynamic SQL runs under a procedure frame but refuses the value
             // form as a batch does (probed 2026-09-24).
             if (batch.UdfFrame is null && batch.ProcFrame is null or { IsDynamicSql: true })
-                throw RefusedReturnValue(context);
+                throw RefusedReturnValue(context, returnKeyword);
 
             // A RETURN's value is one of the places real refuses a sequence
             // draw as nested (probed 2026-10-04 against SQL Server 2025).
