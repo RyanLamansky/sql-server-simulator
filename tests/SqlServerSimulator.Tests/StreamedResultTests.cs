@@ -844,6 +844,46 @@ public sealed class StreamedResultTests
         AreEqual(0, ThrowsExactly<SimulatedSqlException>(() => rows.Read()).Number);
     }
 
+    /// <summary>
+    /// A <c>KILL</c> landing while a contended reader's statement produces
+    /// ahead of it on a thread of its own, or is about to, ends the statement
+    /// rather than waiting on that production as it waits on the kill.
+    /// </summary>
+    [TestMethod]
+    public async Task Kill_WhileProducingInTheBackground_EndsTheReader()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table b (k int primary key, v char(100) not null); insert b select value, 'x' from generate_series(1, 3000)");
+        using var writer = sim.CreateOpenConnection();
+        _ = writer.CreateCommand("begin tran; update b set v = 'z' where k = 2900").ExecuteNonQuery();
+        using var other = sim.CreateOpenConnection();
+        for (var round = 0; round < 40; round++)
+        {
+            using var reader = sim.CreateOpenConnection();
+            var spid = Spid(reader);
+            using var rows = reader.CreateCommand("select k, v from b").ExecuteReader();
+            var reading = Task.Run(() =>
+            {
+                try
+                {
+                    while (rows.Read())
+                    {
+                    }
+                }
+                catch (SimulatedSqlException)
+                {
+                }
+                catch (InvalidOperationException)
+                {
+                }
+            }, TestContext.CancellationToken);
+            Thread.SpinWait(round * 2000);
+            var killing = Task.Run(() => other.CreateCommand($"kill {spid}").ExecuteNonQuery(), TestContext.CancellationToken);
+            var both = Task.WhenAll(reading, killing);
+            AreSame(both, await Task.WhenAny(both, Task.Delay(TimeSpan.FromSeconds(30), TestContext.CancellationToken)), $"round {round} hung");
+        }
+    }
+
     /// <summary>A cancel reaches a suspended reader at its next read, as Msg 0.</summary>
     [TestMethod]
     public void Cancel_EndsTheReaderAtItsNextRead()

@@ -407,8 +407,10 @@ internal abstract class ResultStream
     /// Ends the statement from outside its consumer — another session's
     /// <c>KILL</c> — when it is waiting on its client rather than running:
     /// real ends a request suspended on <c>ASYNC_NETWORK_IO</c> at once. A
-    /// statement its consumer is running on is left to the cancellation the
-    /// kill sends, which it meets at its next safe point.
+    /// statement its consumer is running on, or producing ahead of it in the
+    /// background, is left to the cancellation the kill sends, which it meets
+    /// at its next safe point: abandoning it here would wait on a production
+    /// that waits on this.
     /// </summary>
     public void AbandonIfSuspended()
     {
@@ -416,7 +418,7 @@ internal abstract class ResultStream
             return;
         try
         {
-            if (this.Suspended && !this.Complete)
+            if (this.Suspended && !this.Complete && (this.worker is null || this.workerDone))
                 this.AbandonByConsumer?.Invoke();
         }
         finally
@@ -516,40 +518,49 @@ internal abstract class ResultStream
     /// </summary>
     private protected void StartBackground(Action pull)
     {
+        // Published under the gate, so an AbandonIfSuspended either sees the
+        // production or ends the statement before it starts.
+        using var held = this.Gate().EnterScope();
+        if (this.Complete)
+            return;
         var running = this.connection!;
         var signal = this.workerSignal ??= new ManualResetEventSlim(false);
         signal.Reset();
         this.workerDone = this.waitBegan = false;
         this.BeginStaging();
         running.BackgroundProduction = this;
-        var worker = new Task(
-            () =>
+        // On an engine thread, under the consumer's execution context, which
+        // carries the session's date and language settings to the conversions
+        // the production runs.
+        var ended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var context = ExecutionContext.Capture();
+        void Produce()
+        {
+            Volatile.Write(ref this.workerThreadId, Environment.CurrentManagedThreadId);
+            try
             {
-                Volatile.Write(ref this.workerThreadId, Environment.CurrentManagedThreadId);
-                try
-                {
-                    using var culture = CultureScope.Engine();
-                    lock (this.Gate())
-                        pull();
-                }
+                using var culture = CultureScope.Engine();
+                lock (this.Gate())
+                    pull();
+            }
 #pragma warning disable CA1031 // Whatever escapes the production is the consumer's to meet, rethrown on its own thread.
-                catch (Exception fault)
+            catch (Exception fault)
 #pragma warning restore CA1031
-                {
-                    this.workerFault = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(fault);
-                }
-                finally
-                {
-                    Volatile.Write(ref this.workerThreadId, 0);
-                    if (ReferenceEquals(running.BackgroundProduction, this))
-                        running.BackgroundProduction = null;
-                    this.workerDone = true;
-                    signal.Set();
-                }
-            },
-            TaskCreationOptions.LongRunning);
-        this.worker = worker;
-        worker.Start(TaskScheduler.Default);
+            {
+                this.workerFault = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(fault);
+            }
+            finally
+            {
+                Volatile.Write(ref this.workerThreadId, 0);
+                if (ReferenceEquals(running.BackgroundProduction, this))
+                    running.BackgroundProduction = null;
+                this.workerDone = true;
+                signal.Set();
+                ended.SetResult();
+            }
+        }
+        this.worker = ended.Task;
+        EngineThreads.Run(context is null ? Produce : () => ExecutionContext.Run(context, static state => ((Action)state!)(), (Action)Produce));
     }
 
     /// <summary>
