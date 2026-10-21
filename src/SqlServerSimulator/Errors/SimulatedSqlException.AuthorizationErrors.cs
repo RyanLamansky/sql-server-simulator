@@ -13,6 +13,30 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException CannotExecuteAsUser(string name) =>
         new($"Cannot execute as the user '{name}', because it does not exist or you do not have permission.", 15151, 16, 1);
 
+    /// <summary>Msg 15151: <c>DROP</c> of a <paramref name="kind"/> named <paramref name="name"/> that doesn't exist.</summary>
+    internal static SimulatedSqlException CannotDropSecurable(string kind, string name, byte state) =>
+        new($"Cannot drop the {kind} '{name}', because it does not exist or you do not have permission.", 15151, 16, state);
+
+    /// <summary>Msg 33293: <c>DROP COLUMN MASTER KEY</c> or <c>DROP COLUMN ENCRYPTION KEY</c> naming a key that doesn't exist.</summary>
+    internal static SimulatedSqlException ColumnKeyNotFound(string kind, string name) =>
+        new($"Cannot find the {kind} \"{name}\" because it does not exist or you do not have permissions.", 33293, 16, 7);
+
+    /// <summary>Msg 1088: <c>DROP ENDPOINT</c> naming an endpoint that doesn't exist.</summary>
+    internal static SimulatedSqlException EndpointNotFound(string name) =>
+        new($"Cannot find the object \"{name}\" because it does not exist or you do not have permissions.", 1088, 15, 103);
+
+    /// <summary>Msg 33104: <c>DROP DATABASE ENCRYPTION KEY</c> in a database that has none.</summary>
+    internal static SimulatedSqlException DatabaseEncryptionKeyMissing() =>
+        new("A database encryption key does not exist for this database.", 33104, 16, 1);
+
+    /// <summary>Msg 35208: availability group DDL outside <c>master</c>.</summary>
+    internal static SimulatedSqlException AvailabilityGroupDdlOutsideMaster() =>
+        new("Availability group DDL operations are permitted only when you are using the master database.  Run the 'USE master' statement, and retry your availability group DDL statement.", 35208, 16, 242);
+
+    /// <summary>Msg 47105: availability group DDL on a server without the Always On feature.</summary>
+    internal static SimulatedSqlException AvailabilityGroupsNotEnabled() =>
+        new("The Always On Availability Groups feature must be enabled for this server instance before you can perform availability group operations. Please enable the feature, then retry the operation.", 47105, 16, 4);
+
     /// <summary>
     /// Mimics SQL Server error 15151 in the "Cannot find the &lt;kind&gt;"
     /// wording <c>ALTER AUTHORIZATION</c> uses for every class it resolves —

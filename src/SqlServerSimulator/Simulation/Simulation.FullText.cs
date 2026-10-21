@@ -46,8 +46,26 @@ partial class Simulation
                 => ParseDropFullTextCatalog(context),
             ReservedKeyword { Keyword: Keyword.Index }
                 => ParseDropFullTextIndex(context),
+            UnquotedString { Value: var w } when w.Equals("STOPLIST", StringComparison.OrdinalIgnoreCase)
+                => ParseDropFullTextStoplist(context),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
+    }
+
+    /// <summary>
+    /// Parses <c>DROP FULLTEXT STOPLIST name</c>, cursor on <c>STOPLIST</c>:
+    /// as no stoplist of one's own exists here, every name is real's Msg
+    /// 30023 state 8 as the statement runs, and <c>IF EXISTS</c> Msg 156 near
+    /// <c>IF</c> (probed 2026-10-21 against SQL Server 2025).
+    /// </summary>
+    private static bool ParseDropFullTextStoplist(ParserContext context)
+    {
+        if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.If } ifKeyword)
+            throw SimulatedSqlException.SyntaxErrorNearKeyword(ifKeyword);
+        if (context.Token is not Name nameToken)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
+        return context.Batch.IsSkipping ? true : throw SimulatedSqlException.FullTextStoplistNotFound(nameToken.Value, state: 8);
     }
 
     private static bool ParseCreateFullTextCatalog(ParserContext context)

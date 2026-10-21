@@ -62,4 +62,25 @@ public sealed class UnbuiltStatementTests
             22487, "CREATE WORKLOAD CLASSIFIER is allowed only when connected to Synapse frontend.");
         AreEqual(DBNull.Value, simulation.ExecuteScalar("select object_id('t')"));
     }
+
+    [TestMethod]
+    [DataRow("drop external data source zzn", 15151, 1)]
+    [DataRow("drop external table zzn", 15151, 1)]
+    [DataRow("drop external library zzn", 15151, 2)]
+    [DataRow("drop resource pool zzn", 15151, 2)]
+    [DataRow("drop workload group zzn", 15151, 4)]
+    [DataRow("drop column master key zzn", 33293, 7)]
+    [DataRow("drop endpoint zzn", 1088, 103)]
+    [DataRow("drop availability group zzn", 35208, 242)]
+    [DataRow("drop database encryption key", 33104, 1)]
+    [DataRow("drop search property list zzn", 30025, 13)]
+    [DataRow("drop fulltext stoplist zzn", 30023, 8)]
+    [DataRow("drop external data source if exists zzn", 156, 1)]
+    [DataRow("drop fulltext stoplist if exists zzn", 156, 1)]
+    public void ADropOfAKindNothingCreates_IsRealsMissingObject(string statement, int number, int state)
+        => AreEqual((byte)state, new Simulation().AssertSqlError(statement, number).State);
+
+    [TestMethod]
+    public void ADropOfAShippedName_StaysUnbuilt()
+        => _ = Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery("drop resource pool [default]"));
 }

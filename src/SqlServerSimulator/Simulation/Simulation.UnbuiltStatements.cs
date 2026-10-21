@@ -112,4 +112,73 @@ partial class Simulation
             }
         }
     }
+
+    /// <summary>
+    /// The kinds of object no statement here creates, by the words <c>DROP</c>
+    /// takes for them, with the error real raises dropping one that doesn't
+    /// exist and the names real ships of that kind, which stay unbuilt
+    /// (probed 2026-10-21 against SQL Server 2025).
+    /// </summary>
+    private static readonly (string[] Words, Func<ParserContext, string, SimulatedSqlException> Missing, string[] BuiltIn)[] UnbuiltDropKinds =
+    [
+        (["AVAILABILITY", "GROUP"], static (context, _) => context.CurrentDatabase.Name == MasterDatabaseName ? SimulatedSqlException.AvailabilityGroupsNotEnabled() : SimulatedSqlException.AvailabilityGroupDdlOutsideMaster(), []),
+        (["COLUMN", "ENCRYPTION", "KEY"], static (_, name) => SimulatedSqlException.ColumnKeyNotFound("column encryption key", name), []),
+        (["COLUMN", "MASTER", "KEY"], static (_, name) => SimulatedSqlException.ColumnKeyNotFound("column master key", name), []),
+        (["CRYPTOGRAPHIC", "PROVIDER"], static (_, name) => SimulatedSqlException.CannotDropSecurable("cryptographic provider", name, 1), []),
+        (["DATABASE", "ENCRYPTION", "KEY"], static (_, _) => SimulatedSqlException.DatabaseEncryptionKeyMissing(), []),
+        (["ENDPOINT"], static (_, name) => SimulatedSqlException.EndpointNotFound(name), ["Dedicated Admin Connection", "TSQL Default TCP", "TSQL Default VIA", "TSQL Local Machine", "TSQL Named Pipes"]),
+        (["EXTERNAL", "DATA", "SOURCE"], static (_, name) => SimulatedSqlException.CannotDropSecurable("object", name, 1), []),
+        (["EXTERNAL", "FILE", "FORMAT"], static (_, name) => SimulatedSqlException.CannotDropSecurable("object", name, 1), []),
+        (["EXTERNAL", "LANGUAGE"], static (_, name) => SimulatedSqlException.CannotDropSecurable("external language", name, 2), []),
+        (["EXTERNAL", "LIBRARY"], static (_, name) => SimulatedSqlException.CannotDropSecurable("external library", name, 2), []),
+        (["EXTERNAL", "MODEL"], static (_, name) => SimulatedSqlException.CannotDropSecurable("object", name, 202), []),
+        (["EXTERNAL", "RESOURCE", "POOL"], static (_, name) => SimulatedSqlException.CannotDropSecurable("resource pool", name, 2), ["default"]),
+        (["EXTERNAL", "TABLE"], static (_, name) => SimulatedSqlException.CannotDropSecurable("EXTERNAL TABLE", name, 1), []),
+        (["RESOURCE", "POOL"], static (_, name) => SimulatedSqlException.CannotDropSecurable("resource pool", name, 2), ["default", "internal"]),
+        (["SEARCH", "PROPERTY", "LIST"], static (_, name) => SimulatedSqlException.SearchPropertyListNotFound(name, state: 13), []),
+        (["WORKLOAD", "GROUP"], static (_, name) => SimulatedSqlException.CannotDropSecurable("workload group", name, 4), ["default", "internal"]),
+    ];
+
+    /// <summary>
+    /// Parses a <c>DROP</c> of one of <see cref="UnbuiltDropKinds"/>, cursor on
+    /// <c>DROP</c>: as no object of the kind can exist here, every one-part
+    /// name is the missing object real reports as the statement runs, and
+    /// <c>IF EXISTS</c>, which none of them takes, is Msg 156 near <c>IF</c>
+    /// as the batch compiles. False — the cursor left on <c>DROP</c> — for any
+    /// other statement, a name real ships, or a shape not read here.
+    /// </summary>
+    private static bool TryParseDropOfUnbuiltKind(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        foreach (var (words, missing, builtIn) in UnbuiltDropKinds)
+        {
+            context.RestoreCheckpoint(checkpoint);
+            var matched = true;
+            foreach (var word in words)
+            {
+                if (context.GetNextOptional() is not (UnquotedString or ReservedKeyword) || !BuiltInToken.Equals(context.Token!.ErrorText, word))
+                {
+                    matched = false;
+                    break;
+                }
+            }
+            if (!matched)
+                continue;
+            if (context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.If } ifKeyword)
+                throw SimulatedSqlException.SyntaxErrorNearKeyword(ifKeyword);
+            // A database's encryption key takes no name.
+            if (words is ["DATABASE", "ENCRYPTION", "KEY"] && IsStatementBoundary(context.Token))
+                return context.Batch.IsSkipping ? true : throw missing(context, string.Empty);
+            if (context.Token is not Name nameToken || Array.Exists(builtIn, shipped => BuiltInToken.Equals(shipped, nameToken.Value)))
+                break;
+            context.MoveNextOptional();
+            if (context.Token is Operator { Character: '.' } || !IsStatementBoundary(context.Token))
+                break;
+            if (context.Batch.IsSkipping)
+                return true;
+            throw missing(context, nameToken.Value);
+        }
+        context.RestoreCheckpoint(checkpoint);
+        return false;
+    }
 }

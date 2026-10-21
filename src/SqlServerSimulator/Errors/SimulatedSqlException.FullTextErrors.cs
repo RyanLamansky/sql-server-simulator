@@ -261,11 +261,11 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException FullTextChangeTrackingNotStarted(string tableName) =>
         new($"Full-text change tracking must be started on table or indexed view '{tableName}' before the changes can be flushed.", 7664, 16, 1);
 
-    /// <summary>Msg 30023: a named stoplist, none of which exist here — state 1 from <c>CREATE</c>, 3 from <c>ALTER</c>.</summary>
+    /// <summary>Msg 30023: a named stoplist, none of which exist here — state 1 from <c>CREATE</c>, 3 from <c>ALTER</c>, 8 from <c>DROP FULLTEXT STOPLIST</c>.</summary>
     internal static SimulatedSqlException FullTextStoplistNotFound(string stoplistName, byte state) =>
         new($"The fulltext stoplist '{stoplistName}' does not exist or the current user does not have permission to perform this action. Verify that the correct stoplist name is specified and that the user had the permission required by the Transact-SQL statement.", 30023, 16, state);
 
-    /// <summary>Msg 30025: a named search property list, none of which exist here — state 1 from <c>CREATE</c>, 3 from <c>ALTER</c>.</summary>
+    /// <summary>Msg 30025: a named search property list, none of which exist here — state 1 from <c>CREATE</c>, 3 from <c>ALTER</c>, 13 from <c>DROP SEARCH PROPERTY LIST</c>.</summary>
     internal static SimulatedSqlException SearchPropertyListNotFound(string listName, byte state) =>
         new($"The search property list '{listName}' does not exist or you do not have permission to perform this action. Verify that the correct search property list name is specified and that you have the permission required by the Transact-SQL statement. For a list of the search property lists on the current database, use the sys.registered_search_property_lists catalog view. For information about permissions required by a Transact-SQL statement, see the Transact-SQL reference topic for the statement in SQL Server Books Online.", 30025, 16, state);
 

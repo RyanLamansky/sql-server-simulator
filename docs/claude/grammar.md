@@ -365,6 +365,7 @@ A `(` after a FROM source that names an object is that source's own argument or 
 
 A statement real runs that the simulator hasn't built — `BACKUP CERTIFICATE`, the master keys' backups, endpoints, Resource Governor, the external-data family, availability groups, module signing — raises `NotSupportedException` naming it, where it would otherwise fall through to a syntax error real never raises.
 `Simulation.RefuseUnbuiltStatement` checks the words opening the statement against `UnbuiltStatementForms` at each place one can start (`CREATE` / `ALTER` / `DROP`, `BACKUP` / `RESTORE`, `OPEN` / `CLOSE`, `BEGIN`, `END`, `WAITFOR (`, and an unrecognized head), so building one of them means removing its entry.
+A `DROP` of a kind no statement here creates (`UnbuiltDropKinds`) is answered instead, since no such object can exist: a one-part name is real's missing-object error as the statement runs, and `IF EXISTS`, which none of those kinds takes, Msg 156 near `IF` as the batch compiles (probed 2026-10-21 against SQL Server 2025); a name real ships of the kind (the default resource pool, a system endpoint) stays refused by name.
 `CREATE`, `ALTER` and `DROP WORKLOAD CLASSIFIER` are real's own Msg 22487 instead, a Synapse surface the box product refuses while the batch compiles (probed 2026-10-15 against SQL Server 2025).
 
 ## Divergences
