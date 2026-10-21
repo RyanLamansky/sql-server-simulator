@@ -41,13 +41,28 @@ public sealed class IntegerArithmeticOverflowTests
     [TestMethod]
     public void UnaryMinusOfIntMinValue_RaisesMsg8115() =>
         // Unary minus runs as 0 - operand, and the literal 0 is int-typed, so
-        // the result stays int and overflows. (A tinyint operand promotes to
-        // int the same way, which is why -cast(200 as tinyint) is -200 rather
-        // than an overflow.)
+        // the result stays int and overflows. (A tinyint operand negates to
+        // smallint, which is why -cast(200 as tinyint) is -200 rather than an
+        // overflow.)
         new Simulation().AssertSqlError(
             "select -cast(-2147483648 as int)",
             8115,
             "Arithmetic overflow error converting expression to data type int.");
+
+    /// <summary>
+    /// Negating smallint's minimum overflows smallint, its result type,
+    /// however the operand comes (probed 2026-10-21 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select -cast(-32768 as smallint)")]
+    [DataRow("declare @s smallint = -32768; select -@s")]
+    [DataRow("declare @t table (s smallint); insert @t values (-32768); select -s from @t")]
+    public void UnaryMinusOfSmallIntMinValue_RaisesMsg8115(string batch)
+    {
+        var error = new Simulation().AssertSqlError(batch, 8115);
+        AreEqual("Arithmetic overflow error converting expression to data type smallint.", error.Errors[0].Message);
+        AreEqual((byte)2, error.State);
+    }
 
     [TestMethod]
     public void Overflow_ReportsState2() =>

@@ -85,6 +85,10 @@ internal sealed class Negate(Expression operand) : Expression
         try
         {
             raw = Subtract.NegateViaZero(value);
+            // The subtraction runs in int, where smallint's minimum negates
+            // without overflowing, but its result doesn't fit smallint.
+            if (resultType == SqlType.SmallInt && !raw.IsNull && raw.AsInt32 > short.MaxValue)
+                throw SimulatedSqlException.ArithmeticOverflow("smallint");
         }
         catch (SimulatedSqlException error) when (runtime.Batch.AbsorbsArithmeticFault(error))
         {
