@@ -719,6 +719,12 @@ partial class Simulation
             context.MoveNextOptional();
         }
 
+        // Nothing follows the list, and a token that does is the syntax error
+        // at it ahead of any name the list misses (probed 2026-10-21 against
+        // SQL Server 2025: `DROP COLUMN missing b` is near 'b').
+        if (!EndsStatement(context.Token) && !IsLabelDeclaration(context))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
         if (context.Batch.IsSkipping)
             return true;
 

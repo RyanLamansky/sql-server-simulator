@@ -80,10 +80,13 @@ partial class Simulation
         // A USE the walk meets switches the database it binds in.
         var connection = compileBatch.Connection;
         var enteredDatabase = connection.CurrentDatabase;
+        compileBatch.Parser.ReadsPastLexErrors = true;
+        var walkedToEnd = true;
         try
         {
             if (!this.BindWithoutRunning(compileBatch, errors) || compileBatch.BatchAborted)
             {
+                walkedToEnd = false;
                 inlined.CompileOnRunFrom(compileBatch.Parser.Token?.StartIndex ?? int.MaxValue);
                 if (compileBatch.StatementEnds is { } walked)
                     walked.Incomplete = true;
@@ -93,7 +96,9 @@ partial class Simulation
         {
             connection.CurrentDatabase = enteredDatabase;
             compileBatch.SendFipsWarnings();
-            return IsRecoverableSyntaxError(parsePhase) && compileBatch.Parser.Token is { } errorToken
+            var syntax = IsRecoverableSyntaxError(parsePhase) || parsePhase.Number is 105 or 113;
+            var stoppedAt = compileBatch.Parser.Token?.StartIndex ?? compileBatch.Parser.Command.CommandText.Length;
+            var report = IsRecoverableSyntaxError(parsePhase) && compileBatch.Parser.Token is { } errorToken
                 ? this.WithRecoveredSyntaxErrors(compileBatch, parsePhase, errorToken, command =>
                 {
                     var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
@@ -104,11 +109,17 @@ partial class Simulation
                     return recovery;
                 })
                 : parsePhase;
+            return WithLexErrors(compileBatch, syntax ? report : null, stoppedAt) ?? report;
         }
         finally
         {
             connection.CurrentDatabase = enteredDatabase;
         }
+
+        // A literal real's lexer refuses fails the batch with every other one
+        // it holds, whatever the walk found past it.
+        if ((compileBatch.Parser.ReadPastLexError || !walkedToEnd) && WithLexErrors(compileBatch, null, 0) is { } lexed)
+            return lexed;
 
         // What FIPS_FLAGGER flags goes out ahead of the compile's errors too.
         compileBatch.SendFipsWarnings();
@@ -189,6 +200,50 @@ partial class Simulation
                 _ = Interlocked.Increment(ref this.compiledBatchCount);
         }
         return null;
+    }
+
+    /// <summary>
+    /// The batch's report when its text holds a literal real's lexer refuses
+    /// (<c>Numeric.LexErrorNumber</c>), null when it holds none: real's lexer
+    /// reads on past each one, so the batch reports every such literal in its
+    /// text, in source order, with the parse's own <paramref name="syntax"/>
+    /// errors where the parse stopped, at <paramref name="stoppedAt"/>, and
+    /// none of what binding would have found (probed 2026-10-21 against SQL
+    /// Server 2025: <c>SELECT FROM 1e400</c> is Msg 156, then Msg 168).
+    /// </summary>
+    private static SimulatedSqlException? WithLexErrors(BatchContext compileBatch, SimulatedSqlException? syntax, int stoppedAt)
+    {
+        var text = compileBatch.Parser.Command.CommandText;
+        List<SimulatedSqlException>? errors = null;
+        var syntaxPlaced = syntax is null;
+        var index = 0;
+        try
+        {
+            while (Parser.Tokenizer.NextToken(text, ref index, Collation.Baseline) is { } token)
+            {
+                if (token is not Parser.Tokens.Numeric { LexErrorNumber: not 0 } refused)
+                    continue;
+                errors ??= [];
+                if (!syntaxPlaced && refused.StartIndex >= stoppedAt)
+                {
+                    errors.Add(syntax!);
+                    syntaxPlaced = true;
+                }
+                var error = refused.NewLexError();
+                error.ResolveDiagnostics(refused.LineNumber, compileBatch.LineOffset, compileBatch.ErrorProcedureName);
+                errors.Add(error);
+            }
+        }
+        // A string or comment the text ends inside ends the scan, as it ends
+        // real's.
+        catch (SimulatedSqlException)
+        {
+        }
+        if (errors is null)
+            return null;
+        if (!syntaxPlaced)
+            errors.Add(syntax!);
+        return SimulatedSqlException.Aggregate(errors);
     }
 
     /// <summary>
@@ -399,6 +454,7 @@ partial class Simulation
             command.CommandText = masked;
 #pragma warning restore CA2100
             var recovery = buildRecovery(command);
+            recovery.Parser.ReadsPastLexErrors = compileBatch.Parser.ReadsPastLexErrors;
             if (!ReferenceEquals(recovery.Variables, compileBatch.Variables))
             {
                 foreach (var (name, slot) in compileBatch.Variables)

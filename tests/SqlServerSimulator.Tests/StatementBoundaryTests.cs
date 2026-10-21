@@ -262,12 +262,49 @@ public sealed class StatementBoundaryTests
     [DataRow("create xml schema collection zxc as N'<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"><xs:element name=\"e\"/></xs:schema>' zzbogus", "zzbogus")]
     [DataRow("while 1 = 0 begin break end zzbogus", "zzbogus")]
     [DataRow("while 1 = 0 begin break zzbogus end", "zzbogus")]
+    [DataRow("create table zv (id int, unique (id)) zzbogus", "zzbogus")]
+    [DataRow("create table zv (id int) )", ")")]
+    [DataRow("create table zv (id int) with (data_compression = page) zzbogus", "zzbogus")]
+    [DataRow("alter table zt drop column b zzbogus", "zzbogus")]
+    [DataRow("alter table zt drop column missing b", "b")]
+    [DataRow("alter table zt drop constraint zck zzbogus", "zzbogus")]
+    [DataRow("alter table zt zzbogus add c int", "zzbogus")]
+    [DataRow("create index zix on zt (b) with (fillfactor = 80 zzbogus)", "zzbogus")]
+    [DataRow("create index zix on zt (b) with (= 80)", "=")]
+    [DataRow("create index zix on zt (b) with (fillfactor = 80 80)", "80")]
+    [DataRow("begin try select 1 end try begin catch end catch zzbogus", "zzbogus")]
     public void AStrayTokenAfterTheStatement_IsASyntaxErrorAtIt(string statement, string near)
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create table zt (a int not null primary key, b varchar(10))");
+        _ = sim.ExecuteNonQuery("create table zt (a int not null primary key, b varchar(10), constraint zck check (a > 0))");
         sim.AssertSqlError(statement, 102, $"Incorrect syntax near '{near}'.");
     }
+
+    /// <summary>
+    /// An <c>ALTER TABLE</c> word that opens no action is the syntax error at
+    /// it, and <c>DROP</c> takes a constraint's name without its keyword,
+    /// though <c>IF EXISTS</c> takes the keyword (probed 2026-10-21 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("alter table zt column b", 156, "Incorrect syntax near the keyword 'column'.")]
+    [DataRow("alter table zt drop drop column b", 156, "Incorrect syntax near the keyword 'drop'.")]
+    [DataRow("alter table zt drop if exists zck", 156, "Incorrect syntax near the keyword 'if'.")]
+    [DataRow("alter table zt drop b", 3728, "'b' is not a constraint.")]
+    public void AlterTable_ActionWords(string statement, int number, string message)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table zt (a int not null primary key, b varchar(10), constraint zck check (a > 0))");
+        sim.AssertSqlError(statement, number, message);
+    }
+
+    [TestMethod]
+    public void AlterTableDrop_WithoutTheConstraintKeyword_DropsTheConstraints()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table zt (a int, b int, constraint zck check (a > 0), constraint zck2 check (a < 9));
+            alter table zt drop zck, [zck2], column b;
+            select count(*) from sys.columns where object_id = object_id('zt') and not exists (select 1 from sys.check_constraints)
+            """));
 
     [TestMethod]
     [DataRow("create zzbogus procedure zp as select 1")]

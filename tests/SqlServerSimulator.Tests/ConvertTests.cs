@@ -881,6 +881,21 @@ public sealed class ConvertTests
         => new Simulation().AssertSqlError(sql, 168, $"The floating point value '{literal}' is out of the range of computer representation (8 bytes).");
 
     /// <summary>
+    /// Real's lexer reads on past a literal it refuses, so the batch reports
+    /// every one, with the parse's syntax error in source order (probed
+    /// 2026-10-21 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1e400, 1e500", 168, "168,168")]
+    [DataRow("select from 1e400", 156, "156,168")]
+    [DataRow("select 1e400 from;", 168, "168,102")]
+    [DataRow("select 1e400 from zzmissing", 168, "168")]
+    [DataRow("select 1.000000000000000000000000000000000000001, 2e400", 1007, "1007,168")]
+    [DataRow("exec ('select 1e400, 1e401')", 168, "168,168")]
+    public void EveryRefusedLiteral_Reports(string sql, int first, string numbers)
+        => AreEqual(numbers, string.Join(",", new Simulation().AssertSqlError(sql, first).Errors.Select(static error => error.Number)));
+
+    /// <summary>
     /// The ISO 8601 styles drop a fraction that is all zeros and keep every
     /// digit of one that isn't.
     /// </summary>

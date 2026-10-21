@@ -851,6 +851,7 @@ partial class Simulation
         }
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
 
         // DURABILITY belongs to a memory-optimized table, and such a table
         // takes no placement or compression (probed 2026-10-02 against SQL
@@ -1372,6 +1373,11 @@ partial class Simulation
         while (depth > 0)
         {
             context.MoveNextRequired();
+            // Each entry opens with its option's name: anything else is the
+            // syntax error at it (probed 2026-10-21 against SQL Server 2025:
+            // `WITH (= 80)` is near '=').
+            if (expectName && statement != IndexOptionStatement.Unchecked && context.Token is not (StringToken or ReservedKeyword))
+                throw SimulatedSqlException.SyntaxErrorNear(context);
             if (expectName && statement != IndexOptionStatement.Unchecked && context.Token is StringToken or ReservedKeyword)
             {
                 var name = context.Token.Source.ToString();
@@ -1404,6 +1410,23 @@ partial class Simulation
                 }
                 if (statement is IndexOptionStatement.CreateIndex or IndexOptionStatement.AlterIndexRebuild or IndexOptionStatement.AlterTable)
                     ValidateIndexOptionValue(context, name, statement);
+                // A number ends its entry, a duration's unit aside (probed
+                // 2026-10-21 against SQL Server 2025: `FILLFACTOR = 80 80` is
+                // near the second '80').
+                if (valueToken is Numeric)
+                {
+                    var entry = context.SaveCheckpoint();
+                    _ = context.MoveNext() && context.MoveNext() && context.MoveNext();
+                    var endsEntry = context.Token switch
+                    {
+                        Operator { Character: ',' or ')' } => true,
+                        UnquotedString { Span: var unit } => unit.Equals("MINUTES", StringComparison.OrdinalIgnoreCase) || unit.Equals("MINUTE", StringComparison.OrdinalIgnoreCase),
+                        _ => false,
+                    };
+                    if (!endsEntry)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    context.RestoreCheckpoint(entry);
+                }
                 if (jsonRefusal is { State: 0 })
                     jsonRefusal.Note(name, valueToken is ReservedKeyword { Keyword: Keyword.On });
                 maxDuration |= name.Equals("MAX_DURATION", StringComparison.OrdinalIgnoreCase);

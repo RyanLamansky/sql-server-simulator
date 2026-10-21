@@ -913,7 +913,7 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Parses <c>ALTER TABLE [schema.]name DROP CONSTRAINT [IF EXISTS] name
+    /// Parses <c>ALTER TABLE [schema.]name DROP [CONSTRAINT [IF EXISTS]] name
     /// [, name…]</c>. Cursor on <c>DROP</c> on entry. Atomic: all names are
     /// resolved first and any failure prevents mutation
     /// (probe-confirmed against SQL Server 2025).
@@ -937,12 +937,17 @@ partial class Simulation
             return ParseDropPeriod(context, tableName);
         if (afterDrop is ReservedKeyword { Keyword: Keyword.Index })
             return TryParseAlterTableDropIndexes(context, tableName);
-        if (afterDrop is not ReservedKeyword { Keyword: Keyword.Constraint })
-            throw new NotSupportedException("ALTER TABLE supports only DROP CONSTRAINT, DROP COLUMN and DROP PERIOD FOR SYSTEM_TIME among its DROP shapes.");
+        // The CONSTRAINT keyword is optional, though IF EXISTS takes it
+        // (probed 2026-10-21 against SQL Server 2025: `DROP ck` drops the
+        // constraint, `DROP IF EXISTS ck` is Msg 156 near IF).
+        var keyword = afterDrop is ReservedKeyword { Keyword: Keyword.Constraint };
+        if (!keyword && afterDrop is not Name)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var ifExists = false;
-        context.MoveNextRequired();
-        if (context.Token is ReservedKeyword { Keyword: Keyword.If })
+        if (keyword)
+            context.MoveNextRequired();
+        if (keyword && context.Token is ReservedKeyword { Keyword: Keyword.If })
         {
             if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Exists })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -977,6 +982,10 @@ partial class Simulation
         // (probed 2026-09-25 against SQL Server 2025).
         var withOptions = context.Token is ReservedKeyword { Keyword: Keyword.With };
         _ = ParseOptionalIndexWithClause(context);
+        // Nothing else follows (probed 2026-10-21 against SQL Server 2025:
+        // `DROP CONSTRAINT ck x` is near 'x').
+        if (!columnsFollow && !EndsStatement(context.Token) && !IsLabelDeclaration(context))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
 
         if (context.Batch.IsSkipping)
             return !columnsFollow || ParseDropColumns(context, tableName);

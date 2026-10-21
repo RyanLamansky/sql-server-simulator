@@ -1,6 +1,6 @@
 # ALTER TABLE
 
-`ALTER TABLE` ships these modeled shapes: `SET (SYSTEM_VERSIONING = OFF | ON (HISTORY_TABLE = name [, DATA_CONSISTENCY_CHECK = ON|OFF]))` (see [`temporal-tables.md`](temporal-tables.md)), `SET (LOCK_ESCALATION = TABLE | DISABLE | AUTO)`, `{ ENABLE | DISABLE } TRIGGER { ALL | name [, …] }` (see [`triggers.md`](triggers.md)), `[WITH CHECK | WITH NOCHECK] ADD [CONSTRAINT name] (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK | DEFAULT) [, …]` (multi-element constraint list — see [Multi-element ADD](#multi-element-add)), `DROP CONSTRAINT [IF EXISTS] name [, …]`, `[WITH CHECK | WITH NOCHECK] (CHECK | NOCHECK) CONSTRAINT (ALL | name [, …])` (trust toggling), `ADD [COLUMN] col TYPE [, …]` (multi-column add — see [Column ops](#column-ops)), `DROP COLUMN [IF EXISTS] col [, …]` (multi-column drop with dependency rejection), `ALTER COLUMN col TYPE[(prec[,scale])] [COLLATE coll] [NULL|NOT NULL]` (single-column type / nullability change — see [ALTER COLUMN](#alter-column)), `ALTER COLUMN col { ADD | DROP } { ROWGUIDCOL | SPARSE | HIDDEN }` (see [Column attributes](#column-attributes)), `ALTER COLUMN col { ADD MASKED WITH (…) | DROP MASKED }` (see [`data-masking.md`](data-masking.md#ddl)), `ALTER COLUMN col { ADD | DROP } PERSISTED` (see [PERSISTED](#persisted)), `DROP PERIOD FOR SYSTEM_TIME` (see [DROP PERIOD FOR SYSTEM_TIME](#drop-period-for-system_time)), `REBUILD` (see [REBUILD](#rebuild)), and `SWITCH [PARTITION n] TO target [PARTITION m]` (see [`partitioning.md`](partitioning.md#alter-table--switch)).
+`ALTER TABLE` ships these modeled shapes: `SET (SYSTEM_VERSIONING = OFF | ON (HISTORY_TABLE = name [, DATA_CONSISTENCY_CHECK = ON|OFF]))` (see [`temporal-tables.md`](temporal-tables.md)), `SET (LOCK_ESCALATION = TABLE | DISABLE | AUTO)`, `{ ENABLE | DISABLE } TRIGGER { ALL | name [, …] }` (see [`triggers.md`](triggers.md)), `[WITH CHECK | WITH NOCHECK] ADD [CONSTRAINT name] (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK | DEFAULT) [, …]` (multi-element constraint list — see [Multi-element ADD](#multi-element-add)), `DROP [CONSTRAINT [IF EXISTS]] name [, …]`, `[WITH CHECK | WITH NOCHECK] (CHECK | NOCHECK) CONSTRAINT (ALL | name [, …])` (trust toggling), `ADD [COLUMN] col TYPE [, …]` (multi-column add — see [Column ops](#column-ops)), `DROP COLUMN [IF EXISTS] col [, …]` (multi-column drop with dependency rejection), `ALTER COLUMN col TYPE[(prec[,scale])] [COLLATE coll] [NULL|NOT NULL]` (single-column type / nullability change — see [ALTER COLUMN](#alter-column)), `ALTER COLUMN col { ADD | DROP } { ROWGUIDCOL | SPARSE | HIDDEN }` (see [Column attributes](#column-attributes)), `ALTER COLUMN col { ADD MASKED WITH (…) | DROP MASKED }` (see [`data-masking.md`](data-masking.md#ddl)), `ALTER COLUMN col { ADD | DROP } PERSISTED` (see [PERSISTED](#persisted)), `DROP PERIOD FOR SYSTEM_TIME` (see [DROP PERIOD FOR SYSTEM_TIME](#drop-period-for-system_time)), `REBUILD` (see [REBUILD](#rebuild)), and `SWITCH [PARTITION n] TO target [PARTITION m]` (see [`partitioning.md`](partitioning.md#alter-table--switch)).
 Probe-confirmed against SQL Server 2025.
 
 ## Grammar
@@ -150,6 +150,7 @@ Probe-confirmed shapes:
 Probe-confirmed.
 
 The list may go on to drop columns — `DROP CONSTRAINT df, COLUMN b` — which runs the constraint drop then the column drop (probed 2026-10-01 against SQL Server 2025).
+The `CONSTRAINT` keyword is optional — `DROP ck` drops the constraint, `DROP b` naming a column is Msg 3728 — though `IF EXISTS` needs it, `DROP IF EXISTS ck` being Msg 156 near `IF` (probed 2026-10-21 against SQL Server 2025).
 
 ## Multi-element ADD
 
@@ -327,6 +328,7 @@ A table type's `CREATE TYPE … AS TABLE` accepts one.
 - **`KeyConstraint.IsSystemNamed` is inferred from the name prefix** — `PK__` / `UQ__` → system-named.
   Custom names matching the prefix would report `is_system_named = true` incorrectly.
   Real SQL Server tracks the flag explicitly; the simulator inherits a no-flag pre-bundle storage layout and infers rather than adding a column-mutating change.
+- **A `DROP COLUMN` list going on to drop constraints** — `DROP COLUMN a, CONSTRAINT ck` — is Msg 156 at `CONSTRAINT` here, where real takes the list (probed 2026-10-21 against SQL Server 2025); the other order is built.
 - **A sparse column set's writes**: `OUTPUT … INTO`, `BULK INSERT` and a bulk load don't write through one (Msg 271 as a computed column); its client metadata reads as real's, `fSparseColumnSet` and updatable ([`tds-endpoint.md`](tds-endpoint.md#type-wire-codec)).
 
 ## EF Core integration

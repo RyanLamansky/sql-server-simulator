@@ -1384,8 +1384,34 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// <see cref="index"/> is updated to the position of the next token.
     /// </remarks>
     /// <returns>True if another token was found, otherwise false.</returns>
+    /// <exception cref="SimulatedSqlException">A literal real's lexer refuses, unless <see cref="ReadsPastLexErrors"/>.</exception>
     [MemberNotNullWhen(true, nameof(Token))]
     public bool MoveNext()
+    {
+        if (!this.MoveNextToken())
+            return false;
+        if (this.Token is Numeric { LexErrorNumber: not 0 } refused)
+        {
+            if (!this.ReadsPastLexErrors)
+                throw refused.NewLexError();
+            this.ReadPastLexError = true;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Whether a literal real's lexer refuses reads as its stand-in value
+    /// rather than raising: set by the batch compile walk, which reports every
+    /// such literal in the text itself, ahead of and around the walk's syntax
+    /// errors, as real's lexer reads on past one.
+    /// </summary>
+    public bool ReadsPastLexErrors;
+
+    /// <summary>Whether a parse under <see cref="ReadsPastLexErrors"/> read a literal real's lexer refuses.</summary>
+    public bool ReadPastLexError;
+
+    [MemberNotNullWhen(true, nameof(Token))]
+    private bool MoveNextToken()
     {
         if (!this.memoBound)
         {

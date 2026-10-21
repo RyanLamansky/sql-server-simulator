@@ -41,6 +41,20 @@ internal sealed class Numeric : Token
     /// </summary>
     public readonly bool Underflowed;
 
+    /// <summary>
+    /// The number of the error real's lexer raises for this literal — Msg 168
+    /// for a float past <c>float</c>'s range, Msg 1007 for a number past 38
+    /// digits — or 0; such a literal's value is a stand-in 0. The lexer reads
+    /// on past one, so a batch reports every such literal it holds (see
+    /// <see cref="NewLexError"/>).
+    /// </summary>
+    public readonly short LexErrorNumber;
+
+    /// <summary>A fresh instance of the error <see cref="LexErrorNumber"/> names.</summary>
+    public SimulatedSqlException NewLexError() => this.LexErrorNumber == 168
+        ? SimulatedSqlException.FloatLiteralOutOfRange(this.Source.ToString())
+        : SimulatedSqlException.NumberOutOfRangeForNumeric(this.Source.ToString());
+
     public Numeric(string command, int index, int length) : base(command, index, length)
     {
         var number = base.Source;
@@ -58,8 +72,11 @@ internal sealed class Numeric : Token
             // mantissa whose value parses to 0 included (probed 2026-09-26 and
             // 2026-10-21 against SQL Server 2025: 1e400, 1e-320, 1e-400).
             if (double.IsInfinity(parsed))
-                throw SimulatedSqlException.FloatLiteralOutOfRange(number.ToString());
-            if (Math.Abs(parsed) < 2.2250738585072014E-308 && number[..number.IndexOfAny(['e', 'E'])].ContainsAnyInRange('1', '9'))
+            {
+                this.LexErrorNumber = 168;
+                parsed = 0;
+            }
+            else if (Math.Abs(parsed) < 2.2250738585072014E-308 && number[..number.IndexOfAny(['e', 'E'])].ContainsAnyInRange('1', '9'))
             {
                 this.Underflowed = true;
                 parsed = 0;
@@ -87,7 +104,11 @@ internal sealed class Numeric : Token
             // numeric type's maximum precision — SQL Server reports Msg 1007
             // rather than letting it reach the type factory.
             if (precision > 38)
-                throw SimulatedSqlException.NumberOutOfRangeForNumeric(number.ToString());
+            {
+                this.LexErrorNumber = 1007;
+                this.Value = SqlValue.FromDecimal(SqlType.GetDecimal(38, 0), Decimal38.Zero);
+                return;
+            }
             // The digit the precision floor adds falls on the fractional side:
             // `0.` and `00.` are numeric(1, 1) where `1.` is numeric(1, 0)
             // (probed 2026-09-26 against SQL Server 2025).
@@ -116,7 +137,12 @@ internal sealed class Numeric : Token
         // numeric(11, 0), `99999999999999999999` → numeric(20, 0); only a CAST
         // reaches bigint). Past 38 digits real reports Msg 1007.
         if (this.IntegerLiteralDigitCount > 38)
-            throw SimulatedSqlException.NumberOutOfRangeForNumeric(number.ToString());
+        {
+            this.LexErrorNumber = 1007;
+            this.IntegerLiteralDigitCount = 0;
+            this.Value = SqlValue.FromDecimal(SqlType.GetDecimal(38, 0), Decimal38.Zero);
+            return;
+        }
 
         // The declared precision already equals the digit count, so the
         // separate literal annotation the int branch carries would be

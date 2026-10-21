@@ -4007,6 +4007,11 @@ public sealed partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Create } when TryParseCreate(context):
             case ReservedKeyword { Keyword: Keyword.Drop } when RejectingTrailingToken(context, TryParseDrop(context)):
             case ReservedKeyword { Keyword: Keyword.Alter } when TryParseAlter(context):
+                // A CREATE TABLE reads its whole definition, so a token left
+                // after it is Msg 102 at it (probed 2026-10-21 against SQL
+                // Server 2025).
+                if (batch.CurrentStatement.CreatesTable)
+                    context.RejectTrailingToken();
                 batch.WalkMetDdl |= batch.CompilingForRun;
                 // DDL invalidates every cached plan parsed under the prior
                 // schema version. Skip-mode statements don't actually execute

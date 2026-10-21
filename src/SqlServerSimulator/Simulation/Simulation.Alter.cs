@@ -2207,13 +2207,12 @@ partial class Simulation
                 return IsChangeTrackingAhead(context)
                     ? TryParseAlterTableChangeTracking(context, tableName, disable: toggle.ContextualKeyword == ContextualKeyword.Disable)
                     : TryParseAlterTableTriggerToggle(context, tableName, disable: toggle.ContextualKeyword == ContextualKeyword.Disable);
-            // No ALTER TABLE form starts with AS — a table can't be turned
-            // into a node or edge table (probed 2026-10-05 against SQL Server
-            // 2025).
-            case ReservedKeyword { Keyword: Keyword.As } asKeyword:
-                throw SimulatedSqlException.SyntaxErrorNearKeyword(asKeyword);
+            // Every ALTER TABLE action is built, so any other word — AS
+            // included, since a table can't be turned into a node or edge
+            // table — is the syntax error at it (probed 2026-10-05 and
+            // 2026-10-21 against SQL Server 2025).
             default:
-                throw new NotSupportedException("ALTER TABLE supports only SET, ADD / DROP / ALTER COLUMN, ADD / DROP CONSTRAINT, CHECK / NOCHECK CONSTRAINT, ENABLE / DISABLE TRIGGER, SWITCH and REBUILD shapes.");
+                throw SimulatedSqlException.SyntaxErrorNear(context);
         }
     }
 
