@@ -103,8 +103,16 @@ partial class Simulation
         context.MoveNextRequired();
         var targetTableName = BatchContext.TableDefinitionName(context, BatchContext.ParseObjectName(context));
 
-        if (context.GetNextRequired() is not Operator { Character: '(' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        // A table with no key list after it is Msg 35336, a value there the
+        // syntax error at it (probed 2026-10-21 against SQL Server 2025:
+        // `ON t WHERE …`, `ON t x (a)` and `ON t` alone are Msg 35336, `ON t
+        // 5` Msg 102).
+        if (context.GetNextOptional() is not Operator { Character: '(' })
+        {
+            throw context.Token is Numeric or Literal or Operator { Character: not ';' }
+                ? SimulatedSqlException.SyntaxErrorNear(context)
+                : SimulatedSqlException.ColumnstoreKeyListMissing();
+        }
 
         var keyColumns = new List<(string Name, bool IsDescending)>();
         do

@@ -2244,6 +2244,11 @@ internal sealed partial class Selection
                 goto ExitWhileTokenLoop;
             if (!elementExpected && StartsProjectionElement(context.Token) && !IsWindowClauseAhead(context) && context.Token is not UnquotedString { IsLabelDeclaration: true })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
+            // So is an operator, which an alias leaves nothing to apply to
+            // (probed 2026-10-21 against SQL Server 2025: `SELECT 1 a + 2` is
+            // near '+', not two columns).
+            if (!elementExpected && context.Token is Operator { Character: not (',' or ';' or '(' or ')') })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
 
             switch (context.Token)
             {
@@ -3832,16 +3837,21 @@ internal sealed partial class Selection
         var aggregatesBefore = context.AggregateCollector?.Count ?? 0;
         var offsetExpression = Expression.Parse(context);
         RefuseRowLimitAggregates(context, aggregatesBefore);
-        CheckCount(offsetExpression, RowLimitKind.Offset);
         context.RecursiveBranchConstructs.TopOrOffset = true;
         fromClause.OffsetExpression = offsetExpression;
 
+        // The clause's grammar outranks its counts' checks (probed 2026-10-21
+        // against SQL Server 2025: `OFFSET x 0 ROWS` is Msg 102 near '0', not
+        // the Msg 4115 its column reference alone is).
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Row or ContextualKeyword.Rows })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Fetch })
+        {
+            CheckCount(offsetExpression, RowLimitKind.Offset);
             return;
+        }
 
         context.MoveNextRequired();
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Next or ContextualKeyword.First })
@@ -3851,7 +3861,6 @@ internal sealed partial class Selection
         aggregatesBefore = context.AggregateCollector?.Count ?? 0;
         var fetchExpression = Expression.Parse(context);
         RefuseRowLimitAggregates(context, aggregatesBefore);
-        CheckCount(fetchExpression, RowLimitKind.Fetch);
         fromClause.FetchExpression = fetchExpression;
 
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Row or ContextualKeyword.Rows })
@@ -3861,6 +3870,8 @@ internal sealed partial class Selection
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Only })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
+        CheckCount(offsetExpression, RowLimitKind.Offset);
+        CheckCount(fetchExpression, RowLimitKind.Fetch);
     }
 
     /// <summary>

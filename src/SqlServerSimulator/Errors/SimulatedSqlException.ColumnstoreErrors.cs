@@ -58,7 +58,7 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException ClusteredColumnstoreKeyList() =>
         new("The statement failed because specifying a key list is not allowed when creating a clustered columnstore index. Create the clustered columnstore index without specifying a key list.", 35335, 15, 1);
 
-    /// <summary>Mimics SQL Server's Msg 35336 — a nonclustered columnstore index with no column list; real's text ends in " ."</summary>
+    /// <summary>Mimics SQL Server's Msg 35336 — a nonclustered columnstore or rowstore index with no column list; real's text ends in " ."</summary>
     internal static SimulatedSqlException ColumnstoreKeyListMissing() =>
         new("The statement failed because specifying key list is missing when creating an index. Create the index with specifying key list .", 35336, 15, 1);
 

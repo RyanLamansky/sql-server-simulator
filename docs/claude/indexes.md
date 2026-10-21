@@ -891,6 +891,7 @@ The option rules follow the target, so an `ALTER INDEX` resolves its index befor
 
 ## Fidelity gaps
 
+- **A `CREATE INDEX` with no key list** is Msg 35336 here as there, but real's parser then reads on and reports the syntax error it meets past the table name too — `ON t x (a)` adds Msg 102 near '(' (probed 2026-10-21 against SQL Server 2025).
 - **Columnstore storage views**: `sys.column_store_segments`, `sys.column_store_dictionaries` and `sys.column_store_row_groups` carry real's shapes and no rows — what real returns over a database holding no compressed row group — and reading `column_store_row_groups` sends the Msg 8625 real's join-hinted definition earns (probed 2026-10-06 against SQL Server 2025).
   Over a columnstore index real's rows describe its own compression (`size_in_bytes`, encodings, dictionary ids, hobt ids — a two-row index already reports one segment per column, `state_description` `COMPRESSED`), which a heap of ordinary rows has no counterpart for: not chased.
   `sys.dm_db_column_store_row_group_physical_stats` lists nothing on the same terms.

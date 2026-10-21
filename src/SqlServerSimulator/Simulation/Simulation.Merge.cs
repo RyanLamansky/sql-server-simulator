@@ -1312,6 +1312,14 @@ partial class Simulation
         // is a bad *column* — Msg 207 — while a qualifier neither side answers
         // to is an unbindable identifier — Msg 4104. Both probe-confirmed at
         // compile time, on an empty rowset and at CREATE of a module.
+        // A side's name followed by an empty part reads as that side's column
+        // named by the empty part (probed 2026-10-21 against SQL Server 2025).
+        if (name.Count >= 3 && name[1].Length == 0
+            && ((scope != MergeNameScope.Source && (collation.Equals(name[0], targetAlias) || collation.Equals(name[0], defaultTargetName)))
+                || (scope != MergeNameScope.Target && collation.Equals(name[0], sourceAlias))))
+        {
+            throw SimulatedSqlException.InvalidColumnName("");
+        }
         return unqualified || namesTarget || namesSource
             ? throw SimulatedSqlException.InvalidColumnName(name)
             : throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());

@@ -244,6 +244,11 @@ partial class Simulation
                 var column = Array.FindIndex(source.ColumnNames, name => collation.Equals(name, reference.Leaf));
                 return column >= 0 ? source.Columns[column].Type : throw SimulatedSqlException.InvalidColumnName(new MultiPartName(reference.Leaf));
             }
+            // A pseudo-table's name followed by an empty part reads as its
+            // column named by the empty part (probed 2026-10-21 against SQL
+            // Server 2025: `OUTPUT deleted..id` is Msg 207 on '').
+            if (reference.Count >= 3 && reference[1].Length == 0 && BuiltInToken.EqualsAny(reference[0], "INSERTED", "DELETED"))
+                throw SimulatedSqlException.InvalidColumnName("");
             if (insertedRef && !allowInserted)
                 throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(reference.ToString());
             if (deletedRef && !allowDeleted)
@@ -668,6 +673,10 @@ partial class Simulation
             // against SQL Server 2025).
             if (name.Count == 1)
                 throw SimulatedSqlException.InvalidColumnName(name);
+            // INSERTED followed by an empty part reads as its column named by
+            // the empty part (probed 2026-10-21 against SQL Server 2025).
+            if (name.Count >= 3 && name[1].Length == 0 && BuiltInToken.Equals(name[0], "INSERTED"))
+                throw SimulatedSqlException.InvalidColumnName("");
             if (BuiltInToken.Equals(name.ImmediateQualifier, "INSERTED"))
             {
                 for (var i = 0; i < columns.Length; i++)

@@ -894,10 +894,30 @@ internal sealed partial class Selection
     /// scalar / IN subquery, a derived table, a FROM-less SELECT, a generator's
     /// arguments and an <c>INSERT … SELECT</c>.
     /// </summary>
+    /// <remarks>
+    /// A source's name followed by an empty part — <c>t..a</c>, <c>t...a</c>
+    /// — reads as that source's column named by the empty part with a member
+    /// after it, so it is Msg 207 on an empty name (probed 2026-10-21 against
+    /// SQL Server 2025, in the select list, WHERE, ON, GROUP BY, ORDER BY and
+    /// an UPDATE's WHERE; <c>dbo.t..a</c> and <c>x..a</c> stay Msg 4104).
+    /// </remarks>
     private static SimulatedSqlException UnresolvedNameError(FromSource[] sources, MultiPartName name) =>
-        name.ImmediateQualifier is not null && !QualifiesAnySource(sources, name)
+        IsSourceThenEmptyColumn(sources, name) ? SimulatedSqlException.InvalidColumnName("")
+            : name.ImmediateQualifier is not null && !QualifiesAnySource(sources, name)
             ? SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString())
             : SimulatedSqlException.InvalidColumnName(name);
+
+    private static bool IsSourceThenEmptyColumn(FromSource[] sources, MultiPartName name)
+    {
+        if (name.Count < 3 || name[1].Length != 0)
+            return false;
+        foreach (var source in sources)
+        {
+            if (BuiltInToken.Equals(source.Qualifier, name[0]))
+                return true;
+        }
+        return false;
+    }
 
     /// <summary>
     /// A column's declared type with its MAX-ness folded back in: a
@@ -973,7 +993,13 @@ internal sealed partial class Selection
         {
             var collation = database.Collation;
             if (!QualifierIsDmlTarget(database, targetName, name))
-                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
+            {
+                // The target's name followed by an empty part reads as its
+                // column named by the empty part (see UnresolvedNameError).
+                throw name.Count >= 3 && name[1].Length == 0 && collation.Equals(name[0], targetName.Leaf)
+                    ? SimulatedSqlException.InvalidColumnName("")
+                    : SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
+            }
             if (sourceView is not null)
             {
                 for (var v = 0; v < sourceView.OutputColumns.Length; v++)

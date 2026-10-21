@@ -619,6 +619,8 @@ partial class Simulation
             context.MoveNextOptional();
             return (SqlValue.Null(SqlType.Int32), null);
         }
+        if (context.Token is AtPrefixedString)
+            RejectTokenAfterVariableArgument(context);
         if (context.Token is AtPrefixedString tableRef
             && batch.TryGetTableVariable(tableRef.Value, out var tableVariable))
         {

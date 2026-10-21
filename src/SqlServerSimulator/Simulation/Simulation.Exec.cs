@@ -897,6 +897,24 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Reads what follows a variable argument, the cursor on the variable,
+    /// before the variable binds: a token no argument list continues with is
+    /// the syntax error at it (probed 2026-10-21 against SQL Server 2025:
+    /// <c>EXEC p @undeclared 1</c> is Msg 102 near '1', not Msg 137).
+    /// </summary>
+    private static void RejectTokenAfterVariableArgument(ParserContext context)
+    {
+        var variable = context.SaveCheckpoint();
+        context.MoveNextOptional();
+        if (context.Token is not (null or Operator { Character: ',' or ')' } or ReservedKeyword { Keyword: Keyword.With } or UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out })
+            && !EndsStatement(context.Token))
+        {
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+        context.RestoreCheckpoint(variable);
+    }
+
+    /// <summary>
     /// Parses one EXEC argument value (after any leading <c>@name =</c>).
     /// Accepted forms: a literal token (numeric / string / NULL / boolean),
     /// an <c>@variable</c> reference (with optional trailing <c>OUTPUT</c>
@@ -940,6 +958,7 @@ partial class Simulation
         // implicitly read-only and don't write back).
         if (context.Token is AtPrefixedString varRef)
         {
+            RejectTokenAfterVariableArgument(context);
             if (batch.TryGetTableVariable(varRef.Value, out var tableVar))
             {
                 context.MoveNextOptional();

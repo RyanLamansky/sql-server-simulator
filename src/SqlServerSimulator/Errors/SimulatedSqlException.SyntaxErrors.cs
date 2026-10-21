@@ -680,10 +680,10 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException NonBooleanInConditionContext(ParserContext context)
     {
-        var token = TokenAfterOpenBooleanGroups(context, out var balanced, out var stray);
+        var token = TokenAfterOpenBooleanGroups(context, out var balanced, out var stray, out var atEnd);
         if (balanced)
         {
-            return !context.InFilterPredicate ? NonBooleanInConditionContext(token?.ErrorText)
+            return !context.InFilterPredicate && (atEnd || !ContinuesNoCondition(token)) ? NonBooleanInConditionContext(token?.ErrorText)
                 : token is ReservedKeyword keyword ? SyntaxErrorNearKeyword(keyword)
                 : SyntaxErrorNear(token);
         }
@@ -703,14 +703,34 @@ partial class SimulatedSqlException
         };
     }
 
+    /// <summary>
+    /// Whether <paramref name="token"/>, following a complete non-boolean
+    /// condition, is one no parse could read after a condition — a value, a
+    /// delimited name or a variable, an operator or keyword only an expression
+    /// opens with, a clause no condition precedes — which real reports as the
+    /// syntax error at it rather than the type check (probed 2026-10-21
+    /// against SQL Server 2025 after <c>WHERE</c>, <c>ON</c>, <c>IF</c> and
+    /// <c>WHILE</c>: <c>WHERE id 1</c> is Msg 102 near '1', where
+    /// <c>WHERE id zz</c>, <c>WHERE id BEGIN</c> and <c>WHERE id (</c> keep
+    /// Msg 4145).
+    /// </summary>
+    private static bool ContinuesNoCondition(Token? token) => token switch
+    {
+        Numeric or Literal or DelimitedIdentifier or AtPrefixedString or DoubleAtPrefixedString => true,
+        Operator { Character: '~' or '{' } => true,
+        ReservedKeyword { Keyword: Keyword.Exists or Keyword.Null or Keyword.Case or Keyword.Into or Keyword.From } => true,
+        _ => false,
+    };
+
     /// <summary>Msg 4145 reported near a token the caller names.</summary>
     internal static SimulatedSqlException NonBooleanInConditionContext(string? near) =>
         new($"An expression of non-boolean type specified in a context where a condition is expected, near '{near}'.", 4145, 15, 1);
 
-    private static Token? TokenAfterOpenBooleanGroups(ParserContext context, out bool balanced, out bool stray)
+    private static Token? TokenAfterOpenBooleanGroups(ParserContext context, out bool balanced, out bool stray, out bool atEnd)
     {
         balanced = true;
         stray = false;
+        atEnd = context.Token is null;
         if (context.BooleanGroupDepth == 0)
             return context.Token ?? context.LastToken;
 
@@ -730,6 +750,7 @@ partial class SimulatedSqlException
                 }
                 context.MoveNextOptional();
             }
+            atEnd = context.Token is null;
             return context.Token ?? context.LastToken;
         }
         finally
