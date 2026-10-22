@@ -477,6 +477,9 @@ internal sealed partial class Selection
 
     private static List<byte[]> GenerateCatalogRows(CatalogView view, BatchContext batch, Database database)
     {
+        // A catalog view over msdb reads its shipped content, so it seeds
+        // first (the gateway catalog reads share with object resolution).
+        database.EnsureSeeded();
         var rows = new List<byte[]>();
         var columns = view.ColumnsIn(database);
         foreach (var values in view.RowGenerator(batch, database))

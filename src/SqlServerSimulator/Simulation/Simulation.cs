@@ -84,13 +84,20 @@ public sealed partial class Simulation
         this.Databases[MasterDatabaseName].QueryStore.DesiredState = QueryStoreState.Off;
         this.Databases[TempdbDatabaseName].QueryStore.DesiredState = QueryStoreState.Off;
         msdb.QueryStore.DesiredState = QueryStoreState.Off;
-        SeedMsdbPolicyHealthView(msdb);
-        SeedMsdbPolicyConfigurationView(msdb);
-        SeedMsdbPolicyAutomationFunction(msdb);
-        SeedMsdbTables(msdb);
-        SeedMsdbHistoryAndAgentTables(msdb);
-        this.SeedMsdbAgentObjects(msdb);
-        this.SeedMsdbMailObjects(msdb);
+        // msdb's shipped content — the policy views, history and Agent / Mail
+        // tables and objects — is seeded on first use rather than here, so a
+        // consumer that never touches msdb (the fast parallel-test path) pays
+        // none of it (see Database.EnsureSeeded).
+        msdb.SeedLazily(() =>
+        {
+            SeedMsdbPolicyHealthView(msdb);
+            SeedMsdbPolicyConfigurationView(msdb);
+            SeedMsdbPolicyAutomationFunction(msdb);
+            SeedMsdbTables(msdb);
+            SeedMsdbHistoryAndAgentTables(msdb);
+            this.SeedMsdbAgentObjects(msdb);
+            this.SeedMsdbMailObjects(msdb);
+        });
     }
 
     /// <summary>

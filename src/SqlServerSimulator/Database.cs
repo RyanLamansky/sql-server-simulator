@@ -78,6 +78,67 @@ internal sealed partial class Database
     public readonly ConcurrentDictionary<string, Schema> Schemas;
 
     /// <summary>
+    /// The work seeding this database's shipped content — only msdb's, and
+    /// only until <see cref="EnsureSeeded"/> runs it; null for every other
+    /// database and once msdb's content is in place. Deferring msdb's policy
+    /// views, history and Agent / Mail tables and objects off the constructor
+    /// is what keeps <c>new Simulation()</c> cheap for the consumers that
+    /// never touch msdb — the fast parallel-test path.
+    /// </summary>
+    private Action? pendingSeed;
+
+    /// <summary>True for every database but msdb before its first use (see <see cref="EnsureSeeded"/>).</summary>
+    private volatile bool seedComplete = true;
+
+    /// <summary>The thread running the seed, so its own re-entry (the seed reads msdb) passes straight through.</summary>
+    private volatile int seedingThreadId;
+
+    private readonly Lock seedGate = new();
+
+    /// <summary>Hands <paramref name="seed"/> to <see cref="EnsureSeeded"/> to run on first access.</summary>
+    public void SeedLazily(Action seed)
+    {
+        this.pendingSeed = seed;
+        this.seedComplete = false;
+    }
+
+    /// <summary>
+    /// Runs the deferred <see cref="SeedLazily"/> work once, before this
+    /// database's shipped content is read; a single volatile read for an
+    /// already seeded database, which is every one but msdb and msdb after its
+    /// first use. Called at every gateway that reaches a database's schema
+    /// objects — object / type resolution, catalog-view projection, and the
+    /// Agent / Mail / backup-history helpers that read msdb's tables directly.
+    /// </summary>
+    /// <remarks>
+    /// The seed itself reads msdb (its SQL resolves msdb objects), so the
+    /// seeding thread passes its own re-entry through; another thread meeting
+    /// an in-flight seed blocks on the gate until it completes, never seeing
+    /// a half-seeded database.
+    /// </remarks>
+    public void EnsureSeeded()
+    {
+        if (this.seedComplete || this.seedingThreadId == Environment.CurrentManagedThreadId)
+            return;
+        lock (this.seedGate)
+        {
+            if (this.seedComplete)
+                return;
+            this.seedingThreadId = Environment.CurrentManagedThreadId;
+            try
+            {
+                this.pendingSeed!();
+            }
+            finally
+            {
+                this.seedingThreadId = 0;
+            }
+            this.pendingSeed = null;
+            this.seedComplete = true;
+        }
+    }
+
+    /// <summary>
     /// Schema-id of the default <c>dbo</c> schema. Matches real SQL Server's
     /// conventional value; surfaces in <c>sys.schemas</c>, <c>sys.tables.schema_id</c>,
     /// etc. Apps that hard-code <c>schema_id = 1</c> for dbo work as expected.

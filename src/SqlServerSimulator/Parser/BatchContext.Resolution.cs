@@ -503,6 +503,7 @@ internal sealed partial class BatchContext
             if (!this.IsSkipping)
                 database.RejectWhenOffline(this.Connection);
         }
+        database.EnsureSeeded();
         return name.Count == 1 || name.SchemaOmitted
             ? this.TryResolveUnqualified(database, name.Leaf, holds, callerScope, types, out schema)
             : database.Schemas.TryGetValue(name.ImmediateQualifier!, out schema);
@@ -587,6 +588,7 @@ internal sealed partial class BatchContext
         var database = name.Count == 3 && this.Connection.Simulation.Databases.TryGetValue(name[0], out var named) ? named : this.CurrentDatabase;
         if (!this.IsSkipping)
             database.RejectWhenOffline(this.Connection);
+        database.EnsureSeeded();
         if (this.CreateSchemaElementScope is { } elementScope)
             return database.Schemas.TryGetValue(elementScope, out schema);
         var target = ReferenceEquals(database, this.CurrentDatabase) ? this.DefaultSchemaName : Database.DefaultSchemaName;
@@ -942,6 +944,9 @@ internal sealed partial class BatchContext
             return false;
         if (!this.IsSkipping)
             targetDatabase.RejectWhenOffline(this.Connection);
+        // A catalog view projecting this database's objects reads its shipped
+        // content, so msdb's seeds before the projection (see GenerateCatalogRows).
+        targetDatabase.EnsureSeeded();
         // A 1-part name resolves only the legacy compatibility views registered
         // under a bare (dot-less) key — sysobjects / sysusers, which live in the
         // sys schema but resolve unqualified (probe-confirmed: bare `sysobjects`

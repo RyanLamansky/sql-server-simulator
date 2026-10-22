@@ -151,7 +151,7 @@ partial class Simulation
                     ? MailRefusal(SimulatedSqlException.MailIdNotValid(what), 33, returnCode, procedure)
                     : MailRefusal(SimulatedSqlException.MailIdentifiersMismatch(what), 24, returnCode, procedure);
             }
-            if (name is not null && !this.Databases[MsdbDatabaseName].Collation.Equals(found.AsString, name))
+            if (name is not null && !this.Msdb.Collation.Equals(found.AsString, name))
                 throw MailRefusal(SimulatedSqlException.MailIdentifiersMismatch(what), 24, returnCode, procedure);
             return given;
         }
@@ -171,7 +171,7 @@ partial class Simulation
         const string procedure = "msdb.dbo.sysmail_verify_principal_sp";
         if (id is null && name is null)
             return allowBothNull ? null : throw MailRefusal(SimulatedSqlException.MailIdentifiersBothNull("principal"), 13, returnCode, procedure);
-        var msdb = this.Databases[MsdbDatabaseName];
+        var msdb = this.Msdb;
         DatabasePrincipal? byId = null;
         if (id is { } principalId)
         {
@@ -757,7 +757,7 @@ partial class Simulation
     /// <summary>The msdb user a grant's sid names, by principal id: <c>guest</c> for <c>0x00</c>, which <c>public</c>'s grants carry.</summary>
     private DatabasePrincipal? MailPrincipalBySid(byte[] sid)
     {
-        var msdb = this.Databases[MsdbDatabaseName];
+        var msdb = this.Msdb;
         DatabasePrincipal? found = null;
         foreach (var (_, principal) in msdb.Principals)
         {

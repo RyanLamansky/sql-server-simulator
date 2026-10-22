@@ -18,7 +18,7 @@ partial class Simulation
     /// </summary>
     private SimulatedSqlResultSet AgentResultSet(string[] specs, List<SqlValue[]> rows)
     {
-        var msdb = this.Databases[MsdbDatabaseName];
+        var msdb = this.Msdb;
         var columns = Array.ConvertAll(specs, spec => MsdbColumn(msdb, spec));
         var types = Array.ConvertAll(columns, column => column.Type);
         foreach (var row in rows)

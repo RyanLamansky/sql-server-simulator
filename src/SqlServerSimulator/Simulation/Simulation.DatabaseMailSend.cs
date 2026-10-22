@@ -211,7 +211,7 @@ partial class Simulation
     /// </summary>
     private int ResolveSendProfile(BatchContext batch, string? profileName)
     {
-        var msdb = this.Databases[MsdbDatabaseName];
+        var msdb = this.Msdb;
         var caller = MailSid(MailPrincipalSid(msdb, PermissionEnforcement.ResolveCrossDatabasePrincipal(batch.Connection, msdb)));
         if (profileName is null)
         {

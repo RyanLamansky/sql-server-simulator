@@ -265,7 +265,23 @@ partial class Simulation
     private static int MsdbOrdinal(HeapTable table, string column) =>
         Array.FindIndex(table.StoredColumns, stored => stored.Name == column) is var ordinal and >= 0 ? ordinal : throw new InvalidOperationException(column);
 
-    private HeapTable MsdbTable(string name) => this.Databases[MsdbDatabaseName].Schemas[Database.DefaultSchemaName].HeapTables[name];
+    private HeapTable MsdbTable(string name) => this.Msdb.Schemas[Database.DefaultSchemaName].HeapTables[name];
+
+    /// <summary>
+    /// The msdb database with its shipped content seeded (<see cref="Database.EnsureSeeded"/>):
+    /// the one gateway the Agent, Mail and backup-history helpers reach msdb's
+    /// tables and objects through, where SQL resolution seeds it at the schema
+    /// resolver instead.
+    /// </summary>
+    internal Database Msdb
+    {
+        get
+        {
+            var msdb = this.Databases[MsdbDatabaseName];
+            msdb.EnsureSeeded();
+            return msdb;
+        }
+    }
 
     /// <summary>
     /// Inserts a row into msdb's <paramref name="tableName"/>, the cells

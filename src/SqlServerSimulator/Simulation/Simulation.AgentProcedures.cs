@@ -290,7 +290,7 @@ partial class Simulation
         var rows = new List<SqlValue[]>();
         try
         {
-            foreach (var outcome in this.ExecuteDynamicBatch(batch, sql, variables, runsIn: this.Databases[MsdbDatabaseName]))
+            foreach (var outcome in this.ExecuteDynamicBatch(batch, sql, variables, runsIn: this.Msdb))
             {
                 switch (outcome)
                 {
@@ -369,7 +369,7 @@ partial class Simulation
     /// <summary>Whether the caller's msdb principal is a member, directly or through a role, of the msdb role <paramref name="roleId"/>.</summary>
     private bool AgentInRole(BatchContext batch, int roleId)
     {
-        var msdb = this.Databases[MsdbDatabaseName];
+        var msdb = this.Msdb;
         var principalId = PermissionEnforcement.ResolveCrossDatabasePrincipal(batch.Connection, msdb).PrincipalId;
         foreach (var (_, principal) in msdb.Principals)
         {
@@ -394,7 +394,7 @@ partial class Simulation
     /// </summary>
     private void RequireAgentExecute(BatchContext batch, string procedure, int? grantedRole)
     {
-        var msdb = this.Databases[MsdbDatabaseName];
+        var msdb = this.Msdb;
         if (PermissionEnforcement.Bypasses(batch.Connection, msdb) || AgentIsSysadmin(batch))
             return;
         if (grantedRole is { } role && this.AgentInRole(batch, role))
