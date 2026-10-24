@@ -17,8 +17,27 @@ internal sealed class ConnectionTransport(IPEndPoint? client, IPEndPoint? local,
     public readonly IPEndPoint? Local = local;
     public readonly uint ProtocolVersion = protocolVersion;
     public readonly int PacketSize = packetSize;
-    public readonly Guid ConnectionId = Guid.NewGuid();
     public readonly DateTime ConnectTimeUtc = DateTime.UtcNow;
+
+    /// <summary>
+    /// The <c>connection_id</c>, drawn the first time something reports it:
+    /// a draw reads the operating system's random source, which every open
+    /// of an in-process connection would otherwise pay for an id that only
+    /// the connection DMVs and an audit record ever show. Boxed so that
+    /// racing first reads publish one id whole.
+    /// </summary>
+    public Guid ConnectionId
+    {
+        get
+        {
+            if (Volatile.Read(ref this.connectionId) is { } drawn)
+                return drawn.Value;
+            _ = Interlocked.CompareExchange(ref this.connectionId, new(Guid.NewGuid()), null);
+            return this.connectionId.Value;
+        }
+    }
+
+    private System.Runtime.CompilerServices.StrongBox<Guid>? connectionId;
     public int PacketsRead;
     public int PacketsWritten;
     public long LastReadTicks;

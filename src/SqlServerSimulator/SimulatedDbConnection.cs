@@ -87,18 +87,18 @@ public sealed class SimulatedDbConnection : DbConnection
     /// lazily seed the default — the first connection pays the cost of
     /// materializing the default when no import preceded it.</item>
     /// </list>
+    /// Only the seed takes the <see cref="Simulation.Databases"/> lock: every
+    /// connection a parallel test run opens comes through here, and the
+    /// first two tiers read the concurrent dictionary as they find it.
     /// </summary>
     private static Database ResolveInitialDatabase(Simulation simulation)
     {
+        if (FirstUserDatabase(simulation) is { } found)
+            return found;
         lock (simulation.Databases)
         {
-            if (simulation.Databases.TryGetValue(Simulation.DefaultDatabaseName, out var existing))
-                return existing;
-            foreach (var kvp in simulation.Databases.OrderBy(static kvp => kvp.Key, StringComparer.OrdinalIgnoreCase))
-            {
-                if (!Simulation.SystemDatabaseNames.Contains(kvp.Key))
-                    return kvp.Value;
-            }
+            if (FirstUserDatabase(simulation) is { } seededMeanwhile)
+                return seededMeanwhile;
             var seeded = new Database(Simulation.DefaultDatabaseName, simulation.ServerCollation);
             // Already inside lock (simulation.Databases) — use the
             // lock-held registration so the seed gets a stored database_id
@@ -106,6 +106,25 @@ public sealed class SimulatedDbConnection : DbConnection
             simulation.RegisterUserDatabaseLocked(seeded);
             return seeded;
         }
+    }
+
+    /// <summary>
+    /// The first two tiers of <see cref="ResolveInitialDatabase"/>: the
+    /// conventional default when present, else the alphabetically-first
+    /// database that isn't a system one, else null.
+    /// </summary>
+    private static Database? FirstUserDatabase(Simulation simulation)
+    {
+        if (simulation.Databases.TryGetValue(Simulation.DefaultDatabaseName, out var existing))
+            return existing;
+        Database? first = null;
+        string? firstName = null;
+        foreach (var (name, database) in simulation.Databases)
+        {
+            if (!Simulation.SystemDatabaseNames.Contains(name) && (firstName is null || StringComparer.OrdinalIgnoreCase.Compare(name, firstName) < 0))
+                (first, firstName) = (database, name);
+        }
+        return first;
     }
 
     /// <summary>
