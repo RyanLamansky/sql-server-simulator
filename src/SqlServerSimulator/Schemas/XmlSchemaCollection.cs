@@ -60,17 +60,16 @@ internal sealed class XmlSchemaCollection(
     /// </summary>
     public XmlSchemaSegment[] Segments = [];
 
-    // The segments the components were read under and the components, in
-    // one reference so a reader on another thread never pairs them wrongly.
+    // Each cache pairs what it was read from with what it read, in one
+    // reference, so a reader on another thread never pairs them wrongly: two
+    // fields written apart let a second thread meeting a first one mid-read
+    // take the new source with the old value — a typed write meeting the
+    // schemas still compiling went in untyped.
     private Tuple<XmlSchemaSegment[], XmlSchemaComponentSet>? components;
-    private string? namesReadFrom;
-    private FrozenSet<string>? singletonElementNames;
-    private string? simpleContentNamesReadFrom;
-    private FrozenSet<string>? simpleContentElementNames;
-    private string? compiledReadFrom;
-    private System.Xml.Schema.XmlSchemaSet? compiledSchemas;
-    private string? typingReadFrom;
-    private Storage.XmlStaticTyping? staticTyping;
+    private Tuple<string, FrozenSet<string>>? singletonElementNames;
+    private Tuple<string, FrozenSet<string>>? simpleContentElementNames;
+    private Tuple<string, System.Xml.Schema.XmlSchemaSet?>? compiledSchemas;
+    private Tuple<string, Storage.XmlStaticTyping>? staticTyping;
 
     /// <summary>
     /// What an XQuery expression over a value bound to this collection is
@@ -83,13 +82,10 @@ internal sealed class XmlSchemaCollection(
     /// </summary>
     public Storage.XmlStaticTyping GetStaticTyping()
     {
-        if (!ReferenceEquals(this.typingReadFrom, this.XsdText))
-        {
-            this.typingReadFrom = this.XsdText;
-            this.staticTyping = Storage.XmlStaticTyping.From(this.GetSingletonElementNames(), this.GetCompiledSchemas());
-        }
-
-        return this.staticTyping!;
+        var text = this.XsdText;
+        if (Volatile.Read(ref this.staticTyping) is not { } cached || !ReferenceEquals(cached.Item1, text))
+            Volatile.Write(ref this.staticTyping, cached = Tuple.Create(text, Storage.XmlStaticTyping.From(this.GetSingletonElementNames(), this.GetCompiledSchemas())));
+        return cached.Item2;
     }
 
     /// <summary>
@@ -138,13 +134,10 @@ internal sealed class XmlSchemaCollection(
     /// </remarks>
     public FrozenSet<string> GetSingletonElementNames()
     {
-        if (!ReferenceEquals(this.namesReadFrom, this.XsdText))
-        {
-            this.namesReadFrom = this.XsdText;
-            this.singletonElementNames = ReadSingletonElementNames(this.XsdText);
-        }
-
-        return this.singletonElementNames!;
+        var text = this.XsdText;
+        if (Volatile.Read(ref this.singletonElementNames) is not { } cached || !ReferenceEquals(cached.Item1, text))
+            Volatile.Write(ref this.singletonElementNames, cached = Tuple.Create(text, ReadSingletonElementNames(text)));
+        return cached.Item2;
     }
 
     /// <summary>
@@ -177,13 +170,10 @@ internal sealed class XmlSchemaCollection(
     /// </remarks>
     public FrozenSet<string> GetSimpleContentElementNames()
     {
-        if (!ReferenceEquals(this.simpleContentNamesReadFrom, this.XsdText))
-        {
-            this.simpleContentNamesReadFrom = this.XsdText;
-            this.simpleContentElementNames = ReadSimpleContentElementNames(this.XsdText);
-        }
-
-        return this.simpleContentElementNames!;
+        var text = this.XsdText;
+        if (Volatile.Read(ref this.simpleContentElementNames) is not { } cached || !ReferenceEquals(cached.Item1, text))
+            Volatile.Write(ref this.simpleContentElementNames, cached = Tuple.Create(text, ReadSimpleContentElementNames(text)));
+        return cached.Item2;
     }
 
     /// <summary>
@@ -215,13 +205,10 @@ internal sealed class XmlSchemaCollection(
     /// </remarks>
     public System.Xml.Schema.XmlSchemaSet? GetCompiledSchemas()
     {
-        if (!ReferenceEquals(this.compiledReadFrom, this.XsdText))
-        {
-            this.compiledReadFrom = this.XsdText;
-            this.compiledSchemas = CompileSchemas(this.XsdText);
-        }
-
-        return this.compiledSchemas;
+        var text = this.XsdText;
+        if (Volatile.Read(ref this.compiledSchemas) is not { } cached || !ReferenceEquals(cached.Item1, text))
+            Volatile.Write(ref this.compiledSchemas, cached = Tuple.Create(text, CompileSchemas(text)));
+        return cached.Item2;
     }
 
     private static System.Xml.Schema.XmlSchemaSet? CompileSchemas(string xsdText)
