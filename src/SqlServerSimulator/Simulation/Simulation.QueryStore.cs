@@ -208,7 +208,7 @@ partial class Simulation
                     tableVariableScope = commandText;
                 prefix = VariablePrefix(batch, shape);
             }
-            text = prefix is null ? shape.Text : prefix + shape.Text;
+            text = prefix is null ? shape.Text : shape.Declared(prefix);
             parameterizationType = prefix is not null && (batch.ProcFrame is { IsDynamicSql: true } || (connection.NestingLevel == 0 && batch.Parser.Command.Parameters.Count > 0))
                 ? (byte)1
                 : (byte)0;
@@ -349,10 +349,11 @@ partial class Simulation
             // key that is its declared spelling; only one spelled otherwise
             // pays the culture-aware lookup and the search for the key. That
             // lookup per name was the dominant cost of a statement naming
-            // many parameters, such as EF Core's multi-row INSERT / MERGE.
-            asDeclared ??= new(batch.Variables, StringComparer.Ordinal);
+            // many parameters, such as EF Core's multi-row INSERT / MERGE,
+            // where an ordinal copy of the variables pays for itself; a
+            // handful are scanned instead.
             var declared = name;
-            if (!asDeclared.TryGetValue(name, out var slot))
+            if (!TryFindAsDeclared(batch.Variables, name, ref asDeclared, out var slot))
             {
                 if (!batch.Variables.TryGetValue(name, out slot))
                     continue;
@@ -369,6 +370,22 @@ partial class Simulation
             _ = prefix.Append('@').Append(declared).Append(' ').Append(DescribeTypeName(slot.DeclaredType, slot.SpelledNumeric));
         }
         return prefix?.Append(')').ToString();
+    }
+
+    private static bool TryFindAsDeclared(Dictionary<string, VariableSlot> variables, string name, ref Dictionary<string, VariableSlot>? asDeclared, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out VariableSlot? slot)
+    {
+        if (variables.Count > 8)
+            return (asDeclared ??= new(variables, StringComparer.Ordinal)).TryGetValue(name, out slot);
+        foreach (var (key, value) in variables)
+        {
+            if (string.Equals(key, name, StringComparison.Ordinal))
+            {
+                slot = value;
+                return true;
+            }
+        }
+        slot = null;
+        return false;
     }
 
     /// <summary>
@@ -791,6 +808,22 @@ internal sealed class QueryStoreShape
     public readonly string[] Variables;
 
     public bool DeclaresVariables => this.Variables.Length > 0;
+
+    /// <summary>
+    /// <see cref="Text"/> after the variable declaration real stores ahead of
+    /// it. The last one built is kept for the next execution, whose
+    /// parameters are typically declared as this one's were.
+    /// </summary>
+    public string Declared(string declaration)
+    {
+        if (Volatile.Read(ref this.lastDeclared) is { } last && string.Equals(last.Item1, declaration, StringComparison.Ordinal))
+            return last.Item2;
+        var text = declaration + this.Text;
+        Volatile.Write(ref this.lastDeclared, Tuple.Create(declaration, text));
+        return text;
+    }
+
+    private Tuple<string, string>? lastDeclared;
 
     /// <summary>An <c>IF</c> / <c>WHILE</c> condition or a <c>RETURN</c>, whose text real stores without a declaration.</summary>
     public readonly bool IsConditionOrReturn;
