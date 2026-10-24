@@ -1122,6 +1122,13 @@ internal sealed class HeapTable : SchemaObject
     internal readonly Lock RowVersionsGate = new();
 
     /// <summary>
+    /// The database whose <see cref="Database.VersionedTables"/> holds this
+    /// table while its heap holds a version chain; null otherwise. Written
+    /// under <see cref="RowVersionsGate"/>.
+    /// </summary>
+    internal Database? VersionedIn;
+
+    /// <summary>
     /// The commit stamp of the transaction that last created or redefined
     /// this table — any <c>ALTER TABLE</c>, index DDL, a trigger or rename,
     /// <c>TRUNCATE</c> or <c>SWITCH</c> — or zero when none did since a

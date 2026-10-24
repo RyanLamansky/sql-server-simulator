@@ -73,6 +73,28 @@ public sealed class MvccObservabilityTests
     }
 
     [TestMethod]
+    public void VersionStore_GcEmptiesStore_AgainAfterATableItEmptiedVersionsOnceMore()
+    {
+        // A sweep that empties a table's chains stops visiting the table; its
+        // next versioned write has to put it back in the sweep's reach.
+        var sim = NewWithVersioning();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int primary key, v int);
+            insert t values (1, 100), (2, 200), (3, 300)
+            """);
+        for (var round = 0; round < 2; round++)
+        {
+            using var reader = sim.CreateOpenConnection();
+            _ = reader.CreateCommand("set transaction isolation level snapshot; begin tran; select count(*) from t").ExecuteScalar();
+            using (var writer = sim.CreateOpenConnection())
+                _ = writer.CreateCommand("update t set v = v + 1").ExecuteNonQuery();
+            AreEqual(3, sim.ExecuteScalar("select count(*) from sys.dm_tran_version_store"));
+            _ = reader.CreateCommand("commit").ExecuteNonQuery();
+            AreEqual(0, sim.ExecuteScalar("select count(*) from sys.dm_tran_version_store"));
+        }
+    }
+
+    [TestMethod]
     public void VersionStore_DeleteUnderSi_AppearsInVersionStore()
     {
         var sim = NewWithVersioning();

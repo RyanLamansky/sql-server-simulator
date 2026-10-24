@@ -125,6 +125,7 @@ internal static class VersionStore
     {
         var pendingEntries = batch.ActivePendingVersionEntries();
         var chain = table.Heap.RowVersions.GetOrAdd(newRid, static _ => new RowVersionChain());
+        NoteVersioned(batch.DatabaseFor(table), table);
 
         // An UPDATE or DELETE prepends a history entry carrying the
         // pre-mutation payload, with Xmax = PendingXmax until the writer's
@@ -301,13 +302,32 @@ internal static class VersionStore
             {
                 foreach (var (address, chain) in chains)
                     heap.RowVersions[address] = chain;
+                NoteVersioned(batch.DatabaseFor(table), table);
             }
         });
+    }
+
+    /// <summary>
+    /// Enters <paramref name="table"/>, which holds a version chain, in
+    /// <paramref name="database"/>'s <see cref="Database.VersionedTables"/> for
+    /// the sweep to find, under its <see cref="HeapTable.RowVersionsGate"/>.
+    /// </summary>
+    private static void NoteVersioned(Database database, HeapTable table)
+    {
+        if (table.VersionedIn is not null)
+            return;
+        table.VersionedIn = database;
+        _ = database.VersionedTables.TryAdd(table, 0);
     }
 
     private static void Finalize(PendingVersionEntry entry, long commitXid)
     {
         var newChain = entry.Heap.RowVersions.GetOrAdd(entry.NewRid, static _ => new RowVersionChain());
+        // The capture entered the table, and its in-flight chain kept it
+        // there, unless a TRUNCATE in the same transaction set the chains
+        // aside and a sweep let the table go meanwhile.
+        if (entry.Table.OwningDatabase is { } owner)
+            NoteVersioned(owner, entry.Table);
         // The pre-write history entry was attached at capture time; commit
         // stamps its Xmax with the real commit Xid and the chain's LiveXmin
         // before the in-flight marks clear.
@@ -407,8 +427,9 @@ internal static class VersionStore
         table.Heap.RowVersions.TryGetValue(rid, out var chain) ? chain : null;
 
     /// <summary>
-    /// Walks every per-table <see cref="Heap.RowVersions"/> chain in
-    /// the database and drops <see cref="HistoricalVersion"/> nodes whose
+    /// Walks every version chain of the database's versioned tables
+    /// (<see cref="Database.VersionedTables"/>) and drops
+    /// <see cref="HistoricalVersion"/> nodes whose
     /// <c>Xmax &lt;= oldest_active_snapshot_xid</c> — no active SI
     /// transaction needs that version anymore. When no SI tx is in flight,
     /// the cutoff is <see cref="Simulation.CurrentTransactionCommitId"/>, so
@@ -430,36 +451,38 @@ internal static class VersionStore
         // version store shrinks once a dead client's session is reset.
         _ = simulation.ReclaimAbandonedSessions();
         var cutoff = OldestActiveSnapshotXid(simulation);
-        foreach (var (_, schema) in database.Schemas)
+        foreach (var (table, _) in database.VersionedTables)
         {
-            foreach (var (_, table) in schema.HeapTables)
+            List<HistoricalVersion>? dropped = null;
+            lock (table.RowVersionsGate)
             {
-                if (table.Heap.RowVersions.IsEmptyLockFree())
-                    continue;
-                List<HistoricalVersion>? dropped = null;
-                lock (table.RowVersionsGate)
+                foreach (var kv in table.Heap.RowVersions)
                 {
-                    foreach (var kv in table.Heap.RowVersions)
-                    {
-                        var chain = kv.Value;
-                        if (chain.WriterSession is not null)
-                            continue;
-                        chain.Head = TrimHistory(chain.Head, cutoff, ref dropped);
-                        // A chain with no history left still hides its row from a
-                        // snapshot older than the row's commit — a row inserted
-                        // since — so it stays until every snapshot sees the row.
-                        if (chain.Head is null && !chain.IsDeletedLive && chain.LiveXmin <= cutoff)
-                            _ = table.Heap.RowVersions.TryRemove(kv.Key, out _);
-                    }
+                    var chain = kv.Value;
+                    if (chain.WriterSession is not null)
+                        continue;
+                    chain.Head = TrimHistory(chain.Head, cutoff, ref dropped);
+                    // A chain with no history left still hides its row from a
+                    // snapshot older than the row's commit — a row inserted
+                    // since — so it stays until every snapshot sees the row.
+                    if (chain.Head is null && !chain.IsDeletedLive && chain.LiveXmin <= cutoff)
+                        _ = table.Heap.RowVersions.TryRemove(kv.Key, out _);
                 }
-                // Each dropped version was detached under the gate exactly
-                // once, so its off-row chains are freed exactly once; freeing
-                // takes the heap's latch, which the gate may not hold.
-                if (dropped is not null)
+                // Only a writer adds a chain, under the gate, so a table found
+                // empty here leaves until its next capture enters it again.
+                if (table.Heap.RowVersions.IsEmptyLockFree() && ReferenceEquals(table.VersionedIn, database))
                 {
-                    foreach (var version in dropped)
-                        FreeVersionChains(table, version, simulation.LobReclamation);
+                    table.VersionedIn = null;
+                    _ = database.VersionedTables.TryRemove(table, out _);
                 }
+            }
+            // Each dropped version was detached under the gate exactly
+            // once, so its off-row chains are freed exactly once; freeing
+            // takes the heap's latch, which the gate may not hold.
+            if (dropped is not null)
+            {
+                foreach (var version in dropped)
+                    FreeVersionChains(table, version, simulation.LobReclamation);
             }
         }
     }

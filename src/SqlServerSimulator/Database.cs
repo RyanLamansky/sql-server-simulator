@@ -398,6 +398,15 @@ internal sealed partial class Database
     public bool ReadCommittedSnapshot;
 
     /// <summary>
+    /// The tables of the database holding a version chain, which a commit's
+    /// version sweep (<see cref="Storage.VersionStore.RunGarbageCollection"/>)
+    /// walks rather than every table of every schema: a table enters with its
+    /// first chain and leaves when a sweep empties it, both under its
+    /// <see cref="Storage.HeapTable.RowVersionsGate"/>.
+    /// </summary>
+    public readonly ConcurrentDictionary<Storage.HeapTable, byte> VersionedTables = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>
     /// Whether a schema of the database held a DML trigger as of
     /// <c>Simulation.SchemaVersion</c> <see cref="DmlTriggerProbeVersion"/>,
     /// which every trigger's creation and removal bumps — so the dispatch

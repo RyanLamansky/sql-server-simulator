@@ -961,7 +961,8 @@ Three DMVs cover version-store state, with column shapes probe-confirmed against
 ### Version-store garbage collection
 
 `VersionStore.RunGarbageCollection(Database)` runs at every `SimulatedDbTransaction.Commit / Rollback / Dispose`.
-Walks every per-table `RowVersions` chain and drops trailing `HistoricalVersion` nodes whose `Xmax <= oldest_active_snapshot_xid` (no active SI transaction needs them anymore).
+Walks every `RowVersions` chain of the tables holding one (`Database.VersionedTables`, which a table enters with its first chain and leaves when a sweep empties it, both under its `RowVersionsGate`) and drops trailing `HistoricalVersion` nodes whose `Xmax <= oldest_active_snapshot_xid` (no active SI transaction needs them anymore).
+Walking every table of every schema instead was a sixth of a rolled-back write transaction over AdventureWorks, whatever the transaction wrote (measured 2026-10-24).
 When no SI tx is in flight, the cutoff is `Simulation.CurrentTransactionCommitId` so every finalized HV becomes collectible.
 Chains that lose their only HV AND aren't `IsDeletedLive` AND have no in-flight writer AND whose `LiveXmin` every active snapshot has reached get removed from the dict entirely — a row inserted since an open snapshot keeps its history-less chain, which is what hides it from that snapshot; chains with an in-flight writer are skipped (a `PendingXmax`-marked HV must not be disturbed mid-tx).
 The sweep runs per table under `RowVersionsGate` and frees the dropped versions' off-row chains after leaving it; two sweeps from two committing sessions once trimmed the same chain and freed its LOB pages twice.
