@@ -86,6 +86,14 @@ internal static class XeEvents
     /// <summary><c>sql_batch_starting</c>, or <c>rpc_starting</c> for a parameterized or procedure command.</summary>
     public static void RequestStarting(SimulatedDbConnection connection, SimulatedDbCommand command)
     {
+        if (Takes(connection.Simulation, XeEventKind.RpcStarting) || Takes(connection.Simulation, XeEventKind.SqlBatchStarting))
+            FireRequestStarting(connection, command);
+    }
+
+    // Apart from the check above, since the events' data closures are
+    // allocated as this is entered.
+    private static void FireRequestStarting(SimulatedDbConnection connection, SimulatedDbCommand command)
+    {
         if (IsRpc(command, out var objectName))
         {
             Fire(connection, XeEventKind.RpcStarting, @event => Data(@event,
@@ -130,6 +138,13 @@ internal static class XeEvents
     public static void RequestCompleted(SimulatedDbConnection connection, SimulatedDbCommand command, long durationMicroseconds, bool ended)
     {
         BatchWalked(connection);
+        if (Takes(connection.Simulation, XeEventKind.RpcCompleted) || Takes(connection.Simulation, XeEventKind.SqlBatchCompleted))
+            FireRequestCompleted(connection, command, durationMicroseconds, ended);
+    }
+
+    // Apart from the check above, as FireRequestStarting is.
+    private static void FireRequestCompleted(SimulatedDbConnection connection, SimulatedDbCommand command, long durationMicroseconds, bool ended)
+    {
         var result = ended ? XeValue.FromMap(1, "Error") : XeValue.FromMap(0, "OK");
         if (IsRpc(command, out var objectName))
         {
