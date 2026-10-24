@@ -134,7 +134,9 @@ internal sealed class CachedStatementStats(int startOffset, int endOffset, long 
     public readonly QueryStoreShape Shape = shape;
     public readonly byte ParameterizationType = parameterizationType;
     public readonly long? ContextSettingsId = contextSettingsId;
-    public readonly byte[] StatementSqlHandle = Simulation.StatementSqlHandleOf(statementText);
+
+    /// <summary>The <c>statement_sql_handle</c>, hashed the first time something reports it.</summary>
+    public byte[] StatementSqlHandle => field ??= Simulation.StatementSqlHandleOf(this.StatementText);
 
     public DateTime LastExecutionTime = creationTime;
     public long ExecutionCount;
@@ -161,15 +163,35 @@ internal sealed class CachedPlan
     /// <summary>The module the plan compiles, or null for a batch.</summary>
     public readonly SchemaObject? Module;
 
-    /// <summary>The <c>objectid</c> plan attribute: the module's id, or the ad hoc object id a batch's text hashes to.</summary>
-    public readonly int ObjectId;
+    /// <summary>
+    /// The <c>objectid</c> plan attribute: the module's id, or the ad hoc
+    /// object id a batch's text hashes to. A batch's, and the two handles
+    /// below, are hashed the first time something reports them, which most
+    /// plans of a test run's one-off batches never are.
+    /// </summary>
+    /// <remarks>
+    /// Never 0 once settled (an ad hoc id is at least 1), so 0 means "not
+    /// yet"; racing first reads compute the same value.
+    /// </remarks>
+    public int ObjectId
+    {
+        get
+        {
+            if (field == 0)
+                field = this.Module?.ObjectId ?? BuiltInResources.AdHocObjectIdOf(this.Text!);
+            return field;
+        }
+    }
 
     /// <summary>The <c>user_id</c> plan attribute: the default schema one-part names resolved through, -2 when none did.</summary>
     public readonly int UserId;
 
     public readonly short CompatibilityLevel;
-    public readonly byte[] PlanHandle;
-    public readonly byte[] SqlHandle;
+
+    public byte[] PlanHandle => field ??= PlanHandleOf(this.Key, this.ObjectId);
+
+    public byte[] SqlHandle => field ??= this.Module is null ? BuiltInResources.SqlHandleOf(this.Text!) : ModuleSqlHandle(this.Key.DatabaseId, this.Module);
+
     public readonly DateTime CachedTime;
 
     /// <summary>How many times the plan was looked up and used.</summary>
@@ -207,12 +229,9 @@ internal sealed class CachedPlan
         this.Database = database;
         this.Text = text;
         this.Module = module;
-        this.ObjectId = module?.ObjectId ?? BuiltInResources.AdHocObjectIdOf(text!);
         this.UserId = userId;
         this.CompatibilityLevel = (short)database.CompatibilityLevel;
         this.CachedTime = this.LastExecutionTime = cachedTime;
-        this.SqlHandle = module is null ? BuiltInResources.SqlHandleOf(text!) : ModuleSqlHandle(key.DatabaseId, module);
-        this.PlanHandle = PlanHandleOf(key, this.ObjectId);
     }
 
     public bool IsBatch => this.Key.Kind is CachedPlanKind.Adhoc or CachedPlanKind.Prepared;

@@ -1530,7 +1530,7 @@ public sealed partial class Simulation
             {
                 var session = running.Session;
                 session.RequestStartUtc = DateTime.UtcNow;
-                session.RunningPlanHandle = null;
+                session.RunningPlan = null;
                 session.BatchText = command.CommandText;
                 session.StatementStartIndex = 0;
             }

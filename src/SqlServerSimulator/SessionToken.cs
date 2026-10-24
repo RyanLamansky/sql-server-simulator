@@ -270,11 +270,11 @@ internal sealed class SessionToken(int spid)
     public DateTime RequestEndUtc;
 
     /// <summary>
-    /// The handle of the cached plan the session's running client batch runs
-    /// under, which <c>sys.dm_exec_requests.plan_handle</c> reports; null until
-    /// the batch reaches a statement real keeps a plan for.
+    /// The cached plan the session's running client batch runs under, whose
+    /// handle <c>sys.dm_exec_requests.plan_handle</c> reports; null until the
+    /// batch reaches a statement real keeps a plan for.
     /// </summary>
-    public byte[]? RunningPlanHandle;
+    public CachedPlan? RunningPlan;
 
     /// <summary>
     /// The text of the session's current or most recent command, which its

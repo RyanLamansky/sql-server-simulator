@@ -175,7 +175,7 @@ partial class Simulation
                 BuiltInResources.SqlHandleOf(prepared), PlanHandleFor(connection, CachedPlanKind.Prepared, prepared, database));
         }
         return new RunningStatement(batchText, 2 * start, end < 0 ? -1 : 2 * end, BuiltInResources.SqlHandleOf(batchText),
-            connection.Session.RunningPlanHandle ?? PlanHandleFor(connection, CachedPlanKind.Adhoc, batchText, database));
+            connection.Session.RunningPlan?.PlanHandle ?? PlanHandleFor(connection, CachedPlanKind.Adhoc, batchText, database));
     }
 
     /// <summary>
@@ -226,7 +226,7 @@ partial class Simulation
     private static void NoteRunningPlan(BatchContext batch, CachedPlan plan)
     {
         if (batch.CachedPlanOrigin == CachedPlanOrigin.ClientBatch)
-            batch.Connection.Session.RunningPlanHandle = plan.PlanHandle;
+            batch.Connection.Session.RunningPlan = plan;
     }
 
     /// <summary>Whether the session's plan-affecting settings are the ones <paramref name="key"/> was compiled under.</summary>
