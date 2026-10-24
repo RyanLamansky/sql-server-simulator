@@ -249,6 +249,18 @@ The floor exists because under it the candidate list is small however wide the i
 The cache entry and its ordered view are already built when the gate declines, which is deliberate: that build is shared with every other seek against the column and is what makes the *next* narrow range on it free.
 The gate is pure cost policy — the bound conjuncts are residual either way, so the rows are identical whichever path runs.
 
+### `LIKE` prefix seeks
+
+With no equality, union or comparison range to seek on, a `LIKE` over a leading key column seeks the range its literal prefix confines its matches to (traced `LikeSeek(table)`), as real's plan seeks a parameterized `LIKE` between `LikeRangeStart` and `LikeRangeEnd`; EF Core's `StartsWith` (`LIKE @p ESCAPE N'\'`) is the shape that matters.
+The range is settled per execution from the pattern's value (`LikePrefixRange`): the leading run of ASCII letters and digits, escapes honored, bounded below by the run with its last character stepped back (`Sm` → `Sl`) and above by its successor (`Sn`, a trailing `z`, `Z` or `9` carried into the character before).
+The stepped-back lower bound is what keeps it sound under padded comparison: a binary collation pads the shorter operand with spaces and the `SQL_` names' `varchar` order weighs `CHAR(0)` and the controls below the space, so `'Sm' + CHAR(31)` sorts *before* `'Sm'` yet matches `'Sm%'`; every subject starting with the run carries the greater character at the stepped position in code-point and primary order alike.
+The `LIKE` stays residual, so the range only has to hold every match.
+
+It applies under a collation whose order keeps such runs together (`Collation.SortsAsciiPrefixesTogether`): the binary collations, the Latin1-General tables and the invariant-culture order the other `SQL_` names share — never a culture's own order, which may contract a pair (Danish `aa`, Hungarian `cs`) — and only when the `LIKE` resolves to the column's own collation.
+A pattern with no leading letter or digit, a `NOT LIKE`, a pattern or escape the `LIKE` would raise on, and a read locking rows for its transaction or fencing a range all keep the scan, which matches or raises as before.
+An ordered read by the `LIKE` column folds the same range into its walk (`TryApplyOrderedScan`), so `WHERE last LIKE @p ORDER BY last, first` with a `TOP` walks the prefix's keys rather than the index from its start.
+EF Core's `StartsWith` with `TOP (10) … ORDER BY LastName, FirstName` over AdventureWorks' 20,000-row `Person` (an RCSI database, so the seek and a sort of its matches) went from 3.3 ms and 3.2 MB to 0.23 ms and 92 KB (Release, one worker, measured 2026-10-24).
+
 ### Equality-prefix + range continuation
 
 A stable range bound on the key column **immediately after** the matched equality prefix extends the seek predicate one column further: `WHERE a = @x AND b BETWEEN @lo AND @hi` against a key on `(a, b, …)` seeks the in-range slice of `a = @x`'s group rather than dragging the whole group through the residual filter.
@@ -314,7 +326,7 @@ A source whose sargable conjunct lands on a column **no key or index leads** can
 It runs only for a multi-source FROM — with one source the residual WHERE already is the scan's filter, so there is nothing to save.
 
 The pushed shapes are the same sargable whitelist the seek's own intake uses: a comparison (`=` / `>` / `>=` / `<` / `<=`, either operand order) or a `BETWEEN` whose column side is a bare reference into this source (`TryIdentifyIndexableColumn`) and whose value side is row-invariant for this execution (`IsStableValueSide` — a literal, a variable, a pure conversion or arithmetic over those, or an enclosing-scope column; a **sibling** of the same FROM declines, since it isn't readable before the join runs).
-`[NOT] LIKE` joins them on the same terms — the subject a bare column of this source, the pattern and any `ESCAPE` stable — although the seek positions on none of it, because it is what EF Core emits for `StartsWith` / `EndsWith` / `Contains`.
+`[NOT] LIKE` joins them on the same terms — the subject a bare column of this source, the pattern and any `ESCAPE` stable — because it is what EF Core emits for `StartsWith` / `EndsWith` / `Contains`, of which only a prefix on a leading key column [seeks](#like-prefix-seeks).
 That structural whitelist is what makes the push provably source-local: both operand shapes are enumerated node by node, so unlike an `Expression.VisitColumnReferences` walk it can't miss a reference buried in a container the walk doesn't descend into.
 Every name a pushed conjunct can read is therefore either this source's own column or one the enclosing resolver answers, and the filter resolves through a one-slot tuple over that single source with the enclosing resolver behind it.
 

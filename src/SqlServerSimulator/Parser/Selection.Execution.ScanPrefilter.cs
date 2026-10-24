@@ -482,7 +482,7 @@ partial class Selection
             ? IsColumnAgainstStableValue(source, equalLeft, equalRight, planSources)
             : conjunct.TryGetRangeOperands(out var rangeLeft, out _, out var rangeRight)
                 ? IsColumnAgainstStableValue(source, rangeLeft, rangeRight, planSources)
-                : conjunct.TryGetLikeOperands(out var subject, out var pattern, out var escape)
+                : conjunct.TryGetLikeOperands(out var subject, out var pattern, out var escape, out _)
                     ? IsSourceLocalLike(source, subject, pattern, escape, planSources)
                     : IsSourceLocalBetween(source, conjunct, planSources);
 

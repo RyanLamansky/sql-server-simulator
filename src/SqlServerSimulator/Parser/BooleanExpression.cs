@@ -1666,15 +1666,16 @@ internal abstract class BooleanExpression : ExpressionNode
 
     /// <summary>
     /// Exposes the subject, pattern and optional escape when this predicate is
-    /// a <c>LIKE</c> or <c>NOT LIKE</c>; returns false otherwise. Lets the join
-    /// scan prefilter push a pattern match on one source's column below the
-    /// join.
+    /// a <c>LIKE</c> or <c>NOT LIKE</c>, and which; returns false otherwise.
+    /// Lets the join scan prefilter push a pattern match on one source's
+    /// column below the join, and an index seek a <c>LIKE</c> on its prefix.
     /// </summary>
-    internal virtual bool TryGetLikeOperands([NotNullWhen(true)] out Expression? subject, [NotNullWhen(true)] out Expression? pattern, out Expression? escape)
+    internal virtual bool TryGetLikeOperands([NotNullWhen(true)] out Expression? subject, [NotNullWhen(true)] out Expression? pattern, out Expression? escape, out bool negated)
     {
         subject = null;
         pattern = null;
         escape = null;
+        negated = false;
         return false;
     }
 
@@ -3433,11 +3434,12 @@ internal abstract class BooleanExpression : ExpressionNode
             && (this.right is not Value { Constant: { IsNull: false, Type.Category: SqlTypeCategory.String } pattern }
                 || pattern.AsString is not ['%' or '_', ..]);
 
-        internal override bool TryGetLikeOperands([NotNullWhen(true)] out Expression? subject, [NotNullWhen(true)] out Expression? pattern, out Expression? escape)
+        internal override bool TryGetLikeOperands([NotNullWhen(true)] out Expression? subject, [NotNullWhen(true)] out Expression? pattern, out Expression? escape, out bool negated)
         {
             subject = this.left;
             pattern = this.right;
             escape = this.escape;
+            negated = this.negated;
             return true;
         }
 

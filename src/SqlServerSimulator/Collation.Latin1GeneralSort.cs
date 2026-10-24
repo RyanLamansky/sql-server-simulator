@@ -616,6 +616,12 @@ internal abstract partial class Collation
 
         internal override bool WeightsNul => this.table.LegacySortOrder;
 
+        // Its letters and digits order alphabetically, and only ligatures
+        // weigh as more than one character, never two characters as one;
+        // outside the table's repertoire it orders and matches as its inner
+        // invariant-culture body does.
+        internal override bool SortsAsciiPrefixesTogether => true;
+
         /// <summary>Whether this is varchar data under sort order 52 (or the Pref name's 53, which weighs alike).</summary>
         internal bool UsesSortOrder52 => ReferenceEquals(this.table, sortOrder52);
 

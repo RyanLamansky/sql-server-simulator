@@ -381,6 +381,22 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
     internal virtual int PreferenceCompare(string x, string y) => 0;
 
     /// <summary>
+    /// Whether every string starting with a run of ASCII letters and digits,
+    /// under this collation's comparison and its <c>LIKE</c> matching alike,
+    /// sorts at or after the run and before the run's successor — the run
+    /// with its last letter or digit stepped on, a <c>z</c>, <c>Z</c> or
+    /// <c>9</c> dropped and the one before it stepped instead (<c>Sm</c> →
+    /// <c>Sn</c>, <c>Az</c> → <c>B</c>). That is what lets an index seek
+    /// confine a <c>LIKE</c> to its literal prefix. It holds where those
+    /// characters order alphabetically, digits apart, and no two of them weigh
+    /// as one: the binary collations and the invariant-culture order the Latin1
+    /// General and <c>SQL_</c> names share, and in no culture's own order,
+    /// which may contract a pair (Danish <c>aa</c>, Hungarian <c>cs</c>, Czech
+    /// <c>ch</c>).
+    /// </summary>
+    internal virtual bool SortsAsciiPrefixesTogether => false;
+
+    /// <summary>
     /// Whether <c>CHAR(0)</c> is a character of its own here — the lowest
     /// weight, never ignored — as it is in <c>varchar</c> data under every
     /// non-binary <c>SQL_</c> collation, where a Windows collation and all
@@ -669,6 +685,8 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
 
         internal override Collation ForVarcharStorage() => this.varcharBody ?? this;
 
+        internal override bool SortsAsciiPrefixesTogether => this.compareInfo.Name.Length == 0 && this.primaryFamily is null;
+
         internal override WeightlessCharacters Weightless =>
             this.weightless ??= WeightlessCharacters.For(this.version, this.compareInfo, this.equalityOptions);
 
@@ -825,6 +843,8 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
 
         internal override Collation ForVarcharStorage() => this.varcharBody;
 
+        internal override bool SortsAsciiPrefixesTogether => true;
+
         // _BIN2 pads the shorter operand with spaces, so 'a' sorts after 'a' +
         // CHAR(31); the pre-BIN2 form doesn't for Unicode data (probed
         // 2026-10-02 against SQL Server 2025).
@@ -904,6 +924,8 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
         internal override Encoding StorageEncoding => this.encoding;
 
         internal override int AnsiCodePage => this.ansiCodePage;
+
+        internal override bool SortsAsciiPrefixesTogether => true;
 
         public override int Compare(string? x, string? y) =>
             x is null

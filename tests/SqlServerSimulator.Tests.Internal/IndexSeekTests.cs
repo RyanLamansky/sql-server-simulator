@@ -1427,6 +1427,76 @@ public sealed class IndexSeekTests
         Contains(4, rows);
     }
 
+    // ---- a LIKE seeks the range its literal prefix confines its matches to
+    // (LikeSeek): the LIKE stays residual, so the seek only narrows. ----
+
+    private const string People = """
+        create table p (id int not null primary key, last nvarchar(50) not null, first nvarchar(50) not null);
+        create index ix_last on p (last, first);
+        insert p values (1, N'Smith', N'Ann'), (2, N'Smythe', N'Bo'), (3, N'Slater', N'Cy'), (4, N'Snow', N'Di'),
+            (5, N'Jones', N'Ed'), (6, N'smith', N'Al'), (7, N'Sm', N'Zed'), (8, N'Sz', N'Flo')
+        """;
+
+    [TestMethod]
+    public void LikeOnALeadingKeyColumn_SeeksItsPrefix()
+    {
+        var (trace, rows) = Run(People, "select id from p where last like N'Sm%'");
+        Contains("LikeSeek(p)", trace);
+        DoesNotContain("Scan(p)", trace);
+        CollectionAssert.AreEquivalent(new object[] { 1, 2, 6, 7 }, rows);
+    }
+
+    [TestMethod]
+    public void TheEfStartsWithShape_SeeksItsPrefix()
+    {
+        var (trace, rows) = Run(People, """
+            declare @p nvarchar(50) = N'Sm%', @n int = 2;
+            select top (@n) id from p where last like @p escape N'\' order by first
+            """);
+        Contains("LikeSeek(p)", trace);
+        CollectionAssert.AreEqual(new object[] { 6, 1 }, rows);
+    }
+
+    [TestMethod]
+    [DataRow("%m%")]
+    [DataRow("_m%")]
+    [DataRow("[S]m%")]
+    [DataRow("-m%")]
+    public void APatternWithNoLeadingLetterOrDigit_Scans(string pattern)
+    {
+        var (trace, _) = Run(People, $"select id from p where last like N'{pattern}'");
+        Contains("Scan(p)", trace);
+        DoesNotContain("LikeSeek(p)", trace);
+    }
+
+    [TestMethod]
+    public void NotLike_Scans()
+    {
+        var (trace, rows) = Run(People, "select id from p where last not like N'S%'");
+        Contains("Scan(p)", trace);
+        CollectionAssert.AreEqual(new object[] { 5 }, rows);
+    }
+
+    [TestMethod]
+    public void UnderACultureOrderThatMayContract_TheLikeScans()
+    {
+        var (trace, rows) = Run("""
+            create table d (id int not null primary key, name nvarchar(20) collate Danish_Norwegian_CI_AS not null);
+            create index ix on d (name);
+            insert d values (1, N'Aalborg'), (2, N'Abe')
+            """, "select id from d where name like N'Aa%'");
+        Contains("Scan(d)", trace);
+        CollectionAssert.AreEqual(new object[] { 1 }, rows);
+    }
+
+    [TestMethod]
+    public void AnOrderedReadByTheLikeColumn_WalksOnlyThePrefixRange()
+    {
+        var (trace, rows) = Run(People, "select top (3) id from p where last like N'Sm%' order by last, first");
+        Contains("OrderedScan(p)", trace);
+        CollectionAssert.AreEqual(new object[] { 7, 6, 1 }, rows);
+    }
+
     // ---- equality-prefix + range continuation (PrefixRangeSeek): a stable
     // range bound on the key column immediately after the matched equality
     // prefix extends the seek predicate one column further — a real index

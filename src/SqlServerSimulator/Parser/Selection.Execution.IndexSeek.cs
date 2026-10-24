@@ -71,6 +71,7 @@ internal sealed partial class Selection
         public List<BooleanExpression>? Conjuncts;
         public Dictionary<int, Expression[]>? Equalities;
         public Dictionary<int, RangeBoundExprs>? Bounds;
+        public Dictionary<int, RangeBoundExprs>? LikeBounds;
     }
 
     /// <summary>
@@ -321,6 +322,29 @@ internal sealed partial class Selection
             seekedCandidates = rangeCandidates;
             keyedOrdinals = FindRangeLeadingKey(table, bounds, out _) is { } rangeKey ? [rangeKey[0]] : null;
             return new SeekOutcome(RowSecurity.FilterRows(table, rangeRows, batch), keyedOrdinals);
+        }
+
+        // Nor a comparison range — a LIKE on a leading key column seeks the
+        // range its literal prefix confines its matches to, as real's plan
+        // seeks one dynamically. Its candidates over-approximate the LIKE, so
+        // they name no keyed column. A read locking rows for its transaction
+        // or fencing a range keeps the scan whose locks it was settled for.
+        if (!scanFences && keyFence is null && qualifier is null && !plan.RowTxScoped)
+        {
+            var likeBounds = shape?.LikeBounds;
+            if (likeBounds is null)
+            {
+                likeBounds = CollectLikeBounds(source, conjuncts, planSources);
+                _ = shape?.LikeBounds = likeBounds;
+            }
+            if (likeBounds.Count != 0
+                && TrySeekByRange(source, table, plan, batch, snapshotXid, outerResolver, likeBounds, qualifier: null, out var likeRows, out var likeCandidates))
+            {
+                IndexSeekDiagnostics.Sink?.Add($"Seek({table.Name})");
+                IndexSeekDiagnostics.Sink?.Add($"LikeSeek({table.Name})");
+                seekedCandidates = likeCandidates;
+                return new SeekOutcome(RowSecurity.FilterRows(table, likeRows, batch));
+            }
         }
 
         if (qualifier is not null)
@@ -851,13 +875,17 @@ internal sealed partial class Selection
 
     // The lower / upper bound expressions collected for one column from range
     // conjuncts. First writer wins per side: a redundant second bound (e.g. a
-    // looser `col > 0` alongside `col > 5`) stays as a residual filter.
+    // looser `col > 0` alongside `col > 5`) stays as a residual filter. A
+    // column bounded by a LIKE instead carries its pattern and escape, whose
+    // range is settled per execution from their values (EvaluateLikeBounds).
     private sealed class RangeBoundExprs
     {
         public Expression? Lower;
         public bool LowerInclusive;
         public Expression? Upper;
         public bool UpperInclusive;
+        public Expression? LikePattern;
+        public Expression? LikeEscape;
     }
 
     /// <summary>
@@ -1173,6 +1201,8 @@ internal sealed partial class Selection
         RangeBoundExprs bound, SqlType columnType, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver,
         out SqlType common, out bool hasLower, out SqlValue lowerValue, out bool hasUpper, out SqlValue upperValue)
     {
+        if (bound.LikePattern is { } pattern)
+            return EvaluateLikeBounds(pattern, bound.LikeEscape, columnType, batch, outerResolver, out common, out hasLower, out lowerValue, out hasUpper, out upperValue);
         common = columnType;
         hasLower = bound.Lower is not null;
         hasUpper = bound.Upper is not null;
@@ -1208,6 +1238,78 @@ internal sealed partial class Selection
         if (hasUpper)
             upperValue = upperValue.CoerceTo(common);
         return BoundEval.Value;
+    }
+
+    // The range a LIKE's literal prefix confines its matches to
+    // (LikePrefixRange), read under the column's own collation. A pattern
+    // matched under another (an explicit COLLATE), one offering no letter or
+    // digit to seek on, and a pattern or escape the LIKE would raise on all
+    // decline to the scan, which matches or raises as the LIKE does; a NULL
+    // pattern matches nothing.
+    private static BoundEval EvaluateLikeBounds(
+        Expression patternExpr, Expression? escapeExpr, SqlType columnType, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver,
+        out SqlType common, out bool hasLower, out SqlValue lowerValue, out bool hasUpper, out SqlValue upperValue)
+    {
+        common = columnType;
+        hasLower = hasUpper = false;
+        lowerValue = upperValue = default;
+        if (columnType.Category != SqlTypeCategory.String || columnType.IsLob || columnType.Collation is not { SortsAsciiPrefixesTogether: true } collation)
+            return BoundEval.Decline;
+        SqlValue pattern, escape;
+        try
+        {
+            var runtime = new RuntimeContext(name => outerResolver is { } resolve ? resolve(name) : SqlValue.Null(SqlType.Int32), batch);
+            pattern = patternExpr.Run(runtime);
+            escape = escapeExpr?.Run(runtime) ?? SqlValue.Null(SqlType.Varchar);
+        }
+        catch (SimulatedSqlException)
+        {
+            return BoundEval.Decline;
+        }
+        if (pattern.IsNull)
+            return BoundEval.Null;
+        if (pattern.Type.Category != SqlTypeCategory.String
+            || Collation.Resolve(columnType, pattern.Type) is not { } resolved || !ReferenceEquals(resolved.Collation, collation)
+            || (!escape.IsNull && (escape.Type.Category != SqlTypeCategory.String || escape.AsString.Length != 1))
+            || !LikePrefixRange.TryGet(pattern.AsString, escape.IsNull ? null : escape.AsString[0], out var lower, out var upper))
+        {
+            return BoundEval.Decline;
+        }
+        // Bounds in the column's own type read the ordered view every other
+        // seek of the column shares. A prefix longer than the column holds
+        // nothing the pattern can match, however its bounds convert.
+        try
+        {
+            lowerValue = SqlValue.FromNVarchar(lower).CoerceTo(columnType);
+            if (upper is not null)
+                upperValue = SqlValue.FromNVarchar(upper).CoerceTo(columnType);
+        }
+        catch (Exception ex) when (ex is NotSupportedException or SimulatedSqlException)
+        {
+            return BoundEval.Decline;
+        }
+        hasLower = true;
+        hasUpper = upper is not null;
+        return BoundEval.Value;
+    }
+
+    // Per indexable string column of THIS source, the first LIKE conjunct over
+    // it whose pattern and escape are stable, as a bound LikePrefixRange
+    // settles from their values per execution. NOT LIKE bounds nothing.
+    private static Dictionary<int, RangeBoundExprs> CollectLikeBounds(FromSource source, List<BooleanExpression> conjuncts, FromSource[]? planSources)
+    {
+        var bounds = new Dictionary<int, RangeBoundExprs>();
+        foreach (var conjunct in conjuncts)
+        {
+            if (conjunct.TryGetLikeOperands(out var subject, out var pattern, out var escape, out var negated) && !negated
+                && TryIdentifyIndexableColumn(source, subject, out var ordinal) && !bounds.ContainsKey(ordinal)
+                && IsStableValueSide(pattern, source, allowCorrelatedColumnValue: true, planSources)
+                && (escape is null || IsStableValueSide(escape, source, allowCorrelatedColumnValue: true, planSources)))
+            {
+                bounds[ordinal] = new RangeBoundExprs { LikePattern = pattern, LikeEscape = escape, LowerInclusive = true };
+            }
+        }
+        return bounds;
     }
 
     // Records one bound for a column, first-writer-wins per side.
@@ -1536,6 +1638,20 @@ internal sealed partial class Selection
                 continue;
             }
 
+            // A LIKE on the first order column narrows the walk to the range
+            // its prefix confines its matches to, a SERIALIZABLE reader's key
+            // walk aside.
+            if (conjunct.TryGetLikeOperands(out var likeSubject, out var likePattern, out var likeEscape, out var likeNegated))
+            {
+                if (!likeNegated && plan.SerializableRangeMode is null && orderColumnBounds.LikePattern is null
+                    && TryIdentifyIndexableColumn(source, likeSubject, out var likeOrd) && likeOrd == firstOrderOrdinal
+                    && IsStableValueSide(likePattern, source) && (likeEscape is null || IsStableValueSide(likeEscape, source)))
+                {
+                    (orderColumnBounds.LikePattern, orderColumnBounds.LikeEscape) = (likePattern, likeEscape);
+                }
+                continue;
+            }
+
             if (conjunct.TryGetBetweenOperands(out var value, out var lower, out var upper)
                 && TryIdentifyIndexableColumn(source, value, out var betweenOrd))
             {
@@ -1591,6 +1707,23 @@ internal sealed partial class Selection
                 case BoundEval.Decline: return false;
                 case BoundEval.Null: orderedSources = SeekedSource(source, [], seekOrdinals); return true;
                 default: commons[pinnedLength] = hasLower ? SqlType.Promote(commons[pinnedLength], upperCommon) : upperCommon; hasUpper = true; upperInclusive = orderColumnBounds.UpperInclusive; break;
+            }
+        }
+        if (!hasLower && !hasUpper && orderColumnBounds.LikePattern is { } likeFold)
+        {
+            switch (EvaluateLikeBounds(likeFold, orderColumnBounds.LikeEscape, orderColumnType, batch, outerResolver,
+                out _, out var likeHasLower, out var likeLower, out var likeHasUpper, out var likeUpper))
+            {
+                // A pattern with no prefix to seek on leaves the walk whole.
+                case BoundEval.Decline:
+                    break;
+                case BoundEval.Null:
+                    orderedSources = SeekedSource(source, [], seekOrdinals);
+                    return true;
+                default:
+                    (hasLower, lowerValue, lowerInclusive) = (likeHasLower, likeLower, true);
+                    (hasUpper, upperValue, upperInclusive) = (likeHasUpper, likeUpper, false);
+                    break;
             }
         }
         if (hasLower)
