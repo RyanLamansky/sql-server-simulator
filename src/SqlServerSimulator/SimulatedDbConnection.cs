@@ -2101,7 +2101,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <c>claude..#foo</c>) all resolve to the local session's table — the
     /// database qualifier is effectively ignored for <c>#</c> names.
     /// </remarks>
-    internal readonly ConcurrentDictionary<string, HeapTable> TempTables = new(BuiltInToken.Comparer);
+    internal readonly ConcurrentDictionary<string, HeapTable> TempTables = new(concurrencyLevel: 1, capacity: 0, BuiltInToken.Comparer);
 
     private int temporaryObjectSuffix;
 
@@ -2253,7 +2253,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// handle survives batch boundaries and a transaction rollback but is
     /// invisible to every other session (Msg 8179), and dropped at close.
     /// </summary>
-    internal readonly ConcurrentDictionary<int, PreparedXmlDocument> PreparedXmlDocuments = new();
+    internal readonly ConcurrentDictionary<int, PreparedXmlDocument> PreparedXmlDocuments = new(concurrencyLevel: 1, capacity: 0);
 
     /// <summary>
     /// The symmetric keys the session has opened (<c>sys.openkeys</c>), in
@@ -2722,7 +2722,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// session mid-batch, a blocked one for instance (probed 2026-10-17
     /// against SQL Server 2025).
     /// </summary>
-    internal readonly ConcurrentDictionary<Cursor, string> FrameCursors = new(ReferenceEqualityComparer.Instance);
+    internal readonly ConcurrentDictionary<Cursor, string> FrameCursors = new(concurrencyLevel: 1, capacity: 0, ReferenceEqualityComparer.Instance);
 
     /// <summary>The statements prepared on this session, by handle.</summary>
     internal readonly Dictionary<int, PreparedStatement> PreparedStatements = [];

@@ -29,8 +29,13 @@ internal static class XeSessionEvents
             XeEvents.ErrorReported(connection, 5701, 10, 2, $"Changed database context to '{connection.CurrentDatabase.Name}'.", intercepted: false);
             XeEvents.ErrorReported(connection, 5703, 10, 1, connection.Language.ChangedMessage, intercepted: false);
         }
-        if (!XeEvents.Takes(simulation, XeEventKind.Login))
-            return;
+        if (XeEvents.Takes(simulation, XeEventKind.Login))
+            FireLogin(connection, pooled);
+    }
+
+    // Apart from the check above, since the event's data closure is allocated
+    // as this is entered.
+    private static void FireLogin(SimulatedDbConnection connection, bool pooled) =>
         XeEvents.Fire(connection, XeEventKind.Login, @event => XeEvents.Data(@event,
             ("is_cached", XeValue.FromBoolean(pooled)),
             ("is_recovered", XeValue.FromBoolean(false)),
@@ -40,19 +45,21 @@ internal static class XeSessionEvents
             ("options", XeValue.FromBinary(new byte[12])),
             ("options_text", XeValue.FromUnicode(OptionsText(connection))),
             ("database_name", XeValue.FromUnicode(""))));
-    }
 
     /// <summary><c>logout</c> as a session that logged in ends: its duration since the login, its counters read zero.</summary>
     public static void Logout(SimulatedDbConnection connection)
     {
-        if (!XeEvents.Takes(connection.Simulation, XeEventKind.Logout))
-            return;
+        if (XeEvents.Takes(connection.Simulation, XeEventKind.Logout))
+            FireLogout(connection);
+    }
+
+    // Apart from the check above, as FireLogin is.
+    private static void FireLogout(SimulatedDbConnection connection) =>
         XeEvents.Fire(connection, XeEventKind.Logout, @event => XeEvents.Data(@event,
             ("is_cached", XeValue.FromBoolean(false)),
             ("is_recovered", XeValue.FromBoolean(false)),
             ("is_dac", XeValue.FromBoolean(false)),
             ("duration", XeValue.FromUnsigned((ulong)Math.Max(0, (DateTime.UtcNow - connection.LoginTimeUtc).TotalMicroseconds)))));
-    }
 
     /// <summary>
     /// <c>existing_connection</c> into <paramref name="started"/> alone, for
