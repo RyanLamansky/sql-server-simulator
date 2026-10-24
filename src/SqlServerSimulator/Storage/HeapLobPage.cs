@@ -12,7 +12,7 @@ namespace SqlServerSimulator.Storage;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Layout (offsets into <see cref="Bytes"/>):
+/// Layout (offsets into <see cref="bytes"/>):
 /// <list type="table">
 /// <item><description>[0]      Page type (1 byte). <c>0x02</c> = LOB data page.</description></item>
 /// <item><description>[1-2]    Payload length on this page (UInt16 LE).</description></item>
@@ -42,29 +42,46 @@ internal sealed class HeapLobPage
 
     private const byte LobDataPageType = 0x02;
 
-    public readonly byte[] Bytes = new byte[PageSize];
+    /// <summary>
+    /// The page's header and payload, in an array no longer than the largest
+    /// payload the page has held: a short <c>nvarchar(max)</c> value — most of
+    /// what EF Core's default string mapping stores, every one of them off-row
+    /// here — costs its own length rather than a whole page. A recycled page
+    /// taking a longer payload moves to a longer array; a reader takes the
+    /// array once per access, so one a writer replaces mid-read leaves the
+    /// reader on the old array, as a payload rewritten in place leaves it on
+    /// torn bytes, for its sequence check to discard either way.
+    /// </summary>
+    private byte[] bytes = new byte[HeaderSize];
 
     public HeapLobPage()
     {
-        this.Bytes[0] = LobDataPageType;
-        BinaryPrimitives.WriteInt32LittleEndian(this.Bytes.AsSpan(3, 4), -1);
+        this.bytes[0] = LobDataPageType;
+        BinaryPrimitives.WriteInt32LittleEndian(this.bytes.AsSpan(3, 4), -1);
     }
 
-    public byte PageType => this.Bytes[0];
+    public byte PageType => this.bytes[0];
 
     public ushort PayloadLength
     {
-        get => BinaryPrimitives.ReadUInt16LittleEndian(this.Bytes.AsSpan(1, 2));
-        set => BinaryPrimitives.WriteUInt16LittleEndian(this.Bytes.AsSpan(1, 2), value);
+        get => BinaryPrimitives.ReadUInt16LittleEndian(this.bytes.AsSpan(1, 2));
+        set => BinaryPrimitives.WriteUInt16LittleEndian(this.bytes.AsSpan(1, 2), value);
     }
 
     public int NextPageIndex
     {
-        get => BinaryPrimitives.ReadInt32LittleEndian(this.Bytes.AsSpan(3, 4));
-        set => BinaryPrimitives.WriteInt32LittleEndian(this.Bytes.AsSpan(3, 4), value);
+        get => BinaryPrimitives.ReadInt32LittleEndian(this.bytes.AsSpan(3, 4));
+        set => BinaryPrimitives.WriteInt32LittleEndian(this.bytes.AsSpan(3, 4), value);
     }
 
-    public Span<byte> Payload => this.Bytes.AsSpan(HeaderSize, this.PayloadLength);
+    public Span<byte> Payload
+    {
+        get
+        {
+            var page = this.bytes;
+            return page.AsSpan(HeaderSize, BinaryPrimitives.ReadUInt16LittleEndian(page.AsSpan(1, 2)));
+        }
+    }
 
     /// <summary>
     /// Writes <paramref name="data"/> into this page's payload area, sets
@@ -76,7 +93,14 @@ internal sealed class HeapLobPage
     {
         if (data.Length > MaxPayload)
             throw new ArgumentException($"Payload of {data.Length} bytes exceeds the per-page maximum of {MaxPayload}.", nameof(data));
-        data.CopyTo(this.Bytes.AsSpan(HeaderSize));
+        var page = this.bytes;
+        if (page.Length < HeaderSize + data.Length)
+        {
+            var longer = new byte[HeaderSize + data.Length];
+            page.AsSpan(0, HeaderSize).CopyTo(longer);
+            this.bytes = page = longer;
+        }
+        data.CopyTo(page.AsSpan(HeaderSize));
         this.PayloadLength = (ushort)data.Length;
         this.NextPageIndex = -1;
     }
