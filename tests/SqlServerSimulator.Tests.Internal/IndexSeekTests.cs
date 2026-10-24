@@ -1829,6 +1829,40 @@ public sealed class IndexSeekTests
         }
     }
 
+    // ---- under READ_COMMITTED_SNAPSHOT the ordered walk applies while the
+    // table carries no version chain, resolving each row through the version
+    // store; a chain sends the read back to the sort. ----
+
+    [TestMethod]
+    public void UnderRcsi_AnOrderedReadOfAChainlessTable_WalksTheIndex()
+    {
+        var simulation = new Simulation();
+        using var reader = simulation.CreateDbConnection();
+        reader.Open();
+        Exec(reader, "create database d; alter database d set read_committed_snapshot on");
+        reader.ChangeDatabase("d");
+        Exec(reader, "create table t (id int primary key, name nvarchar(20) not null); create index ix on t (name); insert t values (1, N'b'), (2, N'a')");
+        IndexSeekDiagnostics.Sink = [];
+        try
+        {
+            AreEqual(2, ReadVal(reader, "select top (1) id from t order by name"));
+            Contains("OrderedScan(t)", IndexSeekDiagnostics.Sink);
+
+            using var writer = simulation.CreateDbConnection();
+            writer.Open();
+            writer.ChangeDatabase("d");
+            Exec(writer, "begin tran; update t set name = N'c' where id = 2");
+            IndexSeekDiagnostics.Sink = [];
+            AreEqual(2, ReadVal(reader, "select top (1) id from t order by name"));
+            DoesNotContain("OrderedScan(t)", IndexSeekDiagnostics.Sink);
+            Exec(writer, "rollback");
+        }
+        finally
+        {
+            IndexSeekDiagnostics.Sink = null;
+        }
+    }
+
     // ---- ORDER BY elimination: a single NOT-NULL leading-key-column sort
     // streams in key order instead of buffering + sorting. Observable if wrong,
     // so these assert the exact output sequence, not just the trace. The setup

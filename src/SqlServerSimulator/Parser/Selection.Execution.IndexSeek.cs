@@ -1515,10 +1515,16 @@ internal sealed partial class Selection
         // filter predicate, which would skip rows it hides.
         if (RowSecurity.For(batch, table) is { Filter: not null })
             return false;
-        // A SNAPSHOT / RCSI read materializes through the version store, whose
-        // chain sweep appends rows in arbitrary order — an ordered scan couldn't
-        // stay ordered, so sort as before.
-        if (batch.ResolveSnapshotXidForRead(table, plan) is not null)
+        // A SNAPSHOT / RCSI read sees each row as the version store resolves
+        // it. Over a table carrying no version chain every row's visible
+        // version is its live one, under its live key, so the ordered walk
+        // reads the snapshot in order; a chain can carry an older key, or a
+        // row the live index no longer holds, so a table carrying one sorts.
+        // Settled again once the walk's order is read, against any write
+        // landing or rolling back meanwhile (see SnapshotOrderHolds).
+        var snapshotXid = batch.ResolveSnapshotXidForRead(table, plan);
+        var generation = Volatile.Read(ref table.Heap.MutationGeneration);
+        if (snapshotXid is not null && (plan.RowTxScoped || !table.Heap.RowVersions.IsEmptyLockFree()))
             return false;
 
         // Parse ORDER BY into a column-ordinal list under one shared direction.
@@ -1811,6 +1817,15 @@ internal sealed partial class Selection
             : cache.OrderedSeek(
                 table.Heap, source.StoredSchema, source.LobStore, fullPrefix, commons,
                 lowerKey, lowerKeyInclusive, upperKey, upperKeyInclusive);
+        if (snapshotXid is { } snapshot)
+        {
+            if (!SnapshotOrderHolds(table, generation))
+                return false;
+            IndexSeekDiagnostics.Sink?.Add($"OrderedScan({table.Name})");
+            skipped = excluders.Count == 0 ? skip : 0;
+            orderedSources = SeekedSource(source, MaterializeOrderedSnapshot(table, batch, snapshot, candidates, descending, skipped), seekOrdinals, orderedSeeks);
+            return true;
+        }
 
         IndexSeekDiagnostics.Sink?.Add($"OrderedScan({table.Name})");
         // The ordered scan replaces the source's own enumerable, so a
@@ -2112,6 +2127,49 @@ internal sealed partial class Selection
                 continue;
             addresses?.Record(bytes, page, slot);
             _ = rest?.LastRead = bytes;
+            yield return bytes;
+        }
+    }
+
+    // Whether a snapshot's ordered walk may read the order just taken:
+    // still no version chain on the table, and no write since the walk first
+    // looked. A chain appearing means a row changed since the snapshot, which
+    // its live key could misplace; a write and its rollback both inside the
+    // span leave no chain but may have moved a key the order was read under.
+    // A write after this point reaches the walk only through the version
+    // store, which hands each row back as the snapshot found it, at the place
+    // the order holds for it.
+    private static bool SnapshotOrderHolds(HeapTable table, long generation) =>
+        table.Heap.RowVersions.IsEmptyLockFree() && Volatile.Read(ref table.Heap.MutationGeneration) == generation;
+
+    // The ordered walk of a SNAPSHOT / RCSI read (TryApplyOrderedScan): each
+    // address resolves to the version its snapshot sees, a row inserted since
+    // the snapshot dropping out and one deleted since reading as it was. The
+    // order holds every row the snapshot sees, so a statement waiting on its
+    // client reads on from it as it stands.
+    private static IEnumerable<byte[]> MaterializeOrderedSnapshot(
+        HeapTable table, BatchContext batch, long snapshotXid, (int Page, int Slot)[] order, bool descending, int skip)
+    {
+        var io = batch.Connection.StatementIo?.Touch(table);
+        _ = io?.ScanCount += 1;
+        var lastPage = -1;
+        var reader = batch.Connection.LockOwner;
+        var addresses = batch.CurrentStatement.RowAddresses;
+        var ownWrites = new BatchContext.OwnWriteView(batch, table);
+        for (var i = 0; i < order.Length; i++)
+        {
+            var (page, slot) = order[descending ? order.Length - 1 - i : i];
+            _ = table.Heap.TryReadSlot(page, slot, out var current, out var sequence);
+            if ((ownWrites.TryRead(batch, table, (page, slot), out var found) ? found : Storage.VersionStore.ReadSnapshotSlot(table, (page, slot), current, sequence, snapshotXid, reader)) is not { } bytes)
+                continue;
+            io?.Enter(page, ref lastPage);
+            if (skip > 0)
+            {
+                skip--;
+                batch.PollCancellation();
+                continue;
+            }
+            addresses?.Record(bytes, page, slot);
             yield return bytes;
         }
     }
