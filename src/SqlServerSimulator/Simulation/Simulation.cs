@@ -4536,6 +4536,10 @@ public sealed partial class Simulation
                 break;
             foreach (var (_, trigger) in database.DdlTriggers)
                 maySend |= (trigger.BodyReach() & TriggerBodyReach.SendsRows) != 0;
+            // A database still waiting on its seed holds no DML trigger: msdb's
+            // seed creates none, and creating one there seeds it first.
+            if (!database.SeedComplete)
+                continue;
             foreach (var (_, schema) in database.Schemas)
             {
                 foreach (var (_, trigger) in schema.Triggers)
@@ -4629,9 +4633,15 @@ public sealed partial class Simulation
         }
     }
 
-    /// <summary>Whether any schema of <paramref name="database"/> holds a DML trigger, cached per schema version.</summary>
+    /// <summary>
+    /// Whether any schema of <paramref name="database"/> holds a DML trigger,
+    /// cached per schema version; none while it waits on its seed, which
+    /// creates none, and which creating one there runs first.
+    /// </summary>
     private static bool HasDmlTrigger(Simulation simulation, Database database)
     {
+        if (!database.SeedComplete)
+            return false;
         var version = Volatile.Read(ref simulation.SchemaVersion);
         if (Volatile.Read(ref database.DmlTriggerProbeVersion) == version)
             return database.HasDmlTriggerProbe;

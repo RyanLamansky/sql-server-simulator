@@ -35,6 +35,20 @@ public sealed class BackupRestoreTests
     }
 
     [TestMethod]
+    public void ABackupOfMsdb_AsTheSimulationsFirstTouchOfIt_HoldsItsShippedTables()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            backup database msdb to disk = N'm.bak';
+            restore database msdb_copy from disk = N'm.bak'
+                with move 'MSDBData' to '/var/opt/mssql/data/msdb_copy.mdf', move 'MSDBLog' to '/var/opt/mssql/data/msdb_copy.ldf'
+            """);
+        var copied = simulation.ExecuteScalar("select count(*) from msdb_copy.sys.tables");
+        IsGreaterThan(0, (int)copied!);
+        AreEqual(simulation.ExecuteScalar("select count(*) from msdb.sys.tables"), copied);
+    }
+
+    [TestMethod]
     public void Restore_PutsTheIdentityBackWhereTheBackupLeftIt()
     {
         var simulation = WithDatabase();

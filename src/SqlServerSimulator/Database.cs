@@ -74,8 +74,18 @@ internal sealed partial class Database
     /// <see cref="DefaultSchemaName"/>. Comparer is <see cref="Collation"/>
     /// at the database's construction time; doesn't rebuild if a later
     /// <c>ALTER DATABASE COLLATE</c> shifts <see cref="Collation"/>.
+    /// Reading it runs the deferred seed first (<see cref="EnsureSeeded"/>),
+    /// so no walk of a database's objects meets msdb without its shipped
+    /// content, whichever path reached it — a backup's capture among them.
     /// </summary>
-    public readonly ConcurrentDictionary<string, Schema> Schemas;
+    public ConcurrentDictionary<string, Schema> Schemas
+    {
+        get
+        {
+            this.EnsureSeeded();
+            return field;
+        }
+    }
 
     /// <summary>
     /// The work seeding this database's shipped content — only msdb's, and
@@ -88,7 +98,7 @@ internal sealed partial class Database
     private Action? pendingSeed;
 
     /// <summary>True for every database but msdb before its first use (see <see cref="EnsureSeeded"/>).</summary>
-    private volatile bool seedComplete = true;
+    internal volatile bool SeedComplete = true;
 
     /// <summary>The thread running the seed, so its own re-entry (the seed reads msdb) passes straight through.</summary>
     private volatile int seedingThreadId;
@@ -99,16 +109,17 @@ internal sealed partial class Database
     public void SeedLazily(Action seed)
     {
         this.pendingSeed = seed;
-        this.seedComplete = false;
+        this.SeedComplete = false;
     }
 
     /// <summary>
     /// Runs the deferred <see cref="SeedLazily"/> work once, before this
     /// database's shipped content is read; a single volatile read for an
     /// already seeded database, which is every one but msdb and msdb after its
-    /// first use. Called at every gateway that reaches a database's schema
-    /// objects — object / type resolution, catalog-view projection, and the
-    /// Agent / Mail / backup-history helpers that read msdb's tables directly.
+    /// first use. <see cref="Schemas"/> calls it on every read, and so does
+    /// every gateway reaching the seed's other content — the grants it makes
+    /// on its objects — before it reads: catalog-view projection and the
+    /// Agent / Mail / backup-history helpers.
     /// </summary>
     /// <remarks>
     /// The seed itself reads msdb (its SQL resolves msdb objects), so the
@@ -118,11 +129,16 @@ internal sealed partial class Database
     /// </remarks>
     public void EnsureSeeded()
     {
-        if (this.seedComplete || this.seedingThreadId == Environment.CurrentManagedThreadId)
-            return;
+        if (!this.SeedComplete && this.seedingThreadId != Environment.CurrentManagedThreadId)
+            this.Seed();
+    }
+
+    // Kept out of line so EnsureSeeded's check inlines into every Schemas read.
+    private void Seed()
+    {
         lock (this.seedGate)
         {
-            if (this.seedComplete)
+            if (this.SeedComplete)
                 return;
             this.seedingThreadId = Environment.CurrentManagedThreadId;
             try
@@ -134,7 +150,7 @@ internal sealed partial class Database
                 this.seedingThreadId = 0;
             }
             this.pendingSeed = null;
-            this.seedComplete = true;
+            this.SeedComplete = true;
         }
     }
 

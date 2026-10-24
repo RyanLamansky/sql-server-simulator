@@ -6,30 +6,23 @@ namespace SqlServerSimulator;
 /// msdb's shipped content — the Agent, Mail and backup-history tables and the
 /// policy views — is seeded on first use rather than at construction, so a
 /// consumer that never touches msdb (the fast parallel-test path) pays none of
-/// it. These reach msdb's <c>dbo</c> schema directly, which doesn't trigger the
-/// seed, to observe the before/after state SQL never shows.
+/// it. These read the seed's state directly, to observe the before/after state
+/// SQL never shows: any read of msdb's schemas runs the seed.
 /// </summary>
 [TestClass]
 public sealed class LazyMsdbSeedingTests
 {
-    private static System.Collections.Concurrent.ConcurrentDictionary<string, Storage.HeapTable> MsdbDbo(Simulation simulation) =>
-        simulation.Databases["msdb"].Schemas["dbo"].HeapTables;
+    private static bool MsdbSeeded(Simulation simulation) => simulation.Databases["msdb"].SeedComplete;
 
     [TestMethod]
-    public void AFreshSimulation_LeavesMsdbUnseeded()
-    {
-        var simulation = new Simulation();
-        // The Agent / Mail / history tables aren't there yet; the three
-        // seeded-at-construction system schemas (dbo / guest / …) are.
-        IsFalse(MsdbDbo(simulation).ContainsKey("sysjobs"));
-        IsFalse(MsdbDbo(simulation).ContainsKey("backupset"));
-    }
+    public void AFreshSimulation_LeavesMsdbUnseeded() => IsFalse(MsdbSeeded(new Simulation()));
 
     [TestMethod]
     [DataRow("select count(*) from msdb.dbo.sysjobs")]
     [DataRow("use msdb; select count(*) from sysoperators")]
     [DataRow("exec msdb.dbo.sp_help_job")]
     [DataRow("select count(*) from msdb.sys.objects where name = 'sysjobs'")]
+    [DataRow("backup database msdb to disk = 'm.bak'")]
     public void TouchingMsdb_SeedsItOnce(string batch)
     {
         var simulation = new Simulation();
@@ -40,8 +33,10 @@ public sealed class LazyMsdbSeedingTests
         using (var reader = command.ExecuteReader())
             while (reader.Read() || reader.NextResult()) { }
         // The seed ran: msdb now holds its shipped tables.
-        IsTrue(MsdbDbo(simulation).ContainsKey("sysjobs"));
-        IsTrue(MsdbDbo(simulation).ContainsKey("backupset"));
+        IsTrue(MsdbSeeded(simulation));
+        var dbo = simulation.Databases["msdb"].Schemas["dbo"].HeapTables;
+        IsTrue(dbo.ContainsKey("sysjobs"));
+        IsTrue(dbo.ContainsKey("backupset"));
     }
 
     [TestMethod]
@@ -54,6 +49,6 @@ public sealed class LazyMsdbSeedingTests
         command.CommandText = "create table t (id int primary key); insert t values (1); select count(*) from t; select name from sys.tables";
         using (var reader = command.ExecuteReader())
             while (reader.Read() || reader.NextResult()) { }
-        IsFalse(MsdbDbo(simulation).ContainsKey("sysjobs"));
+        IsFalse(MsdbSeeded(simulation));
     }
 }
