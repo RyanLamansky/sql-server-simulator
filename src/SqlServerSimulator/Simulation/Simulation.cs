@@ -544,7 +544,7 @@ public sealed partial class Simulation
     /// <see cref="Simulation"/> backs the linked-server activation.
     /// Case-insensitive keys (<see cref="BuiltInToken"/>).
     /// </summary>
-    internal readonly ConcurrentDictionary<string, Simulation> AvailableRemotes = new(BuiltInToken.Comparer);
+    internal readonly ConcurrentDictionary<string, Simulation> AvailableRemotes = new(concurrencyLevel: 1, capacity: 0, BuiltInToken.Comparer);
 
     /// <summary>
     /// Active linked servers: name → <see cref="LinkedServer"/>. Populated
@@ -553,7 +553,7 @@ public sealed partial class Simulation
     /// projects one row per entry plus the local-server row. Case-
     /// insensitive keys (<see cref="BuiltInToken"/>).
     /// </summary>
-    internal readonly ConcurrentDictionary<string, LinkedServer> ActiveLinkedServers = new(BuiltInToken.Comparer);
+    internal readonly ConcurrentDictionary<string, LinkedServer> ActiveLinkedServers = new(concurrencyLevel: 1, capacity: 0, BuiltInToken.Comparer);
 
     /// <summary>
     /// The database name woven into error messages that include a fully
@@ -759,7 +759,7 @@ public sealed partial class Simulation
     /// serializes the read-modify-writes (id allocation, the rename's re-key,
     /// the name checks) the dictionary alone can't make atomic.
     /// </summary>
-    internal readonly ConcurrentDictionary<string, Database> Databases = new(BuiltInToken.Comparer);
+    internal readonly ConcurrentDictionary<string, Database> Databases = new(concurrencyLevel: 1, capacity: 8, BuiltInToken.Comparer);
 
     /// <summary>
     /// Assigns <paramref name="db"/> the smallest free <c>database_id</c> ≥ 5
@@ -814,7 +814,7 @@ public sealed partial class Simulation
     /// (immutable) entry wholesale so concurrent endpoint reads see a
     /// consistent hash.
     /// </summary>
-    internal readonly ConcurrentDictionary<string, ServerLogin> Logins = new(BuiltInToken.Comparer);
+    internal readonly ConcurrentDictionary<string, ServerLogin> Logins = new(concurrencyLevel: 1, capacity: 16, BuiltInToken.Comparer);
 
     /// <summary>
     /// Per-Simulation monotonic counter for user server-principal ids (created
@@ -884,7 +884,7 @@ public sealed partial class Simulation
     /// observes Msg 208 on its next reference to the table. No reference
     /// counting needed.
     /// </remarks>
-    internal readonly ConcurrentDictionary<string, HeapTable> GlobalTempTables = new(BuiltInToken.Comparer);
+    internal readonly ConcurrentDictionary<string, HeapTable> GlobalTempTables = new(concurrencyLevel: 1, capacity: 0, BuiltInToken.Comparer);
 
     /// <summary>
     /// Virtual <c>sys.&lt;view&gt;</c> catalog views (<c>sys.schemas</c>,
@@ -1024,7 +1024,7 @@ public sealed partial class Simulation
     /// transaction an abandoned session left open is no more pinned than its
     /// session (see <see cref="SessionToken"/>).
     /// </summary>
-    internal readonly ConcurrentDictionary<string, BindTokenIssue> BindTokens = new(StringComparer.Ordinal);
+    internal readonly ConcurrentDictionary<string, BindTokenIssue> BindTokens = new(concurrencyLevel: 1, capacity: 0, StringComparer.Ordinal);
 
     /// <summary>
     /// <paramref name="transaction"/>'s bind token, drawn the first time a

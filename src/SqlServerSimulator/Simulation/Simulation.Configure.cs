@@ -57,7 +57,7 @@ partial class Simulation
     /// Server-scoped: every connection into this simulation reads the same
     /// values, matching a real instance.
     /// </summary>
-    internal readonly ConcurrentDictionary<int, (int Configured, int InUse)> ServerConfiguration = new();
+    internal readonly ConcurrentDictionary<int, (int Configured, int InUse)> ServerConfiguration = new(concurrencyLevel: 1, capacity: 0);
 
     /// <summary>
     /// The installed value of the <c>nested triggers</c> server option. When

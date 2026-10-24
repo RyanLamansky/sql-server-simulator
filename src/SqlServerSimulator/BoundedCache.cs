@@ -63,8 +63,11 @@ internal sealed class BoundedCache<TKey, TValue>(int capacity, IEqualityComparer
     /// hash: a key whose hash is found at its own position arrived before.
     /// Hashes rather than keys, so that remembering a refused key keeps
     /// nothing of it alive; a collision only admits or refuses a key early.
+    /// Allocated once the cache first fills, which a simulation serving a
+    /// single test never reaches; racing first refusals may each allocate
+    /// one, losing a sighting or two.
     /// </summary>
-    private readonly int[] sightings = new int[int.Max(capacity * 2, 16)];
+    private int[]? sightings;
 
     /// <summary>Test-observable: entries the sweeps have evicted.</summary>
     public long Evictions;
@@ -168,7 +171,8 @@ internal sealed class BoundedCache<TKey, TValue>(int capacity, IEqualityComparer
             return true;
         // Never 0, the hash an unwritten position holds.
         var hash = this.slots.Comparer.GetHashCode(key) | 1;
-        ref var seen = ref this.sightings[(uint)hash % (uint)this.sightings.Length];
+        var sightings = this.sightings ??= new int[int.Max(capacity * 2, 16)];
+        ref var seen = ref sightings[(uint)hash % (uint)sightings.Length];
         if (seen == hash)
             return true;
         seen = hash;

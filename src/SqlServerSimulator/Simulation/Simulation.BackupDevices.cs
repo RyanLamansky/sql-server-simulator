@@ -45,7 +45,7 @@ partial class Simulation
     /// <c>master</c>'s collation compares them. Server scope: a device outlives
     /// every database, as real keeps it in <c>master</c>.
     /// </summary>
-    internal readonly ConcurrentDictionary<string, LogicalBackupDevice> LogicalBackupDevices = new(BuiltInToken.Comparer);
+    internal readonly ConcurrentDictionary<string, LogicalBackupDevice> LogicalBackupDevices = new(concurrencyLevel: 1, capacity: 0, BuiltInToken.Comparer);
 
     private long lastBackupDeviceSequence;
 

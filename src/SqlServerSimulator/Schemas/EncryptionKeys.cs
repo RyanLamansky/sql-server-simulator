@@ -293,18 +293,18 @@ internal sealed class EncryptionKeyStore(Collation collation)
 {
     public DatabaseMasterKey? MasterKey;
 
-    public readonly ConcurrentDictionary<string, Certificate> Certificates = new(collation.NameKeys);
+    public readonly ConcurrentDictionary<string, Certificate> Certificates = new(concurrencyLevel: 1, capacity: 0, collation.NameKeys);
 
-    public readonly ConcurrentDictionary<string, SymmetricKey> SymmetricKeys = new(collation.NameKeys);
+    public readonly ConcurrentDictionary<string, SymmetricKey> SymmetricKeys = new(concurrencyLevel: 1, capacity: 0, collation.NameKeys);
 
-    public readonly ConcurrentDictionary<string, AsymmetricKey> AsymmetricKeys = new(collation.NameKeys);
+    public readonly ConcurrentDictionary<string, AsymmetricKey> AsymmetricKeys = new(concurrencyLevel: 1, capacity: 0, collation.NameKeys);
 
     /// <summary>
     /// The database's scoped credentials, kept with its keys because a
     /// secret is the master key's to protect, and riding the store's undo and
     /// backup with them.
     /// </summary>
-    public readonly ConcurrentDictionary<string, DatabaseScopedCredential> ScopedCredentials = new(collation.NameKeys);
+    public readonly ConcurrentDictionary<string, DatabaseScopedCredential> ScopedCredentials = new(concurrencyLevel: 1, capacity: 0, collation.NameKeys);
 
     /// <summary>Serializes the key DDL, whose checks span the whole store.</summary>
     public readonly Lock Gate = new();

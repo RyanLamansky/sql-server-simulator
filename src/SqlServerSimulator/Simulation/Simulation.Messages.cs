@@ -92,7 +92,7 @@ partial class Simulation
     /// <c>FORMATMESSAGE</c> read it. System messages (id below 50000) aren't
     /// carried.
     /// </summary>
-    internal readonly ConcurrentDictionary<(int MessageId, short LanguageId), UserMessage> UserMessages = new();
+    internal readonly ConcurrentDictionary<(int MessageId, short LanguageId), UserMessage> UserMessages = new(concurrencyLevel: 1, capacity: 0);
 
     private static readonly SystemProcedureParameter[] AddMessageParameters =
     [

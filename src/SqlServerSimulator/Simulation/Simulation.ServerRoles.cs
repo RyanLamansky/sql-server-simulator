@@ -62,7 +62,7 @@ partial class Simulation
     /// Projected into <c>sys.server_principals</c> (<c>type R</c>,
     /// <c>is_fixed_role 0</c>). Case-insensitive keys.
     /// </summary>
-    internal readonly ConcurrentDictionary<string, ServerRole> ServerRoles = new(BuiltInToken.Comparer);
+    internal readonly ConcurrentDictionary<string, ServerRole> ServerRoles = new(concurrencyLevel: 1, capacity: 0, BuiltInToken.Comparer);
 
     /// <summary>
     /// Server-role membership records: each entry is a (role_principal_id,

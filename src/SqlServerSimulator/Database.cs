@@ -175,20 +175,23 @@ internal sealed partial class Database
         this.Name = name;
         this.Collation = collation;
         this.CollationName = collation.Name;
-        this.Schemas = new(collation.NameKeys);
-        this.DdlTriggers = new(collation.NameKeys);
-        this.Principals = new(collation.NameKeys);
-        this.FullTextCatalogs = new(collation);
-        this.Filegroups = new(collation) { ["PRIMARY"] = PrimaryFilegroupId };
+        // Read without a lock and written by DDL alone, so one lock stripe
+        // serves them (see the Schema constructor), sized for what every
+        // database seeds.
+        this.Schemas = new(concurrencyLevel: 1, capacity: 16, collation.NameKeys);
+        this.DdlTriggers = new(concurrencyLevel: 1, capacity: 0, collation.NameKeys);
+        this.Principals = new(concurrencyLevel: 1, capacity: 16, collation.NameKeys);
+        this.FullTextCatalogs = new(concurrencyLevel: 1, capacity: 0, collation);
+        this.Filegroups = new(concurrencyLevel: 1, capacity: 0, collation) { ["PRIMARY"] = PrimaryFilegroupId };
         this.Files = BuiltInResources.InitialFiles(name);
         // tempdb's PRIMARY grows its files together (probed 2026-10-16 against
         // SQL Server 2025).
         if (name.Equals(Simulation.TempdbDatabaseName, StringComparison.OrdinalIgnoreCase))
             _ = this.AutogrowAllFilesFilegroups.Add(PrimaryFilegroupId);
-        this.PartitionFunctions = new(collation);
-        this.PartitionSchemes = new(collation);
-        this.PlanGuides = new(collation);
-        this.AuditSpecifications = new(collation);
+        this.PartitionFunctions = new(concurrencyLevel: 1, capacity: 0, collation);
+        this.PartitionSchemes = new(concurrencyLevel: 1, capacity: 0, collation);
+        this.PlanGuides = new(concurrencyLevel: 1, capacity: 0, collation);
+        this.AuditSpecifications = new(concurrencyLevel: 1, capacity: 0, collation);
         this.EncryptionKeys = new(collation);
         this.Schemas[DefaultSchemaName] = new Schema(this, DefaultSchemaName, DboSchemaId);
         // guest's schema hosts objects like any other: a user defaulting to it
@@ -255,7 +258,7 @@ internal sealed partial class Database
     /// an absent entry is the like-id role, real's default. Concurrent, as
     /// every session's ownership checks read it while one may move an owner.
     /// </summary>
-    public readonly ConcurrentDictionary<int, int> FixedRoleSchemaOwners = [];
+    public readonly ConcurrentDictionary<int, int> FixedRoleSchemaOwners = new(concurrencyLevel: 1, capacity: 0);
 
     private int nextSchemaId = 4;
 
@@ -920,7 +923,7 @@ internal sealed partial class Database
     /// Probe-confirmed against SQL Server 2025: the catalog view is per-
     /// database (not per-schema), and names are case-insensitive.
     /// </summary>
-    public readonly ConcurrentDictionary<ExtendedPropertyKey, SqlValue> ExtendedProperties = new();
+    public readonly ConcurrentDictionary<ExtendedPropertyKey, SqlValue> ExtendedProperties = new(concurrencyLevel: 1, capacity: 0);
 
     /// <summary>
     /// Per-database DDL triggers. Database-scope DDL triggers are stored
@@ -1023,7 +1026,7 @@ internal sealed partial class Database
     /// database-scoped rather than schema-scoped, which is why they live here
     /// rather than on <see cref="Schema"/>.
     /// </summary>
-    public readonly ConcurrentDictionary<string, SqlAssembly> Assemblies = new(StringComparer.OrdinalIgnoreCase);
+    public readonly ConcurrentDictionary<string, SqlAssembly> Assemblies = new(concurrencyLevel: 1, capacity: 0, StringComparer.OrdinalIgnoreCase);
 
     // Real SQL Server hands a fresh database's first user assembly id 65536
     // (the shipped Microsoft.SqlServer.Types is 1; probed 2026-09-28), so the

@@ -13,7 +13,7 @@ partial class Simulation
     /// database, and what <c>CREATE ASSEMBLY</c> asks under <c>clr strict
     /// security</c>.
     /// </summary>
-    internal readonly ConcurrentDictionary<string, TrustedAssembly> TrustedAssemblies = new(StringComparer.Ordinal);
+    internal readonly ConcurrentDictionary<string, TrustedAssembly> TrustedAssemblies = new(concurrencyLevel: 1, capacity: 0, StringComparer.Ordinal);
 
     /// <summary>The upper-case <c>0x…</c> spelling of a 64-byte hash, which keys the list and which the procedures' messages quote.</summary>
     internal static string TrustedAssemblyKey(byte[] hash) => "0x" + Convert.ToHexString(hash);

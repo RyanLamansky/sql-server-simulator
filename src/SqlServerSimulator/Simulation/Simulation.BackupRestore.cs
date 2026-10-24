@@ -57,7 +57,7 @@ partial class Simulation
     /// keyed by the canonical path real reaches (<see cref="BackupDeviceKey"/>):
     /// a relative path under the default backup directory, case aside.
     /// </summary>
-    internal readonly ConcurrentDictionary<string, byte[]> BackupDevices = new(StringComparer.OrdinalIgnoreCase);
+    internal readonly ConcurrentDictionary<string, byte[]> BackupDevices = new(concurrencyLevel: 1, capacity: 0, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>A device's bytes, or null with the operating-system error real reports for it.</summary>
     private byte[]? ReadBackupDevice(string path, out int osError)

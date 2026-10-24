@@ -114,7 +114,9 @@ internal sealed class DatabaseScopedConfiguration
 
     private static readonly int VerboseTruncationWarningsIndex = IndexOf("VERBOSE_TRUNCATION_WARNINGS");
 
-    private readonly string[] primary = [.. Options.Select(option => option.DefaultValue)];
+    private static readonly string[] DefaultValues = Array.ConvertAll(Options, option => option.DefaultValue);
+
+    private readonly string[] primary = (string[])DefaultValues.Clone();
 
     private readonly string?[] secondary = new string?[Options.Length];
 

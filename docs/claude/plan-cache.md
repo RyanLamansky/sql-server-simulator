@@ -659,6 +659,10 @@ Part of the constructor's gain reappears in later statements, which now compile 
 The first command of every class, the fixture's `sys.databases` probe, still costs ~160 ms cold: building every catalog view (~50 ms, about half of it compiling the `Register*` methods) and compiling the parse and execute path.
 What remains of the cold cost is a long tail — ~5,400 methods at ~0.1 ms each for Gears of War, whose cold replay is 55% compilation.
 
+**A fresh simulation's own allocation**, which a suite building one per test pays every time, was 540 KB for `new Simulation()` and 635 KB with a connection opened, three quarters of it two things: the seeded permission rows every database copied into a list of its own (now held as the shared seed arrays until something reads or changes them, which a `dbo`-only test never does), and the concurrent dictionaries of every schema, database and key store, each striped over a lock object per processor (sixteen here) where only DDL writes them (now one stripe and no preallocated table).
+It now allocates 121 KB and 149 KB, under `main`'s 171 KB and 215 KB, and fifty constructions with a connection opened take 4.4 ms against 6.7–7.0 ms before, `main`'s time (Release, measured 2026-10-24 on a 16-core box).
+A first `CREATE TABLE` / `INSERT` / `SELECT` in it still allocates 217 KB against `main`'s 54 KB: the table's page, its per-table lock and statistics dictionaries, some of which every row lock writes and so keep their striping, and a first catalog read's caches.
+
 Kept, each measured by alternating builds one case per process:
 
 - an uncorrelated deferred source inside a per-row body is materialized once per statement rather than once per enclosing row (see [`joins.md`](joins.md#deferred-sources-materialize-once-per-enumeration)) — EF Core's `ExecuteDelete` over a navigation, 91 → 42 ms, and the bulk-updates class 21% warm;

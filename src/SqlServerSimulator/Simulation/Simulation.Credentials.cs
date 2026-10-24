@@ -12,14 +12,14 @@ partial class Simulation
     /// projected into <c>sys.credentials</c>. Server scope outlives any database,
     /// hence the <see cref="Simulation"/>-level home.
     /// </summary>
-    internal readonly ConcurrentDictionary<string, ServerCredential> Credentials = new(BuiltInToken.Comparer);
+    internal readonly ConcurrentDictionary<string, ServerCredential> Credentials = new(concurrencyLevel: 1, capacity: 0, BuiltInToken.Comparer);
 
     /// <summary>
     /// The credential each login is mapped to (<c>CREATE</c> / <c>ALTER LOGIN … CREDENTIAL =</c>),
     /// by server <c>principal_id</c> → <c>credential_id</c>; read by
     /// <c>sys.server_principals</c> / <c>sys.sql_logins</c>' <c>credential_id</c>.
     /// </summary>
-    internal readonly ConcurrentDictionary<int, int> LoginCredentials = new();
+    internal readonly ConcurrentDictionary<int, int> LoginCredentials = new(concurrencyLevel: 1, capacity: 0);
 
     /// <summary>
     /// The last <c>credential_id</c> handed out. Real numbers credentials

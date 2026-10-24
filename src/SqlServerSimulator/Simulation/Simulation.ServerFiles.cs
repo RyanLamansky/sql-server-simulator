@@ -18,6 +18,7 @@ partial class Simulation
     /// <c>xp_create_subdir</c> or a backup creates, by canonical path.
     /// </summary>
     private readonly ConcurrentDictionary<string, byte> serverDirectories = new(
+        concurrencyLevel: 1,
         Array.ConvertAll(["/", "/tmp", "/var", "/var/opt", "/var/opt/mssql", "/var/opt/mssql/data", "/var/opt/mssql/log"], static path => new KeyValuePair<string, byte>(path, 0)),
         StringComparer.OrdinalIgnoreCase);
 

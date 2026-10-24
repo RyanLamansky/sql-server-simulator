@@ -56,22 +56,26 @@ internal sealed class Schema
         this.Name = name;
         this.SchemaId = schemaId;
         var collation = database.Collation.NameKeys;
-        this.HeapTables = new(collation);
-        this.Functions = new(collation);
-        this.Views = new(collation);
-        this.Procedures = new(collation);
-        this.TableTypes = new(collation);
-        this.AliasTypes = new(collation);
-        this.XmlSchemaCollections = new(collation);
-        this.Sequences = new(collation);
-        this.Triggers = new(collation);
-        this.Synonyms = new(collation);
-        this.Defaults = new(collation);
-        this.Rules = new(collation);
-        this.SecurityPolicies = new(collation);
-        this.Queues = new(collation);
-        this.DefinitionLocks = new(collation);
-        this.TypeDefinitionLocks = new(collation);
+        // Read without a lock and written by DDL alone, so one lock stripe
+        // and no preallocated table serve them: the default striping took a
+        // lock object per processor for each of the sixteen, in each of a
+        // fresh simulation's dozens of schemas, most of which stay empty.
+        this.HeapTables = new(concurrencyLevel: 1, capacity: 0, collation);
+        this.Functions = new(concurrencyLevel: 1, capacity: 0, collation);
+        this.Views = new(concurrencyLevel: 1, capacity: 0, collation);
+        this.Procedures = new(concurrencyLevel: 1, capacity: 0, collation);
+        this.TableTypes = new(concurrencyLevel: 1, capacity: 0, collation);
+        this.AliasTypes = new(concurrencyLevel: 1, capacity: 0, collation);
+        this.XmlSchemaCollections = new(concurrencyLevel: 1, capacity: 0, collation);
+        this.Sequences = new(concurrencyLevel: 1, capacity: 0, collation);
+        this.Triggers = new(concurrencyLevel: 1, capacity: 0, collation);
+        this.Synonyms = new(concurrencyLevel: 1, capacity: 0, collation);
+        this.Defaults = new(concurrencyLevel: 1, capacity: 0, collation);
+        this.Rules = new(concurrencyLevel: 1, capacity: 0, collation);
+        this.SecurityPolicies = new(concurrencyLevel: 1, capacity: 0, collation);
+        this.Queues = new(concurrencyLevel: 1, capacity: 0, collation);
+        this.DefinitionLocks = new(concurrencyLevel: 1, capacity: 0, collation);
+        this.TypeDefinitionLocks = new(concurrencyLevel: 1, capacity: 0, collation);
     }
 
     public readonly ConcurrentDictionary<string, HeapTable> HeapTables;

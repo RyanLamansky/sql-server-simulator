@@ -16,10 +16,10 @@ partial class Database
     /// </summary>
     private void SeedPermissions(string name)
     {
-        this.Permissions.AddRange(DatabaseSeedRows);
+        this.Permissions.Seed(DatabaseSeedRows);
         if (BuiltInToken.EqualsAny(name, Simulation.MasterDatabaseName, Simulation.TempdbDatabaseName, Simulation.MsdbDatabaseName))
-            this.Permissions.Add(GuestConnectSeedRow);
-        this.Permissions.AddRange(PublicSelectSeedRows);
+            this.Permissions.Seed(GuestConnectSeedRows);
+        this.Permissions.Seed(PublicSelectSeedRows);
         if (BuiltInToken.EqualsAny(name, Simulation.MasterDatabaseName))
             this.SeedMasterPrincipals();
         else if (BuiltInToken.EqualsAny(name, Simulation.MsdbDatabaseName))
@@ -49,18 +49,20 @@ partial class Database
     private void SeedMasterPrincipals()
     {
         this.seedsMasterGrants = true;
-        this.Permissions.AddRange(MasterPublicSeedRows);
+        this.Permissions.Seed(MasterPublicSeedRows);
         var seedDate = DateTime.UtcNow;
         this.AddSeededPrincipal(new DatabasePrincipal(5, "##MS_PolicyEventProcessingLogin##", "S", "SQL_USER", isFixedRole: false, seedDate) { DefaultSchemaName = DefaultSchemaName });
         this.AddSeededPrincipal(new DatabasePrincipal(6, "##MS_AgentSigningCertificate##", "C", "CERTIFICATE_MAPPED_USER", isFixedRole: false, seedDate));
-        this.Permissions.AddRange(
-        [
-            new(PermissionChecker.ClassDatabase, 0, 0, 5, DboPrincipalId, Permission.Connect, PermissionState.Grant),
-            new(PermissionChecker.ClassObject, -887594060, 0, 5, DboPrincipalId, Permission.Execute, PermissionState.Grant),
-            new(PermissionChecker.ClassDatabase, 0, 0, 6, DboPrincipalId, Permission.Connect, PermissionState.Grant),
-            new(PermissionChecker.ClassDatabase, 0, 0, 6, DboPrincipalId, Permission.Execute, PermissionState.Grant),
-        ]);
+        this.Permissions.Seed(MasterPrincipalSeedRows);
     }
+
+    private static readonly DatabasePermission[] MasterPrincipalSeedRows =
+    [
+        new(PermissionChecker.ClassDatabase, 0, 0, 5, DboPrincipalId, Permission.Connect, PermissionState.Grant),
+        new(PermissionChecker.ClassObject, -887594060, 0, 5, DboPrincipalId, Permission.Execute, PermissionState.Grant),
+        new(PermissionChecker.ClassDatabase, 0, 0, 6, DboPrincipalId, Permission.Connect, PermissionState.Grant),
+        new(PermissionChecker.ClassDatabase, 0, 0, 6, DboPrincipalId, Permission.Execute, PermissionState.Grant),
+    ];
 
     /// <summary>
     /// <c>msdb</c>'s own principals — the agent, mail, SSIS, data-collector,
@@ -76,12 +78,8 @@ partial class Database
         foreach (var (id, roleName) in MsdbRoles)
             this.AddSeededPrincipal(new DatabasePrincipal(id, roleName, "R", "DATABASE_ROLE", isFixedRole: false, seedDate));
         foreach (var (id, userName) in MsdbUsers)
-        {
             this.AddSeededPrincipal(new DatabasePrincipal(id, userName, "S", "SQL_USER", isFixedRole: false, seedDate) { DefaultSchemaName = DefaultSchemaName });
-            this.Permissions.Add(new(PermissionChecker.ClassDatabase, 0, 0, id, DboPrincipalId, Permission.Connect, PermissionState.Grant));
-        }
-        // dc_admin may impersonate the data collector's internal user.
-        this.Permissions.Add(new(PermissionChecker.ClassDatabasePrincipal, 16, 0, 14, DboPrincipalId, Permission.Impersonate, PermissionState.Grant));
+        this.Permissions.Seed(MsdbSeedRows);
         this.RoleMembers.AddRange(MsdbRoleMembers);
     }
 
@@ -119,6 +117,14 @@ partial class Database
         (21, "##MS_PolicyTsqlExecutionLogin##"),
     ];
 
+    // Each user's CONNECT, then dc_admin's IMPERSONATE on the data
+    // collector's internal user.
+    private static readonly DatabasePermission[] MsdbSeedRows =
+    [
+        .. Array.ConvertAll(MsdbUsers, user => new DatabasePermission(PermissionChecker.ClassDatabase, 0, 0, user.Id, DboPrincipalId, Permission.Connect, PermissionState.Grant)),
+        new(PermissionChecker.ClassDatabasePrincipal, 16, 0, 14, DboPrincipalId, Permission.Impersonate, PermissionState.Grant),
+    ];
+
     // (role, member), as real lists them in msdb.
     private static readonly (int RoleId, int MemberId)[] MsdbRoleMembers =
     [
@@ -133,8 +139,8 @@ partial class Database
         new(PermissionChecker.ClassDatabase, 0, 0, DboPrincipalId, DboPrincipalId, Permission.Connect, PermissionState.Grant),
     ];
 
-    private static readonly DatabasePermission GuestConnectSeedRow =
-        new(PermissionChecker.ClassDatabase, 0, 0, GuestPrincipalId, DboPrincipalId, Permission.Connect, PermissionState.Grant);
+    private static readonly DatabasePermission[] GuestConnectSeedRows =
+        [new(PermissionChecker.ClassDatabase, 0, 0, GuestPrincipalId, DboPrincipalId, Permission.Connect, PermissionState.Grant)];
 
     /// <summary>
     /// The system objects whose <c>SELECT</c> a fresh database grants

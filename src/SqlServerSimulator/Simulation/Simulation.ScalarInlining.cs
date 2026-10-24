@@ -14,7 +14,7 @@ partial class Simulation
     /// 2026-09-30 against SQL Server 2025, dynamic SQL included).
     /// <see cref="ClearPlanCache"/> forgets them as it forgets the plans.
     /// </summary>
-    private readonly ConcurrentDictionary<(string Database, string Text), long> sentInliningFailures = new();
+    private readonly ConcurrentDictionary<(string Database, string Text), long> sentInliningFailures = new(concurrencyLevel: 1, capacity: 0);
 
     /// <summary>How many keys <see cref="sentInliningFailures"/> holds, counted on add because the dictionary's own count takes every one of its locks.</summary>
     private int sentInliningFailureCount;
