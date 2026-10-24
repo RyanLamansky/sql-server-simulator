@@ -56,6 +56,23 @@ internal sealed class HeapSeekCache
     /// </summary>
     public static HeapSeekCache ContinuationsFor(Heap heap) => continuations.GetValue(heap, static _ => new HeapSeekCache());
 
+    /// <summary>
+    /// The bounds a range or ordered read walks instead of its own when the
+    /// entry holds a key a collation orders by its fallback order
+    /// (<see cref="Collation.OrdersByFallback"/>), whose place among the other
+    /// keys its own bounds can't settle: a <c>LIKE</c> prefix's letters and
+    /// digits alone (<see cref="LikePrefixRange"/>). Chosen under the gate the
+    /// walk reads the entry under, so a key arriving between the two is never
+    /// read past.
+    /// </summary>
+    public readonly struct FallbackBounds(SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive)
+    {
+        public readonly SqlValueKey? Lower = lower;
+        public readonly bool LowerInclusive = lowerInclusive;
+        public readonly SqlValueKey? Upper = upper;
+        public readonly bool UpperInclusive = upperInclusive;
+    }
+
     private readonly Dictionary<int, CacheEntry> byLeadOrdinal = [];
 
     // Build / replay / read are serialized: the per-Heap cache is shared
@@ -98,12 +115,14 @@ internal sealed class HeapSeekCache
     public List<(int Page, int Slot)>? RangeScan(
         Heap heap, HeapColumn[] schema, Heap? lobStore, int ordinal, SqlType common,
         bool hasLower, SqlValue lower, bool lowerInclusive, bool hasUpper, SqlValue upper, bool upperInclusive,
-        int candidateCap, int[]? widenTo = null)
+        int candidateCap, int[]? widenTo = null, FallbackBounds? fallback = null)
     {
         lock (this.gate)
         {
             var entry = this.ResolveEntry(heap, schema, lobStore, [ordinal], [common], widenTo: widenTo);
-            return entry.RangeCandidates(hasLower, lower, lowerInclusive, hasUpper, upper, upperInclusive, candidateCap);
+            return fallback is { } wide && entry.HoldsFallbackOrderedKeys()
+                ? entry.CappedCandidates(wide.Lower, wide.LowerInclusive, wide.Upper, wide.UpperInclusive, candidateCap)
+                : entry.RangeCandidates(hasLower, lower, lowerInclusive, hasUpper, upper, upperInclusive, candidateCap);
         }
     }
 
@@ -160,11 +179,13 @@ internal sealed class HeapSeekCache
     // it.
     public (int Page, int Slot)[] OrderedSeek(
         Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons,
-        SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive)
+        SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive, FallbackBounds? fallback = null)
     {
         lock (this.gate)
         {
             var entry = this.ResolveEntry(heap, schema, lobStore, ordinals, commons);
+            if (fallback is { } wide && entry.HoldsFallbackOrderedKeys())
+                (lower, lowerInclusive, upper, upperInclusive) = (wide.Lower, wide.LowerInclusive, wide.Upper, wide.UpperInclusive);
             return lower is null && upper is null
                 ? entry.KeyOrder()
                 : [.. entry.OrderedCandidates(lower, lowerInclusive, upper, upperInclusive)];
@@ -407,6 +428,7 @@ internal sealed class HeapSeekCache
         var buildGen = heap.ActivateSeekJournal();
         var buckets = new Dictionary<SqlValueKey, List<(int Page, int Slot)>>();
         var heapOrdered = true;
+        var fallbackOrdered = false;
         SqlValueKey? maxKey = null;
         (int Page, int Slot) lastRid = (-1, -1);
         foreach (var (page, slot, bytes) in heap.EnumerateRowsWithAddress())
@@ -414,6 +436,7 @@ internal sealed class HeapSeekCache
             if (TryComputeEntryKey(bytes, ordinals, commons, schema, lobStore, out var key))
             {
                 AddRid(buckets, key, (page, slot));
+                fallbackOrdered = fallbackOrdered || OrdersByFallback(key, commons);
                 if (maxKey is { } max && KeyTupleComparer.Instance.Compare(key, max) < 0)
                     heapOrdered = false;
                 else
@@ -426,7 +449,7 @@ internal sealed class HeapSeekCache
             lastRid = (page, slot);
         }
 
-        var entry = new CacheEntry(buildGen, (int[])ordinals.Clone(), (SqlType[])commons.Clone(), buckets);
+        var entry = new CacheEntry(buildGen, (int[])ordinals.Clone(), (SqlType[])commons.Clone(), buckets) { HeldFallbackOrderedKey = fallbackOrdered };
         entry.StartHeapOrder(heapOrdered, lastRid, maxKey);
         this.byLeadOrdinal[lead] = entry;
         return entry;
@@ -493,6 +516,21 @@ internal sealed class HeapSeekCache
     // synthetic bound keys passed to GetViewBetween, never set members.
     /// <summary>Orders two key tuples as the ordered view orders them.</summary>
     internal static int CompareKeys(SqlValueKey x, SqlValueKey y) => KeyTupleComparer.Instance.Compare(x, y);
+
+    // Whether a string component of the key is one its collation orders by
+    // its fallback order (see FallbackBounds).
+    private static bool OrdersByFallback(SqlValueKey key, SqlType[] commons)
+    {
+        for (var i = 0; i < key.ComponentCount; i++)
+        {
+            if (commons[i].Category == SqlTypeCategory.String && commons[i].Collation is { } collation
+                && key.ComponentAt(i) is { IsNull: false } component && collation.OrdersByFallback(component.AsString))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
 
     private sealed class KeyTupleComparer : IComparer<SqlValueKey>
     {
@@ -561,6 +599,23 @@ internal sealed class HeapSeekCache
         // cache's gate, which a read-mostly table's repeated range reads — a
         // LIKE prefix under an ORDER BY — held across every session seeking it.
         private int walkedKeys;
+
+        // Whether a row added since the entry was built holds a string its
+        // collation orders by its fallback order (Collation.OrdersByFallback),
+        // judged by the row's own key: a bucket is listed under the spelling
+        // that opened it, which such a row can share while ordering apart
+        // from it, since the fallback calls equal what the table holds apart
+        // (an ideographic space and a no-break space are both a space to
+        // it). A removal leaves it set, as a key recomputed from a superseded
+        // image can't be trusted to clear it; the next rebuild starts over.
+        public bool HeldFallbackOrderedKey;
+
+        public bool HoldsFallbackOrderedKeys()
+        {
+            if (this.HeldFallbackOrderedKey)
+                IndexSeekDiagnostics.Sink?.Add("FallbackOrderedKeys");
+            return this.HeldFallbackOrderedKey;
+        }
 
         public (List<(int Page, int Slot)> Order, List<SqlValueKey> Keys) KeyedOrder()
         {
@@ -771,6 +826,7 @@ internal sealed class HeapSeekCache
             this.keyedOrder = null;
             this.walkedKeys = 0;
             var added = false;
+            this.HeldFallbackOrderedKey = this.HeldFallbackOrderedKey || OrdersByFallback(key, this.Commons);
             if (!this.Buckets.TryGetValue(key, out var bucket))
             {
                 this.Buckets[key] = bucket = [];

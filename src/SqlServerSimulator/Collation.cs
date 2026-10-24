@@ -397,6 +397,38 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
     internal virtual bool SortsAsciiPrefixesTogether => false;
 
     /// <summary>
+    /// Whether <see cref="SortsAsciiPrefixesTogether"/> reaches past a run's
+    /// spaces and punctuation: every string starting with a run of printable
+    /// ASCII that ends in a letter or digit, under this collation's comparison
+    /// and its <c>LIKE</c> matching alike, sorts after the run with that last
+    /// letter or digit stepped back and before it stepped on — the letter or
+    /// digit before it stepped instead past a <c>z</c>, <c>Z</c> or <c>9</c>,
+    /// whatever lies between dropped (<c>Smith, J</c> → <c>Smith, I</c> and
+    /// <c>Smith, K</c>, <c>A-9</c> → <c>B</c>). It holds where whatever
+    /// <c>LIKE</c> matches to a character of the run weighs as that character
+    /// does in the order keys are sorted by: the binary collations, which
+    /// match and order by code unit or byte, and the Latin1-General tables
+    /// over their own repertoire — never across a key
+    /// <see cref="OrdersByFallback"/> names, nor in the invariant-culture
+    /// order, which weighs an ASCII hyphen or apostrophe at the final level
+    /// only and a fullwidth one, which <c>LIKE</c> matches to it, at the
+    /// primary level.
+    /// </summary>
+    internal virtual bool SortsPrintableAsciiPrefixesTogether => false;
+
+    /// <summary>
+    /// Whether this collation orders <paramref name="text"/> by a second
+    /// order beside its own — the invariant-culture order a Latin1-General
+    /// table compares text outside its repertoire by — whose weights for the
+    /// table's own characters differ from the table's (it weighs a no-break
+    /// space as a space, which the table sorts apart), so where such a key
+    /// lands among the others is settled only by the letters and digits both
+    /// orders share, never by a space or punctuation mark
+    /// (<see cref="SortsPrintableAsciiPrefixesTogether"/>).
+    /// </summary>
+    internal virtual bool OrdersByFallback(string text) => false;
+
+    /// <summary>
     /// Whether <c>CHAR(0)</c> is a character of its own here — the lowest
     /// weight, never ignored — as it is in <c>varchar</c> data under every
     /// non-binary <c>SQL_</c> collation, where a Windows collation and all
@@ -845,6 +877,8 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
 
         internal override bool SortsAsciiPrefixesTogether => true;
 
+        internal override bool SortsPrintableAsciiPrefixesTogether => true;
+
         // _BIN2 pads the shorter operand with spaces, so 'a' sorts after 'a' +
         // CHAR(31); the pre-BIN2 form doesn't for Unicode data (probed
         // 2026-10-02 against SQL Server 2025).
@@ -926,6 +960,8 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
         internal override int AnsiCodePage => this.ansiCodePage;
 
         internal override bool SortsAsciiPrefixesTogether => true;
+
+        internal override bool SortsPrintableAsciiPrefixesTogether => true;
 
         public override int Compare(string? x, string? y) =>
             x is null

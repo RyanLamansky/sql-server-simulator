@@ -20,6 +20,9 @@ public sealed class LikeIndexSeekTests
         "Sœ", "Sæ", "Smæ", "Sß", "Smß", "ss", "ß", "Sz", "Szz", "T", "Ta", "Z", "z", "zz", "Zz", "9", "99", "a9", "b", "A",
         "@", "`", "[", "Sm%x", "Sm_x", "Sm[x", "Sm\\x", "S\u0301m", "Sm\u0301", "Ｓｍ", "S\u200Bm", "Sm\u00ADx", "中文", "Sm中",
         "Az", "B", "Ba", "a", "Aa",
+        "Sm\u2010ith", "Sm\uFF0Dith", "Sm\u00A0ith", "Sm\u3000ith", "Sm\u2019ith", "Sm\uFF07ith", "Sm-i", "Sm--ith", "Sm-",
+        "Sm, J", "Sm, j", "Sm,J", "Sm J", "Sm,  J", "Sm\uFF0C J", "Sm-1", "Sm-10", "Sm1", "Sm 1", "Sm-\uFF11", "Sm-\u00B9", "Sm-\u00AD1",
+        "O'Brien", "O\u2019Brien", "OBrien", "O-Brien", "O'B", "-m", "-M", "m",
     ];
 
     private static readonly (string Pattern, string? Escape)[] Patterns =
@@ -29,6 +32,8 @@ public sealed class LikeIndexSeekTests
         ("Sm\\%%", "\\"), ("Sm!_x", "!"), ("S%m", null), ("%m%", null), ("", null), ("%", null), ("_m%", null),
         ("Ś%", null), ("Sl%", null), ("Smi%", null), ("ß%", null), ("ss%", null), ("Sæ%", null), ("Az%", null),
         ("A%", null), ("Sm!", "!"), ("xS%", "x"), ("Sm[", null), ("S\u0301%", null),
+        ("Sm i%", null), ("Sm-i%", null), ("Sm'i%", null), ("Sm-%", null), ("Sm, J%", null), ("Sm,%", null), ("Sm-1%", null),
+        ("Sm 1%", null), ("S m%", null), ("S-m%", null), ("-m%", null), ("O'B%", null), ("O'Brien", null), ("Sm-!%%", "!"),
     ];
 
     [TestMethod]

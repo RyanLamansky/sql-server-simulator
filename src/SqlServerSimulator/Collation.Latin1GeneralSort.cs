@@ -622,6 +622,14 @@ internal abstract partial class Collation
         // invariant-culture body does.
         internal override bool SortsAsciiPrefixesTogether => true;
 
+        // Over its repertoire the table matches and orders by the same
+        // weights; a key holding a character outside it orders by the inner
+        // body instead (Compare), which weighs some of the table's own
+        // characters apart from the table.
+        internal override bool SortsPrintableAsciiPrefixesTogether => true;
+
+        internal override bool OrdersByFallback(string text) => !this.table.Covers(text);
+
         /// <summary>Whether this is varchar data under sort order 52 (or the Pref name's 53, which weighs alike).</summary>
         internal bool UsesSortOrder52 => ReferenceEquals(this.table, sortOrder52);
 

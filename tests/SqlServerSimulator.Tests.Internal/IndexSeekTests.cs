@@ -1525,12 +1525,59 @@ public sealed class IndexSeekTests
     [DataRow("%m%")]
     [DataRow("_m%")]
     [DataRow("[S]m%")]
-    [DataRow("-m%")]
-    public void APatternWithNoLeadingLetterOrDigit_Scans(string pattern)
+    [DataRow("- %")]
+    public void APatternWithNoLetterOrDigitAheadOfItsWildcards_Scans(string pattern)
     {
         var (trace, _) = Run(People, $"select id from p where last like N'{pattern}'");
         Contains("Scan(p)", trace);
         DoesNotContain("LikeSeek(p)", trace);
+    }
+
+    [TestMethod]
+    [DataRow("-m%")]
+    [DataRow("Smith, A%")]
+    [DataRow("O''B%")]
+    public void APrefixThroughSpacesAndPunctuation_Seeks(string pattern)
+    {
+        var (trace, _) = Run(People, $"select id from p where last like N'{pattern}'");
+        Contains("LikeSeek(p)", trace);
+        DoesNotContain("Scan(p)", trace);
+    }
+
+    // An ideographic space lies outside the Latin1-General table, so its key
+    // orders by the table's invariant-culture fallback, which places it among
+    // the others by weights the table doesn't share; it matches the pattern's
+    // space all the same, so while the index holds it a range read through
+    // the space would miss it, and the read walks the letters and digits.
+    [TestMethod]
+    public void AKeyOrderedByTheTablesFallback_HoldsAPunctuatedPrefixToItsLettersAndDigits()
+    {
+        using var connection = new Simulation().CreateDbConnection();
+        connection.Open();
+        Exec(connection, """
+            create table c (id int not null primary key, name nvarchar(30) collate Latin1_General_CI_AS not null);
+            create index ix on c (name);
+            insert c values (1, N'Customer 1'), (2, N'Customer 12'), (3, N'Customer 123'), (4, N'Customer 2'), (5, N'Customer' + nchar(160) + N'12')
+            """);
+        const string Ordered = "select top (5) id from c where name like N'Customer 12%' order by name";
+        const string Unordered = "select id from c where name like N'Customer 12%'";
+        IndexSeekDiagnostics.Sink = [];
+        try
+        {
+            CollectionAssert.AreEqual(new object[] { 2, 3 }, ReadRows(connection, Ordered));
+            CollectionAssert.AreEquivalent(new object[] { 2, 3 }, ReadRows(connection, Unordered));
+            DoesNotContain("FallbackOrderedKeys", IndexSeekDiagnostics.Sink);
+
+            Exec(connection, "insert c values (6, N'Customer' + nchar(12288) + N'12')");
+            IndexSeekDiagnostics.Sink.Clear();
+            CollectionAssert.AreEquivalent(new object[] { 2, 3, 6 }, ReadRows(connection, Ordered));
+            CollectionAssert.AreEquivalent(new object[] { 2, 3, 6 }, ReadRows(connection, Unordered));
+            Contains("FallbackOrderedKeys", IndexSeekDiagnostics.Sink);
+        }
+        finally
+        {
+            IndexSeekDiagnostics.Sink = null;
+        }
     }
 
     [TestMethod]
