@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using SqlServerSimulator.Parser;
 
 namespace SqlServerSimulator;
@@ -8,19 +7,13 @@ partial class Simulation
     /// <summary>
     /// Command texts that compiled without error, each with the
     /// <see cref="SchemaVersion"/> it compiled under, so a repeated batch skips
-    /// <see cref="CompileBatch"/>. Keyed and capped like the plan cache: a batch
+    /// <see cref="CompileBatch"/>. Keyed and bounded like the plan cache: a batch
     /// that binds against the same schema under the same key compiles the same
     /// way, except one that resolved a session's <c>#temp</c> table, which isn't
     /// recorded. A hit only ever skips the pass, so an input the key leaves out
     /// can cost a batch its up-front error, never raise one it shouldn't.
     /// </summary>
-    private readonly ConcurrentDictionary<PlanCacheKey, long> compiledBatches = new();
-
-    /// <summary>
-    /// How many keys <see cref="compiledBatches"/> holds, counted as
-    /// <see cref="planCacheCount"/> is.
-    /// </summary>
-    private int compiledBatchCount;
+    private readonly BoundedCache<PlanCacheKey, long> compiledBatches = new(PlanCacheCapacity);
 
     /// <summary>
     /// Compiles a batch before any of it runs, as real does, so an error that
@@ -194,10 +187,7 @@ partial class Simulation
         }
         if (remembered is { } compiled && !compileBatch.ResolvedTempTable && !inlined.RecompilesEveryRun)
         {
-            if (this.compiledBatches.ContainsKey(compiled))
-                this.compiledBatches[compiled] = schemaVersion;
-            else if (Volatile.Read(ref this.compiledBatchCount) < PlanCacheCapacity && this.compiledBatches.TryAdd(compiled, schemaVersion))
-                _ = Interlocked.Increment(ref this.compiledBatchCount);
+            this.compiledBatches.Set(compiled, schemaVersion);
         }
         return null;
     }

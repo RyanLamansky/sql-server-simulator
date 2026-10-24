@@ -113,6 +113,18 @@ public sealed class SecretStatementTextTests
     }
 
     [TestMethod]
+    public void TheBatch_StaysMasked_AfterMoreDistinctBatchesThanTheCompileMemosHold()
+    {
+        var sim = WithSession();
+        using var client = Client(sim);
+        for (var i = 0; i < 1500; i++)
+            _ = client.CreateCommand($"select {i.ToInvariantString()} as n").ExecuteScalar();
+        _ = client.CreateCommand("create login l with password = 'Xy!12345abcd';").ExecuteNonQuery();
+        var masked = "--*CREATE LOGIN".PadRight("create login l with password = 'Xy!12345abcd';".Length, '-');
+        CollectionAssert.AreEqual(new[] { "sql_batch_starting|" + masked, "sql_statement_completed|-- CREATE LOGIN", "sql_batch_completed|" + masked }, Events(sim)[^3..]);
+    }
+
+    [TestMethod]
     public void APlanCachedForTheBatch_NamesTheMaskedText()
     {
         var sim = new Simulation();

@@ -64,6 +64,46 @@ public sealed class PlanCacheTests
     }
 
     [TestMethod]
+    public void RepeatedQuery_StaysCached_ThroughAFloodOfOtherTexts()
+    {
+        // Texts that each run a couple of times and never again churn the
+        // cache; a query the application keeps repeating outlives them.
+        var (sim, connection) = OpenWithTable();
+        using (connection)
+        {
+            for (var i = 0; i < 4000; i++)
+            {
+                var other = $"select val from t where id = {(i % 3) + 1} and {i} = {i}";
+                _ = RunCount(connection, other);
+                _ = RunCount(connection, other);
+                if (i % 200 == 0)
+                    AreEqual(1, RunCount(connection, "select val from t where id = 2"));
+            }
+            var hitsBefore = sim.PlanCacheHits;
+            AreEqual(1, RunCount(connection, "select val from t where id = 2"));
+            AreEqual(hitsBefore + 1, sim.PlanCacheHits);
+            IsLessThanOrEqualTo(1024, sim.PlanCacheCount);
+        }
+    }
+
+    [TestMethod]
+    public void QueryFirstRunAfterTheCacheFilled_IsCachedFromItsSecondRepeat()
+    {
+        var (sim, connection) = OpenWithTable();
+        using (connection)
+        {
+            for (var i = 0; i < 2000; i++)
+                _ = RunCount(connection, $"select val from t where {i} = {i}");
+            const string late = "select val from t where id = 3";
+            _ = RunCount(connection, late);
+            _ = RunCount(connection, late);
+            var hitsBefore = sim.PlanCacheHits;
+            _ = RunCount(connection, late);
+            AreEqual(hitsBefore + 1, sim.PlanCacheHits);
+        }
+    }
+
+    [TestMethod]
     public void DistinctCommandText_DistinctEntries()
     {
         // Different WHERE clauses produce different CommandTexts → different

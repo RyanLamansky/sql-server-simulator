@@ -260,8 +260,8 @@ Four rules keep a shared sequence honest — three of them found by things that 
 
 Tokens themselves are immutable: `Token` holds `(command, startIndex, length)` readonly, and the one mutable member in the hierarchy is `UnquotedString.ContextualKeyword`'s lazy classification, which is an idempotent pure function of the token's own span written to an enum field — a benign race whichever thread gets there first.
 
-Capacity is the plan cache's: 1024 entries, "first 1024 unique texts win", no LRU — until a [clear](#clearing-dbcc-freeproccache) empties it.
-A parse past capacity still collects its sequence and publishes nothing: Query Store reads a statement's tokens back from it (`ParserContext.StatementTokens`) rather than tokenizing the text again.
+Capacity is the plan cache's, with its eviction and admission (see [Capacity](#capacity)).
+A parse whose sequence the memo refuses still collects it: Query Store reads a statement's tokens back from it (`ParserContext.StatementTokens`) rather than tokenizing the text again, and the batch compile walk hands its sequence to the run that follows it, which reads it whether the memo kept it or not — a one-off text is tokenized once, and reaches the memo once, which is what lets the memo's admission tell it from a repeated one.
 
 ## The shared-plan contract: per-execution state lives per execution
 
@@ -362,13 +362,14 @@ The replay path is also where `PlanCacheHits` increments; misses increment in `C
 
 ## Capacity
 
-Hard cap at 1024 entries.
-New entries beyond cap are silently dropped: a known key is refreshed through the indexer, and a new one is added only while `planCacheCount` — maintained on each successful add, since `ConcurrentDictionary.Count` takes every lock the dictionary holds — is under the cap.
-The cap is defensive — a stable EF app's working set is dozens of unique queries — and refresh-in-place via the indexer means DDL invalidation overwrites under the same key without growing the dictionary.
+The plan cache, the statement plan sets, the compiled-batch memo, the token memo, the statement ends and Query Store's statement shapes share one policy (`BoundedCache`): about 1024 entries (4096 for the shapes), past which an insert evicts the least recently used half.
+A full cache admits a new key only on its second arrival, so one-off texts never enter it once it has filled; until then every key is admitted on arrival, so a simulation serving one test caches what it repeats from its first repeat.
+Refreshing a known key — a DDL invalidation overwriting under the same key — needs no admission and doesn't grow the cache.
 
-No LRU.
-The "first 1024 unique queries" win; subsequent novel CommandTexts miss every time.
-If this becomes a real problem an LRU layer can land later.
+A first-come cap with no eviction, as the cache once had, let a test run's one-off texts — a seed script, hand-written statements with literals — fill it, after which every repeated query compiled on every execution for the rest of the run: over an imported AdventureWorks, an EF-shaped point lookup by key went from 4.7 to 32 µs and a three-table join from 9 to 56 µs once 1024 one-off texts had run (Release, one worker, measured 2026-10-24).
+Admitting every one-off text instead and evicting by recency cost a stream of one-off statements about a quarter of its speed, nearly all of it in garbage collection: each cached plan lived long enough to be promoted before a sweep evicted it, and those collections ran over the whole imported database — the second-arrival rule is what took that back.
+
+Statement ends that may carry a secret are pinned rather than bounded, since their entry is what masks the secret wherever the text is reported; under the first-come cap a batch past it reported its password in the clear.
 
 ## Test observability
 
@@ -906,7 +907,4 @@ A replayed SELECT batch remembers its plan on its parse-cache entry (`BatchConte
 - **Plans for `RETURN`, `SET`, `DECLARE` and conditions** — see the [backlog](backlog.md#complex-query-execution--perf-residuals) for what each would take.
 - **Plans for a multi-statement function's writes to its return table**, which is a new table each call, as the pseudo-tables once were for each firing.
 - **`SET` / `DECLARE` as recordable effects**, which is what a batch mixing them with a SELECT would need to cache as a SELECT sequence; the DML statement plans don't need it, since they sit beside statements that still parse.
-- LRU eviction, for both layers (the cap is hard FIFO-ish, and a one-shot migration script run first can fill it ahead of the steady-state working set).
 - Parameter-sniffing-style value-dependent plan selection (the simulator has no cost-based optimizer, so this doesn't apply).
-- A memo entry per *distinct* text is stored on first sighting, so a workload of unique texts fills the cap with entries nothing will read again.
-  Two-phase admission (store on second sighting) would keep the cap for texts that repeat.

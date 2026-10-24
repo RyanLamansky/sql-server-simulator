@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
 
@@ -13,13 +12,10 @@ partial class Simulation
     /// <c>DELETE</c> or <c>MERGE</c> in the text, so a batch mixing them with
     /// statements that have no plan (<c>SET NOCOUNT ON</c>, a <c>DECLARE</c>,
     /// an <c>IF</c>) still skips parsing the ones that do. A module body's
-    /// statements are filed under <see cref="ModuleBodyKey"/>. Capped and
+    /// statements are filed under <see cref="ModuleBodyKey"/>. Bounded and
     /// cleared as the plan cache is.
     /// </summary>
-    private readonly ConcurrentDictionary<PlanCacheKey, StatementPlanSet> statementPlanSets = new();
-
-    /// <summary>How many keys <see cref="statementPlanSets"/> holds, counted as <see cref="planCacheCount"/> is.</summary>
-    private int statementPlanSetCount;
+    private readonly BoundedCache<PlanCacheKey, StatementPlanSet> statementPlanSets = new(PlanCacheCapacity);
 
     /// <summary>Test-observable: DML statements that ran from a cached plan.</summary>
     internal long DmlPlanHits;
@@ -359,7 +355,8 @@ partial class Simulation
 #endif
     /// <summary>
     /// Files a recorded statement plan under the batch's key, creating the
-    /// text's set on its first plan while the cap allows.
+    /// text's set on its first plan; a set the cache refuses serves the batch's
+    /// own execution alone, so its later statements don't ask again.
     /// </summary>
     private void PublishStatementPlan(BatchContext batch, int start, StatementPlanEntry entry)
     {
@@ -372,13 +369,9 @@ partial class Simulation
             var key = batch.PlanCacheKey!.Value;
             if (!this.statementPlanSets.TryGetValue(key, out set))
             {
-                if (Volatile.Read(ref this.statementPlanSetCount) >= PlanCacheCapacity)
-                    return;
                 set = new StatementPlanSet();
-                if (this.statementPlanSets.TryAdd(key, set))
-                    _ = Interlocked.Increment(ref this.statementPlanSetCount);
-                else
-                    set = this.statementPlanSets[key];
+                if (!this.statementPlanSets.TryAdd(key, set) && this.statementPlanSets.TryGetValue(key, out var raced))
+                    set = raced;
             }
             batch.StatementPlans = set;
         }

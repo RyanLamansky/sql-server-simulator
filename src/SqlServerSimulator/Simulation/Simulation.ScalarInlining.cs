@@ -16,7 +16,7 @@ partial class Simulation
     /// </summary>
     private readonly ConcurrentDictionary<(string Database, string Text), long> sentInliningFailures = new();
 
-    /// <summary>How many keys <see cref="sentInliningFailures"/> holds, counted as <see cref="planCacheCount"/> is.</summary>
+    /// <summary>How many keys <see cref="sentInliningFailures"/> holds, counted on add because the dictionary's own count takes every one of its locks.</summary>
     private int sentInliningFailureCount;
 
     /// <summary>

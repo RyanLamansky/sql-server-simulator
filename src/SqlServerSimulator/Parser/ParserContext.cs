@@ -80,6 +80,14 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     private List<Token>? publishedTokens;
 
     /// <summary>
+    /// The sequence the batch compile walk collected over this parse's text,
+    /// handed over as the walk reached the text's end, under the inputs it
+    /// read them with: the run that follows the walk reads it whether or not
+    /// the memo kept it, rather than tokenizing the same text a second time.
+    /// </summary>
+    private (TokenMemoKey Key, Token[] Tokens)? walkedTokens;
+
+    /// <summary>
     /// The tokenization inputs this context bound to. Re-checked on every
     /// <see cref="MoveNext"/>: a mid-batch <c>SET QUOTED_IDENTIFIER</c> or
     /// <c>USE</c> changes what the remaining characters tokenize to, and both
@@ -1507,8 +1515,13 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
         if (this.memoCollector is { } collected && collected.Count == this.memoPosition)
         {
             this.publishedTokens = collected;
-            if (this.Simulation.TokenMemo.HasCapacity && !RewritesTokenizationInputs(collected))
-                this.Simulation.TokenMemo.Publish(this.memoKey, [.. collected]);
+            if (!RewritesTokenizationInputs(collected))
+            {
+                Token[] sequence = [.. collected];
+                this.Simulation.TokenMemo.Publish(this.memoKey, sequence);
+                if (this.Batch.CompiledFor is { } running)
+                    running.Parser.walkedTokens = (this.memoKey, sequence);
+            }
             this.memoCollector = null;
         }
 
@@ -1593,11 +1606,13 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
         var database = this.CurrentDatabase;
         this.memoKey = new TokenMemoKey(commandText, database.Collation, database.CompatibilityLevel, this.QuotedIdentifiers);
         var memo = this.Simulation.TokenMemo;
-        // A full memo publishes nothing more, but the sequence is collected
-        // anyway: Query Store reads a statement's tokens back rather than
-        // tokenizing its text a second time.
+        // The collected sequence also serves Query Store, which reads a
+        // statement's tokens back rather than tokenizing its text a second
+        // time.
         if (memo.TryGet(this.memoKey) is { } stored)
             this.memoTokens = stored;
+        else if (this.walkedTokens is { } walked && walked.Key.Equals(this.memoKey))
+            this.memoTokens = walked.Tokens;
         else
             this.memoCollector = [];
     }

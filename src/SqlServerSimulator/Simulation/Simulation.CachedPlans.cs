@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
@@ -17,12 +16,11 @@ partial class Simulation
     /// <summary>
     /// Per batch text the compile walked, where each of its statements ends
     /// (see <see cref="StatementEnds"/>), as real's <c>statement_end_offset</c>
-    /// and statement events place it.
+    /// and statement events place it. Bounded like the other compile memos,
+    /// save for a text that may carry a secret, which stays: its entry is what
+    /// masks the secret wherever the text is reported.
     /// </summary>
-    private readonly ConcurrentDictionary<string, StatementEnds> statementEnds = new(StringComparer.Ordinal);
-
-    /// <summary>How many texts <see cref="statementEnds"/> holds, counted as the other compile memos are.</summary>
-    private int statementEndsCount;
+    private readonly BoundedCache<string, StatementEnds> statementEnds = new(PlanCacheCapacity, StringComparer.Ordinal);
 
     /// <summary>
     /// Publishes where the statements of a batch the compile walked end,
@@ -42,10 +40,7 @@ partial class Simulation
                 return null;
             return earlier.Incomplete ? earlier : null;
         }
-        if (Volatile.Read(ref this.statementEndsCount) >= PlanCacheCapacity)
-            return null;
-        if (this.statementEnds.TryAdd(batchText, ends))
-            _ = Interlocked.Increment(ref this.statementEndsCount);
+        _ = this.statementEnds.TryAdd(batchText, ends, pinned: SecretStatements.MayCarry(batchText));
         return ends.Incomplete ? ends : null;
     }
 

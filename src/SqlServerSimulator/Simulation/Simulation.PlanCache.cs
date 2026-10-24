@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
@@ -17,23 +16,17 @@ public sealed partial class Simulation
     /// current database name, parameter type signature); the entry records
     /// the parsed <see cref="Selection"/> and the <see cref="SchemaVersion"/>
     /// it was parsed under, so a DDL bump invalidates without per-entry walk.
-    /// Capped at <see cref="PlanCacheCapacity"/>: once full, new entries are
-    /// silently dropped (the working set for a stable EF app is dozens of
-    /// queries, so the cap is mostly defensive). Bypassed for batches that
+    /// Holds about <see cref="PlanCacheCapacity"/> entries, forgetting the
+    /// least recently executed when an insert takes it past that (see
+    /// <see cref="BoundedCache{TKey, TValue}"/>). Bypassed for batches that
     /// reference session-scoped tables (<c>#temp</c>, <c>##gtemp</c>,
     /// <c>@t</c>), contain DDL, or aren't a single top-level SELECT — the
     /// candidate is captured by the dispatch loop and dropped on any
     /// disqualifying condition.
     /// </summary>
-    private readonly ConcurrentDictionary<PlanCacheKey, PlanCacheEntry> planCache = new();
+    private readonly BoundedCache<PlanCacheKey, PlanCacheEntry> planCache = new(PlanCacheCapacity);
 
-    /// <summary>
-    /// How many keys <see cref="planCache"/> holds, counted on add rather than
-    /// read from the dictionary, whose <c>Count</c> takes all its locks. Only
-    /// <see cref="ClearPlanCache"/> removes keys, decrementing as it does.
-    /// </summary>
-    private int planCacheCount;
-
+    /// <summary>The entry count past which each of the compile-side memos evicts (<see cref="BoundedCache{TKey, TValue}"/>).</summary>
     private const int PlanCacheCapacity = 1024;
 
     /// <summary>
@@ -58,7 +51,7 @@ public sealed partial class Simulation
     internal long PlanCacheMisses;
 
     /// <summary>Test-observable: live count of entries in the plan cache.</summary>
-    internal int PlanCacheCount => Volatile.Read(ref this.planCacheCount);
+    internal int PlanCacheCount => this.planCache.Count;
 
     /// <summary>Cache key for <see cref="planCache"/> and <see cref="statementPlanSets"/>. The schema-version
     /// is intentionally NOT part of the key — it sits on the entry so a stale
@@ -177,18 +170,14 @@ public sealed partial class Simulation
         // connection's live setting still equals the value at parse.
         var key = new PlanCacheKey(text, dbName, batch.PlanCacheKey!.Value.DefaultSchemaName, paramSig, batch.Connection.QuotedIdentifiers, batch.Connection.DateFormat, batch.Connection.AnsiNulls, batch.Connection.ConcatNullYieldsNull);
         // Refresh-in-place semantics: when a DDL has invalidated the prior
-        // entry under this key, the indexer overwrites without growing the
-        // dictionary. The capacity cap therefore only gates fresh keys, not
-        // re-cached versions of an already-tracked one.
+        // entry under this key, the new one replaces it without growing the
+        // cache.
 #if DEBUG
         PlanCacheCaptureAudit.Verify(plans, text);
         PlanCacheCaptureAudit.VerifyPrincipalIndependent(batch.PrincipalReadWhileParsing, text);
 #endif
         var entry = new PlanCacheEntry([.. plans], [.. batch.PlanCacheSequenceLocks!], [.. batch.PlanCacheSequenceSpans!], batch.PlanCacheSchemaVersion);
-        if (this.planCache.ContainsKey(key))
-            this.planCache[key] = entry;
-        else if (this.PlanCacheCount < PlanCacheCapacity && this.planCache.TryAdd(key, entry))
-            _ = Interlocked.Increment(ref this.planCacheCount);
+        this.planCache.Set(key, entry);
     }
 
     /// <summary>
@@ -243,21 +232,10 @@ public sealed partial class Simulation
         bool Matches(PlanCacheKey key) =>
             (sqlHandle is null || BuiltInResources.SqlHandleOf(key.CommandText).AsSpan().SequenceEqual(sqlHandle.AsSpan(0, BuiltInResources.SqlHandleLength)))
             && (database is null || BuiltInToken.Equals(key.DatabaseName, database.Name));
-        foreach (var (key, _) in this.planCache)
-        {
-            if (Matches(key) && this.planCache.TryRemove(key, out _))
-                _ = Interlocked.Decrement(ref this.planCacheCount);
-        }
-        foreach (var (key, _) in this.compiledBatches)
-        {
-            if (Matches(key) && this.compiledBatches.TryRemove(key, out _))
-                _ = Interlocked.Decrement(ref this.compiledBatchCount);
-        }
-        foreach (var (key, _) in this.statementPlanSets)
-        {
-            if (Matches(key) && this.statementPlanSets.TryRemove(key, out _))
-                _ = Interlocked.Decrement(ref this.statementPlanSetCount);
-        }
+        var matches = Matches;
+        this.planCache.RemoveWhere(matches, static (matches, key) => matches(key));
+        this.compiledBatches.RemoveWhere(matches, static (matches, key) => matches(key));
+        this.statementPlanSets.RemoveWhere(matches, static (matches, key) => matches(key));
         this.RemoveCachedPlans(sqlHandle, database);
         if (sqlHandle is null)
         {

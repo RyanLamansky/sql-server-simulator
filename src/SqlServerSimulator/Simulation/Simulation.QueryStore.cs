@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
@@ -19,12 +18,10 @@ partial class Simulation
     /// Each distinct statement text's <see cref="QueryStoreShape"/>, read off
     /// its tokens once. Keyed by the text alone, which is all a shape
     /// depends on, and looked up by span so a repeat execution allocates
-    /// nothing; bounded like the plan cache, past which a new text is
-    /// analyzed on every execution rather than stored.
+    /// nothing; bounded like the plan cache, at four times its size since a
+    /// batch's statements each have one.
     /// </summary>
-    private readonly ConcurrentDictionary<string, QueryStoreShape> queryStoreShapes = new(StringComparer.Ordinal);
-
-    private int queryStoreShapeCount;
+    private readonly BoundedCache<string, QueryStoreShape> queryStoreShapes = new(PlanCacheCapacity * 4, StringComparer.Ordinal);
 
     /// <summary>
     /// Where a statement's capture started: its clock, the session's
@@ -737,21 +734,15 @@ partial class Simulation
     /// </summary>
     private QueryStoreShape QueryStoreShapeOf(ReadOnlySpan<char> text, Database database, ParserContext? parser, ParserContext.Checkpoint? tokensFrom)
     {
-        var lookup = this.queryStoreShapes.GetAlternateLookup<ReadOnlySpan<char>>();
-        if (lookup.TryGetValue(text, out var cached))
+        if (this.queryStoreShapes.TryGetValue(text, out var cached))
             return cached;
         var shape = QueryStoreShape.Read(new string(text), tokensFrom is { } start && parser is not null ? parser.StatementTokens(start) : null, database);
-        if (Volatile.Read(ref this.queryStoreShapeCount) < PlanCacheCapacity * 4 && this.queryStoreShapes.TryAdd(shape.Text, shape))
-            _ = Interlocked.Increment(ref this.queryStoreShapeCount);
+        _ = this.queryStoreShapes.TryAdd(shape.Text, shape);
         return shape;
     }
 
     /// <summary>Forgets every statement shape, with the plan cache: <c>DBCC FREEPROCCACHE</c>.</summary>
-    private void ClearQueryStoreShapes()
-    {
-        this.queryStoreShapes.Clear();
-        Volatile.Write(ref this.queryStoreShapeCount, 0);
-    }
+    private void ClearQueryStoreShapes() => this.queryStoreShapes.Clear();
 }
 
 /// <summary>

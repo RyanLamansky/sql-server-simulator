@@ -1,5 +1,4 @@
 using SqlServerSimulator.Storage;
-using System.Collections.Concurrent;
 
 namespace SqlServerSimulator.Parser;
 
@@ -28,23 +27,12 @@ namespace SqlServerSimulator.Parser;
 internal sealed class TokenMemo
 {
     /// <summary>
-    /// Hard cap, matching the plan cache's: once full, new texts tokenize
-    /// live forever. "First <see cref="Capacity"/> unique texts win" is the
-    /// same defensive policy documented there — a stable application's set of
-    /// distinct command texts (queries, modification batches, module bodies)
-    /// is far smaller.
+    /// The plan cache's bound, past which the least recently tokenized texts
+    /// are forgotten (see <see cref="BoundedCache{TKey, TValue}"/>).
     /// </summary>
     private const int Capacity = 1024;
 
-    private readonly ConcurrentDictionary<TokenMemoKey, Token[]> entries = new();
-
-    /// <summary>
-    /// How many entries <see cref="entries"/> holds, kept beside it because
-    /// <see cref="ConcurrentDictionary{TKey, TValue}.Count"/> takes every one of
-    /// the dictionary's locks, and a full memo asks on every fresh text.
-    /// Only <see cref="Clear"/> removes entries, decrementing as it does.
-    /// </summary>
-    private int count;
+    private readonly BoundedCache<TokenMemoKey, Token[]> entries = new(Capacity);
 
     /// <summary>Test-observable: memo lookups that found a token sequence.</summary>
     public long Hits;
@@ -53,7 +41,7 @@ internal sealed class TokenMemo
     public long Misses;
 
     /// <summary>Test-observable: live entry count.</summary>
-    public int Count => Volatile.Read(ref this.count);
+    public int Count => this.entries.Count;
 
     /// <summary>
     /// The stored token sequence for <paramref name="key"/>, or
@@ -74,38 +62,20 @@ internal sealed class TokenMemo
     }
 
     /// <summary>
-    /// Whether a fresh text is worth collecting tokens for. Checked before
-    /// the collecting <see cref="List{T}"/> is allocated so a full memo costs
-    /// a lookup and nothing else.
-    /// </summary>
-    public bool HasCapacity => this.Count < Capacity;
-
-    /// <summary>
     /// Stores a completed token sequence. Only ever called with the tokens of
     /// a text the tokenizer walked to its end without raising, so a memo
     /// never holds a partial scan — which is what keeps a mid-text
     /// tokenization error (Msg 102 / 103 / 105 / 113) firing at exactly the
     /// character it fired at on the first execution.
     /// </summary>
-    public void Publish(in TokenMemoKey key, Token[] tokens)
-    {
-        if (this.HasCapacity && this.entries.TryAdd(key, tokens))
-            _ = Interlocked.Increment(ref this.count);
-    }
+    public void Publish(in TokenMemoKey key, Token[] tokens) => _ = this.entries.TryAdd(key, tokens);
 
     /// <summary>
     /// Forgets every stored sequence — <c>DBCC FREEPROCCACHE</c> emptying the
     /// caches this one stands beside. Nothing can have gone stale, so this
     /// only costs the next executions their tokenizing.
     /// </summary>
-    public void Clear()
-    {
-        foreach (var (key, _) in this.entries)
-        {
-            if (this.entries.TryRemove(key, out _))
-                _ = Interlocked.Decrement(ref this.count);
-        }
-    }
+    public void Clear() => this.entries.Clear();
 }
 
 /// <summary>
