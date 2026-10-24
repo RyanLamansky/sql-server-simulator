@@ -1281,7 +1281,10 @@ internal sealed partial class BatchContext
         {
             return;
         }
-        table.SupersededKeyImages.GetOrAdd(connection.LockOwner, static _ => new())[(pageIndex, slotIndex)] = (image, resource);
+        // The owner alone writes its map, so one lock stripe serves it, where
+        // a processor's worth of stripes and their table were allocated for
+        // every transaction's first delete of a table.
+        table.SupersededKeyImages.GetOrAdd(connection.LockOwner, static _ => new(concurrencyLevel: 1, capacity: 0))[(pageIndex, slotIndex)] = (image, resource);
     }
 
     /// <summary>

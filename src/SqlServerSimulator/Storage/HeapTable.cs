@@ -1047,8 +1047,13 @@ internal sealed class HeapTable : SchemaObject
     [MethodImpl(Tiering.OptimizeFirstCall)]
     internal void RetireSupersededKeyImage(SessionToken owner, (int PageIndex, int SlotIndex) address)
     {
-        if (this.SupersededKeyImages.TryGetValue(owner, out var images) && images.TryRemove(address, out _) && images.IsEmptyLockFree())
+        // Every row a rollback lets go asks whether the map has emptied, and an
+        // enumeration to its first entry cost an enumerator and a walk from the
+        // start of buckets that drain as the rollback runs.
+#pragma warning disable SSS012 // IsEmpty answers yes once per map, at its last release, and sweeps its one stripe then.
+        if (this.SupersededKeyImages.TryGetValue(owner, out var images) && images.TryRemove(address, out _) && images.IsEmpty)
             _ = this.SupersededKeyImages.TryRemove(owner, out _);
+#pragma warning restore SSS012
     }
 
     /// <summary>

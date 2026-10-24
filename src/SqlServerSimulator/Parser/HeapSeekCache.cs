@@ -233,6 +233,8 @@ internal sealed class HeapSeekCache
         keys = null;
         lock (this.gate)
         {
+            if (!keyed && !this.ResolvesWithoutRebuild(heap, ordinals, commons) && this.ReadsInKeyOrder(heap, schema, lobStore, ordinals, commons))
+                return null;
             var entry = this.ResolveEntry(heap, schema, lobStore, ordinals, commons, traced: false);
             if (entry.HeapOrdered && !keyed)
                 return null;
@@ -410,6 +412,49 @@ internal sealed class HeapSeekCache
         }
 
         return this.Rebuild(heap, schema, lobStore, ordinals, commons, lead, traced);
+    }
+
+    // Whether ResolveEntry finds an entry for the request it can bring up to
+    // date without a scan: one covering it, current or replayable from the
+    // journal. Caller holds the gate.
+    private bool ResolvesWithoutRebuild(Heap heap, int[] ordinals, SqlType[] commons) =>
+        this.byLeadOrdinal.TryGetValue(ordinals[0], out var entry) && entry.Covers(ordinals, commons)
+        && (entry.Generation == Volatile.Read(ref heap.MutationGeneration) || heap.CanReplaySeekJournalSince(entry.Generation));
+
+    // The heap's verdict from ReadsInKeyOrder and the generation and key it
+    // was read at.
+    private (long Generation, int[] Ordinals, bool InOrder)? keyOrderVerdict;
+
+    // Whether ascending addresses read the heap's live rows in ascending order
+    // of the key, from one pass over the keys, kept until the next write. A
+    // scan following a clustered key asks only this of the entry, so where the
+    // entry would have to be rebuilt — after a write the journal couldn't
+    // keep, a bulk DELETE or a rollback of one — the pass answers it without
+    // the buckets a rebuild lists every key into, which a statement deleting
+    // a table's rows and rolling back paid every time. A key out of order
+    // ends the pass, and the caller builds the entry for the order it needs.
+    // Caller holds the gate.
+    private bool ReadsInKeyOrder(Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons)
+    {
+        // Read ahead of the pass, so a write landing during it leaves the
+        // verdict a generation behind and the next scan reads again.
+        var generation = Volatile.Read(ref heap.MutationGeneration);
+        if (this.keyOrderVerdict is var (read, readOrdinals, inOrder) && read == generation && readOrdinals.AsSpan().SequenceEqual(ordinals))
+            return inOrder;
+        var ordered = true;
+        SqlValueKey? previous = null;
+        foreach (var (_, _, bytes) in heap.EnumerateRowsWithAddress())
+        {
+            if (!TryComputeEntryKey(bytes, ordinals, commons, schema, lobStore, out var key)
+                || (previous is { } last && KeyTupleComparer.Instance.Compare(key, last) < 0))
+            {
+                ordered = false;
+                break;
+            }
+            previous = key;
+        }
+        this.keyOrderVerdict = (generation, ordinals, ordered);
+        return ordered;
     }
 
     private static bool LeadsKey(int[] ordinals, int[] key) =>

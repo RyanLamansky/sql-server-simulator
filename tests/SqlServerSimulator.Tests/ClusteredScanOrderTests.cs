@@ -71,4 +71,31 @@ public sealed class ClusteredScanOrderTests
         _ = simulation.ExecuteNonQuery("delete t where a = 0; insert t values (9)");
         AreEqual("1,2,3,9", Column(simulation, "select a from t"));
     }
+
+    // Rolling back a delete of more rows than the seek cache's journal keeps
+    // sends the next scan to read the heap's order afresh rather than replay.
+    [TestMethod]
+    [DataRow("declare @i int = 1; while @i <= 600 begin insert t values (@i); set @i += 1 end")]
+    [DataRow("declare @i int = 600; while @i >= 1 begin insert t values (@i); set @i -= 1 end")]
+    [DataRow("declare @i int = 1; while @i <= 600 begin insert t values ((@i * 7) % 600 + 1); set @i += 1 end")]
+    public void KeyOrderHoldsAcrossARolledBackBulkDelete(string fill)
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateOpenConnection();
+        _ = connection.CreateCommand($"create table t (a int primary key); set nocount on; {fill}").ExecuteNonQuery();
+        var keyOrder = string.Join(",", Enumerable.Range(1, 600));
+        AreEqual(keyOrder, Column(connection, "select a from t"));
+        _ = connection.CreateCommand("begin tran; delete t; rollback").ExecuteNonQuery();
+        AreEqual(keyOrder, Column(connection, "select a from t"));
+    }
+
+    private static string Column(System.Data.Common.DbConnection connection, string sql)
+    {
+        using var command = connection.CreateCommand(sql);
+        using var reader = command.ExecuteReader();
+        var values = new List<string>();
+        while (reader.Read())
+            values.Add($"{reader.GetValue(0)}");
+        return string.Join(",", values);
+    }
 }

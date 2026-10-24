@@ -437,6 +437,16 @@ internal sealed class Heap(bool sessionPrivate = false)
     }
 
     /// <summary>
+    /// Whether <see cref="SnapshotSeekJournalSince"/> would answer for
+    /// <paramref name="sinceGen"/> rather than send its caller to rebuild.
+    /// </summary>
+    internal bool CanReplaySeekJournalSince(long sinceGen)
+    {
+        using (this.EnterLatch())
+            return this.seekJournal is not null && sinceGen >= this.seekJournalDroppedThroughGen;
+    }
+
+    /// <summary>
     /// Returns the journal events with <see cref="SeekJournalEvent.Generation"/>
     /// greater than <paramref name="sinceGen"/> (in mutation order), or null when
     /// the cache can't safely replay — either journaling isn't active or
