@@ -1133,7 +1133,7 @@ internal sealed partial class Selection
 
         var bound = bounds[ordinal];
         switch (EvaluateRangeBounds(bound, source.StoredSchema[ordinal].Type, batch, outerResolver,
-            out var common, out var hasLower, out var lowerValue, out var hasUpper, out var upperValue, out var likeFallback))
+            out var common, out var hasLower, out var lowerValue, out var hasUpper, out var upperValue))
         {
             case BoundEval.Decline: return false;
             case BoundEval.Null: return true;
@@ -1145,8 +1145,7 @@ internal sealed partial class Selection
             table.Heap, source.StoredSchema, source.LobStore, ordinal, common,
             hasLower, lowerValue, bound.LowerInclusive, hasUpper, upperValue, bound.UpperInclusive,
             rowCount >= RangeSpanGateMinRows ? rowCount / RangeSpanGateDivisor : int.MaxValue,
-            Array.IndexOf(key, -1) < 0 ? key : null,
-            likeFallback?.Behind([]));
+            Array.IndexOf(key, -1) < 0 ? key : null);
 
         if (found is null)
         {
@@ -1198,36 +1197,12 @@ internal sealed partial class Selection
     // Null → a NULL bound makes every comparison UNKNOWN, so the range matches
     // nothing (a valid empty seek); Value → the present bound value(s) are
     // coerced to <paramref name="common"/> and usable.
-    //
-    // A LIKE range read through its prefix's punctuation holds a key its
-    // collation orders by its fallback order only where the seek cache
-    // settles it (the overload below), so a row compared with the bounds one
-    // by one — an uncommitted delete waited out, a seek's landing page — is
-    // compared with the range of the prefix's letters and digits alone.
     private static BoundEval EvaluateRangeBounds(
         RangeBoundExprs bound, SqlType columnType, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver,
         out SqlType common, out bool hasLower, out SqlValue lowerValue, out bool hasUpper, out SqlValue upperValue)
     {
-        var evaluated = EvaluateRangeBounds(bound, columnType, batch, outerResolver, out common, out hasLower, out lowerValue, out hasUpper, out upperValue, out var likeFallback);
-        if (likeFallback is { } wide)
-        {
-            (hasLower, lowerValue) = (wide.Lower.HasValue, wide.Lower.GetValueOrDefault());
-            (hasUpper, upperValue) = (wide.Upper.HasValue, wide.Upper.GetValueOrDefault());
-        }
-        return evaluated;
-    }
-
-    // The bounds above, with the letters-and-digits range a LIKE's seek walks
-    // instead where its keys can't hold the range read through punctuation
-    // (EvaluateLikeBounds); null for any other bound.
-    private static BoundEval EvaluateRangeBounds(
-        RangeBoundExprs bound, SqlType columnType, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver,
-        out SqlType common, out bool hasLower, out SqlValue lowerValue, out bool hasUpper, out SqlValue upperValue,
-        out LikeFallback? likeFallback)
-    {
-        likeFallback = null;
         if (bound.LikePattern is { } pattern)
-            return EvaluateLikeBounds(pattern, bound.LikeEscape, columnType, batch, outerResolver, out common, out hasLower, out lowerValue, out hasUpper, out upperValue, out likeFallback);
+            return EvaluateLikeBounds(pattern, bound.LikeEscape, columnType, batch, outerResolver, out common, out hasLower, out lowerValue, out hasUpper, out upperValue);
         common = columnType;
         hasLower = bound.Lower is not null;
         hasUpper = bound.Upper is not null;
@@ -1270,19 +1245,14 @@ internal sealed partial class Selection
     // matched under another (an explicit COLLATE), one offering no letter or
     // digit to seek on, and a pattern or escape the LIKE would raise on all
     // decline to the scan, which matches or raises as the LIKE does; a NULL
-    // pattern matches nothing. A range read through the prefix's spaces and
-    // punctuation comes with the range of its letters and digits alone
-    // (likeFallback, unbounded when the prefix leads with punctuation), which
-    // a seek walks instead over keys a collation orders by its fallback order
-    // (Collation.OrdersByFallback); where the two agree it is null.
+    // pattern matches nothing.
     private static BoundEval EvaluateLikeBounds(
         Expression patternExpr, Expression? escapeExpr, SqlType columnType, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver,
-        out SqlType common, out bool hasLower, out SqlValue lowerValue, out bool hasUpper, out SqlValue upperValue, out LikeFallback? likeFallback)
+        out SqlType common, out bool hasLower, out SqlValue lowerValue, out bool hasUpper, out SqlValue upperValue)
     {
         common = columnType;
         hasLower = hasUpper = false;
         lowerValue = upperValue = default;
-        likeFallback = null;
         if (columnType.Category != SqlTypeCategory.String || columnType.IsLob || columnType.Collation is not { SortsAsciiPrefixesTogether: true } collation)
             return BoundEval.Decline;
         SqlValue pattern, escape;
@@ -1298,19 +1268,13 @@ internal sealed partial class Selection
         }
         if (pattern.IsNull)
             return BoundEval.Null;
-        var escapeCharacter = escape.IsNull ? null : (char?)escape.AsString[0];
-        var throughPunctuation = collation.SortsPrintableAsciiPrefixesTogether;
         if (pattern.Type.Category != SqlTypeCategory.String
             || Collation.Resolve(columnType, pattern.Type) is not { } resolved || !ReferenceEquals(resolved.Collation, collation)
             || (!escape.IsNull && (escape.Type.Category != SqlTypeCategory.String || escape.AsString.Length != 1))
-            || !LikePrefixRange.TryGet(pattern.AsString, escapeCharacter, throughPunctuation, out var lower, out var upper))
+            || !LikePrefixRange.TryGet(pattern.AsString, escape.IsNull ? null : escape.AsString[0], collation.SortsPrintableAsciiPrefixesTogether, out var lower, out var upper))
         {
             return BoundEval.Decline;
         }
-        string? fallbackLower = null, fallbackUpper = null;
-        if (throughPunctuation && LikePrefixRange.TryGet(pattern.AsString, escapeCharacter, throughPunctuation: false, out var lettersAndDigits, out fallbackUpper))
-            fallbackLower = lettersAndDigits;
-        var fallsBack = throughPunctuation && (fallbackLower != lower || fallbackUpper != upper);
         // Bounds in the column's own type read the ordered view every other
         // seek of the column shares. A prefix longer than the column holds
         // nothing the pattern can match, however its bounds convert.
@@ -1319,8 +1283,6 @@ internal sealed partial class Selection
             lowerValue = SqlValue.FromNVarchar(lower).CoerceTo(columnType);
             if (upper is not null)
                 upperValue = SqlValue.FromNVarchar(upper).CoerceTo(columnType);
-            if (fallsBack)
-                likeFallback = new LikeFallback(Bound(fallbackLower, columnType), Bound(fallbackUpper, columnType));
         }
         catch (Exception ex) when (ex is NotSupportedException or SimulatedSqlException)
         {
@@ -1329,24 +1291,6 @@ internal sealed partial class Selection
         hasLower = true;
         hasUpper = upper is not null;
         return BoundEval.Value;
-    }
-
-    // A LIKE range bound in the column's own type, or null where the range
-    // is open on that side.
-    private static SqlValue? Bound(string? text, SqlType columnType) =>
-        text is null ? null : SqlValue.FromNVarchar(text).CoerceTo(columnType);
-
-    // A LIKE range's letters-and-digits fallback (EvaluateLikeBounds), lower
-    // inclusive and upper exclusive as the range itself.
-    private readonly struct LikeFallback(SqlValue? lower, SqlValue? upper)
-    {
-        public readonly SqlValue? Lower = lower;
-        public readonly SqlValue? Upper = upper;
-
-        // The fallback as the seek cache takes it, behind a pinned prefix.
-        public HeapSeekCache.FallbackBounds Behind(SqlValue[] prefix) =>
-            new(ComposeBound(prefix, this.Lower.HasValue, this.Lower.GetValueOrDefault()), true,
-                ComposeBound(prefix, this.Upper.HasValue, this.Upper.GetValueOrDefault()), !this.Upper.HasValue);
     }
 
     // Per indexable string column of THIS source, the first LIKE conjunct over
@@ -1771,11 +1715,10 @@ internal sealed partial class Selection
                 default: commons[pinnedLength] = hasLower ? SqlType.Promote(commons[pinnedLength], upperCommon) : upperCommon; hasUpper = true; upperInclusive = orderColumnBounds.UpperInclusive; break;
             }
         }
-        LikeFallback? likeFallback = null;
         if (!hasLower && !hasUpper && orderColumnBounds.LikePattern is { } likeFold)
         {
             switch (EvaluateLikeBounds(likeFold, orderColumnBounds.LikeEscape, orderColumnType, batch, outerResolver,
-                out _, out var likeHasLower, out var likeLower, out var likeHasUpper, out var likeUpper, out likeFallback))
+                out _, out var likeHasLower, out var likeLower, out var likeHasUpper, out var likeUpper))
             {
                 // A pattern with no prefix to seek on leaves the walk whole.
                 case BoundEval.Decline:
@@ -1873,7 +1816,7 @@ internal sealed partial class Selection
             ? cache.OrderedGroup(table.Heap, source.StoredSchema, source.LobStore, fullPrefix, commons, pinnedKey)
             : cache.OrderedSeek(
                 table.Heap, source.StoredSchema, source.LobStore, fullPrefix, commons,
-                lowerKey, lowerKeyInclusive, upperKey, upperKeyInclusive, likeFallback?.Behind(prefixValues));
+                lowerKey, lowerKeyInclusive, upperKey, upperKeyInclusive);
         if (snapshotXid is { } snapshot)
         {
             if (!SnapshotOrderHolds(table, generation))
@@ -1906,7 +1849,7 @@ internal sealed partial class Selection
         // A statement waiting on its client mid-result reads on from where its
         // scan stopped, as the index stands then (see OrderedScanRest).
         var rest = new OrderedScanRest(cache, table.Heap, source.StoredSchema, source.LobStore, fullPrefix, commons,
-            lowerKey, lowerKeyInclusive, upperKey, upperKeyInclusive, descending, likeFallback?.Behind(prefixValues));
+            lowerKey, lowerKeyInclusive, upperKey, upperKeyInclusive, descending);
         if (plan.RowTxScoped)
         {
             skipped = 0;
@@ -1944,8 +1887,7 @@ internal sealed partial class Selection
     /// </summary>
     private sealed class OrderedScanRest(
         HeapSeekCache cache, Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons,
-        SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive, bool descending,
-        HeapSeekCache.FallbackBounds? fallback = null)
+        SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive, bool descending)
     {
         private StatementContext? statement;
         private int suspensions;
@@ -1986,20 +1928,14 @@ internal sealed partial class Selection
         public (int Page, int Slot)[] After(byte[]? last, HeapTable table, BatchContext batch)
         {
             var (from, fromInclusive, to, toInclusive) = (lower, lowerInclusive, upper, upperInclusive);
-            var wide = fallback;
             if (last is not null && HeapSeekCache.TryComputeKey(last, ordinals, commons, schema, lobStore, out var key))
             {
                 if (descending)
-                    (to, toInclusive, wide) = (key, true, fallback is { } bounds ? new(bounds.Lower, bounds.LowerInclusive, key, true) : null);
+                    (to, toInclusive) = (key, true);
                 else
-                    (from, fromInclusive, wide) = (key, true, fallback is { } bounds ? new(key, true, bounds.Upper, bounds.UpperInclusive) : null);
+                    (from, fromInclusive) = (key, true);
             }
-            var order = cache.OrderedSeek(heap, schema, lobStore, ordinals, commons, from, fromInclusive, to, toInclusive, wide);
-            // Another request's writes are placed by comparing each with the
-            // bounds, which a fallback-ordered key is held to only by the
-            // letters and digits.
-            if (wide is { } letters)
-                (from, fromInclusive, to, toInclusive) = (letters.Lower, letters.LowerInclusive, letters.Upper, letters.UpperInclusive);
+            var order = cache.OrderedSeek(heap, schema, lobStore, ordinals, commons, from, fromInclusive, to, toInclusive);
             return batch.OwnWritesOf(table) is { } own
                 ? BatchContext.WithOwnWrites(table, own, ordinals, commons, order, from, fromInclusive, to, toInclusive)
                 : order;

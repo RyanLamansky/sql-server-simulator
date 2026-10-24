@@ -36,8 +36,10 @@ internal abstract partial class Collation
     /// and ß expanding, a ligature's last letter weighed above every
     /// accent.</item>
     /// </list>
-    /// A string with a character outside the table's repertoire falls back to
-    /// the inner <see cref="CultureCollation"/>'s <see cref="CompareInfo"/> path.
+    /// A character outside the table's repertoire weighs as the table text the
+    /// inner <see cref="CultureCollation"/> calls it equal to, as an accent, or
+    /// as a foreign element placed by that collation's order (see
+    /// <see cref="Outsider"/>), so every string has one weight sequence.
     /// Metadata (name, description, storage encoding) delegates to that same
     /// parser-built inner. See <c>docs/claude/collations.md</c>.
     /// </summary>
@@ -297,59 +299,6 @@ internal abstract partial class Collation
             { 'æ', "ae" }, { 'Æ', "AE" },
         }.ToFrozenDictionary();
 
-        // In-repertoire characters whose GetHashCode must fold onto another
-        // spelling. Each entry's target is inner-collation-equal to its key
-        // (validated by test against an exhaustive ICU scan), and equality
-        // can therefore relate an out-of-repertoire spelling to in-repertoire
-        // strings using EITHER form — e.g. fullwidth `２` equals both `2`
-        // and `²` through the inner fallback, so `2` and `²` must share a
-        // hash even though the weight tables keep them unequal (a legal
-        // collision). Covers: the ICU-completely-ignorable controls + soft
-        // hyphen (fold to empty), NBSP → space, feminine/masculine
-        // ordinals → base letter, superscript digits → digits, Thai digits →
-        // ASCII digits, vulgar fractions → their FRACTION SLASH compat
-        // decompositions (out-of-repertoire targets, deliberately — both
-        // spellings then take the inner-hash path together), the CP1252
-        // case pairs whose legacy varchar weights are asymmetric
-        // (Œ Š Ÿ Ž → lowercase), and Thai SARA AM → its NIKHAHIT + SARA AA
-        // compat decomposition (ICU equates the spellings; the weight
-        // tables don't). CollationHashConsistencyTests sweeps the
-        // repertoire and Unicode blocks to keep this list complete.
-        private static readonly FrozenDictionary<char, string> hashFolds = BuildHashFolds();
-
-        private static FrozenDictionary<char, string> BuildHashFolds()
-        {
-            var map = new Dictionary<char, string>
-            {
-                ['\u00A0'] = " ",
-                ['\u00AA'] = "a",
-                ['\u00BA'] = "o",
-                ['\u00B9'] = "1",
-                ['\u00B2'] = "2",
-                ['\u00B3'] = "3",
-                ['\u00BC'] = "1\u20444",
-                ['\u00BD'] = "1\u20442",
-                ['\u00BE'] = "3\u20444",
-                ['\u0152'] = "\u0153",
-                ['\u0160'] = "\u0161",
-                ['\u0178'] = "\u00FF",
-                ['\u017D'] = "\u017E",
-                ['\u0E33'] = "\u0E4D\u0E32",
-            };
-            for (var d = 0; d <= 9; d++)
-                map[(char)(0x0E50 + d)] = ((char)('0' + d)).ToString();
-            foreach (var ignorable in (int[])[
-                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-                0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
-                0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
-                0x7F, 0x81, 0x8D, 0x8F, 0x90, 0x9D, 0xAD])
-            {
-                map[(char)ignorable] = string.Empty;
-            }
-
-            return map.ToFrozenDictionary();
-        }
-
         // The SQL names' varchar sort orders share sort order 52's letters
         // (the accent-folded rank, the cedilla folded onto c) and its
         // ligatures, and differ in what follows them (probed 2026-10-02
@@ -382,10 +331,16 @@ internal abstract partial class Collation
         private static readonly WeightTable unicode100 = WeightTable.FromRecords(Version100Weights, unicodeExpansion);
 
         // The parser-built CultureCollation for this name, supplying the
-        // metadata (description, storage encoding) and the CompareInfo fallback
-        // past the table's repertoire. Typed as the sealed concrete body so the
-        // JIT devirtualizes the delegated calls.
+        // metadata (description, storage encoding) and the equality and order
+        // that place characters past the table's repertoire (Outsider). Typed
+        // as the sealed concrete body so the JIT devirtualizes the delegated
+        // calls.
         private readonly CultureCollation inner;
+
+        // The inner body's CompareInfo and the name's strengths in it, which
+        // order foreign elements (ForeignOptions).
+        private readonly CompareInfo compareInfo;
+        private readonly CompareOptions matchingOptions;
         private readonly WeightTable table;
         private readonly Collation? varcharBody;
 
@@ -394,11 +349,15 @@ internal abstract partial class Collation
         private readonly bool caseSensitive;
         private readonly bool accentSensitive;
 
-        // Lazily-resolved hash folds for runes outside the repertoire,
-        // computed by ComputeRuneFold on first sight (null = no fold; the rune
-        // keeps its own identity). Per body, since each name's inner equality
-        // defines its own fold relation.
-        private readonly System.Collections.Concurrent.ConcurrentDictionary<int, string?> runeFoldCache = new();
+        // How each character past the table weighs, resolved on first sight
+        // and kept per body, since each name's strengths decide which table
+        // text the inner body calls a character equal to.
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<int, Outsider> outsiders = new();
+
+        // The table letters both orders agree on, in the inner body's order of
+        // letters alone, with their table weights (AnchorOf); built on the
+        // first foreign element.
+        private (string Letter, int Weight)[]? anchors;
 
         // Built by the parser (Collation.Parser.cs) for every name the table
         // serves, handing in the freshly-constructed CultureCollation. A
@@ -409,6 +368,7 @@ internal abstract partial class Collation
         internal Latin1GeneralTableCollation(CultureCollation inner, int? version)
         {
             this.inner = inner;
+            (this.compareInfo, this.matchingOptions) = inner.LinguisticMatching.GetValueOrDefault();
             this.table = version is >= 100 ? unicode100 : unicode80;
             this.caseSensitive = inner.CaseSensitive;
             this.accentSensitive = inner.AccentSensitive;
@@ -446,6 +406,7 @@ internal abstract partial class Collation
         private Latin1GeneralTableCollation(CultureCollation inner, WeightTable varcharTable, bool caseLevel, bool prefersUppercase)
         {
             this.inner = inner;
+            (this.compareInfo, this.matchingOptions) = inner.LinguisticMatching.GetValueOrDefault();
             this.table = varcharTable;
             this.caseSensitive = caseLevel;
             this.accentSensitive = true;
@@ -481,22 +442,24 @@ internal abstract partial class Collation
 
         internal override bool IsSupplementaryCharacterAware => this.inner.IsSupplementaryCharacterAware;
 
-        // Text past the table's repertoire matches through the inner culture
-        // body's CompareInfo; text inside it through the table (TableMatch).
         internal override (CompareInfo Info, CompareOptions Options)? LinguisticMatching => this.inner.LinguisticMatching;
 
-        internal override bool MatchesByTable(ReadOnlySpan<char> text) => this.table.Covers(text);
+        // Every text weighs by the table, a character past its repertoire as
+        // its Outsider, so every match goes through it.
+        internal override bool MatchesByTable(ReadOnlySpan<char> text) => true;
 
         // A run matches where its collation elements equal the subject's at
         // the name's strengths and end on a character boundary, so a ligature
         // matches its letters and half of one matches nothing — N'ß' LIKE N'ss'
         // and CHARINDEX(N'ss', N'aßb') find it, N'ß' LIKE N's%' doesn't — and
         // the characters weighing nothing right after it ride along (probed
-        // 2026-10-02 against SQL Server 2025).
-        internal override int TableMatch(ReadOnlySpan<char> subject, ReadOnlySpan<char> run)
+        // 2026-10-02 against SQL Server 2025) — after an anchored run weighing
+        // nothing too, so an emoji the unversioned names don't know is LIKE
+        // itself.
+        internal override int TableMatch(ReadOnlySpan<char> subject, ReadOnlySpan<char> run, bool anchored)
         {
-            var target = new MatchCursor(run, this.table);
-            var have = new MatchCursor(subject, this.table);
+            var target = new MatchCursor(run, this);
+            var have = new MatchCursor(subject, this);
             var matchedEnd = -1;
             while (target.MoveNext())
             {
@@ -505,37 +468,76 @@ internal abstract partial class Collation
                 matchedEnd = have.CharEnd;
             }
             if (matchedEnd < 0)
-                return 0;
-            if (have.MoveNext() && have.CharStart < matchedEnd)
+            {
+                if (!anchored)
+                    return 0;
+                matchedEnd = 0;
+            }
+            else if (have.MoveNext() && have.CharStart < matchedEnd)
+            {
                 return -1;
-            while (matchedEnd < subject.Length && this.table.Lookup(subject[matchedEnd]).Kind == WeightKind.Weightless)
-                matchedEnd++;
+            }
+            while (matchedEnd < subject.Length && this.WeighsNothingAt(subject, matchedEnd, out var length))
+                matchedEnd += length;
             return matchedEnd;
+        }
+
+        internal override bool BeginsTableMatch(ReadOnlySpan<char> s, int index)
+        {
+            var entry = this.table.Lookup(s[index]);
+            if (entry.Kind != WeightKind.Absent)
+                return entry.Kind is not (WeightKind.Weightless or WeightKind.Diacritic);
+            var outsider = this.OutsiderOf(RuneAt(s, index, out _));
+            return outsider.Spelling is not { Length: 0 } && outsider.Mark == 0;
+        }
+
+        // Whether the character at s[i] weighs nothing — a weightless table
+        // character, or one past the table whose spelling is empty.
+        private bool WeighsNothingAt(ReadOnlySpan<char> s, int i, out int length)
+        {
+            length = 1;
+            var entry = this.table.Lookup(s[i]);
+            if (entry.Kind != WeightKind.Absent)
+                return entry.Kind == WeightKind.Weightless;
+            return this.OutsiderOf(RuneAt(s, i, out length)).Spelling is { Length: 0 };
         }
 
         private bool SameElement(ref MatchCursor x, ref MatchCursor y) =>
             x.Minimal == y.Minimal
             && (x.Minimal
                 ? x.Secondary == y.Secondary
-                : x.Primary == y.Primary
-                    && (this.table.LegacySortOrder
-                        ? (this.caseSensitive ? x.Case == y.Case : x.Secondary == y.Secondary) && x.Tertiary == y.Tertiary
-                        : (!this.accentSensitive || x.Secondary == y.Secondary) && (!this.caseSensitive || x.Case == y.Case)));
+                : x.IsForeign || y.IsForeign
+                    ? x.IsForeign && y.IsForeign && x.Primary == y.Primary && this.compareInfo.Compare(x.ForeignText, y.ForeignText, this.matchingOptions) == 0
+                    : x.Primary == y.Primary
+                        && (this.table.LegacySortOrder
+                            ? (this.caseSensitive ? x.Case == y.Case : x.Secondary == y.Secondary) && x.Tertiary == y.Tertiary
+                            : (!this.accentSensitive || x.Secondary == y.Secondary) && (!this.caseSensitive || x.Case == y.Case)));
 
         // The collation elements a match compares, minimal-weight characters
         // included, each tagged with the character span it came from — an
-        // expansion's letters share their ligature's.
-        private ref struct MatchCursor(ReadOnlySpan<char> s, WeightTable table)
+        // expansion's letters share their ligature's, and a character past the
+        // table's spelling shares that character's.
+        private ref struct MatchCursor(ReadOnlySpan<char> s, Latin1GeneralTableCollation owner)
         {
             private readonly ReadOnlySpan<char> s = s;
 
-            private readonly WeightTable table = table;
+            private readonly Latin1GeneralTableCollation owner = owner;
+
+            private readonly WeightTable table = owner.table;
 
             private int index;
 
             private string? expansion;
 
             private int expansionPos;
+
+            // The table text a character past the table weighs as, read ahead
+            // of the string's own characters, and that character's span.
+            private string? spelling;
+
+            private int spellingPos;
+
+            private int spelledStart;
 
             internal bool Minimal;
 
@@ -551,6 +553,15 @@ internal abstract partial class Collation
 
             internal int CharEnd;
 
+            // A foreign element's text in the string; empty for a table element.
+            private int foreignStart;
+
+            private int foreignLength;
+
+            internal readonly bool IsForeign => this.foreignLength != 0;
+
+            internal readonly ReadOnlySpan<char> ForeignText => this.s.Slice(this.foreignStart, this.foreignLength);
+
             internal bool MoveNext()
             {
                 if (this.expansion is not null)
@@ -559,20 +570,40 @@ internal abstract partial class Collation
                     return true;
                 }
 
-                while (this.index < this.s.Length)
+                while (true)
                 {
-                    var start = this.index;
-                    var ch = this.s[this.index++];
+                    char ch;
+                    int start;
+                    var spelled = this.spelling is not null;
+                    if (spelled)
+                    {
+                        if (this.spellingPos == this.spelling!.Length)
+                        {
+                            this.spelling = null;
+                            continue;
+                        }
+                        ch = this.spelling[this.spellingPos++];
+                        start = this.spelledStart;
+                    }
+                    else if (this.index < this.s.Length)
+                    {
+                        start = this.index;
+                        ch = this.s[this.index++];
+                    }
+                    else
+                    {
+                        return false;
+                    }
+
                     var entry = this.table.Lookup(ch);
+                    this.foreignLength = 0;
                     switch (entry.Kind)
                     {
                         case WeightKind.Weighted:
-                            (this.Minimal, this.Primary, this.Secondary, this.Tertiary, this.Case) = (false, entry.Primary, entry.Secondary * MarkSpan, 0, entry.Case);
-                            if (this.index < this.s.Length && this.table.Lookup(this.s[this.index]) is { Kind: WeightKind.Diacritic } mark)
-                            {
-                                this.index++;
-                                this.Secondary += mark.Secondary;
-                            }
+                            var accents = 0;
+                            if (!spelled && this.index < this.s.Length && this.s[this.index] >= FirstMark)
+                                entry = this.owner.WithMarks(this.s, ref this.index, entry, out accents);
+                            (this.Minimal, this.Primary, this.Secondary, this.Tertiary, this.Case) = (false, entry.Primary, (entry.Secondary * MarkSpan) + accents, 0, entry.Case);
                             (this.CharStart, this.CharEnd) = (start, this.index);
                             return true;
                         case WeightKind.MinimalWeight:
@@ -585,18 +616,34 @@ internal abstract partial class Collation
                             (this.CharStart, this.CharEnd) = (start, this.index);
                             this.Expanded();
                             return true;
+                        case WeightKind.Absent when !spelled:
+                            var rune = RuneAt(this.s, start, out var length);
+                            this.index = start + length;
+                            var outsider = this.owner.OutsiderOf(rune);
+                            if (outsider.Spelling is { } spelling)
+                            {
+                                if (spelling.Length != 0)
+                                    (this.spelling, this.spellingPos, this.spelledStart) = (spelling, 0, start);
+                                continue;
+                            }
+                            if (outsider.Mark != 0)
+                                continue;
+                            this.index = this.owner.PastMarks(this.s, this.index);
+                            (this.Minimal, this.Primary, this.Secondary, this.Tertiary, this.Case) = (false, outsider.Anchor, 0, 0, 0);
+                            (this.foreignStart, this.foreignLength) = (start, this.index - start);
+                            (this.CharStart, this.CharEnd) = (start, this.index);
+                            return true;
                         default:
                             continue;
                     }
                 }
-
-                return false;
             }
 
             private void Expanded()
             {
                 var letter = this.table.Lookup(this.expansion![this.expansionPos++]);
                 (this.Minimal, this.Primary, this.Secondary, this.Tertiary, this.Case) = (false, letter.Primary, letter.Secondary * MarkSpan, 1, letter.Case);
+                this.foreignLength = 0;
                 if (this.expansionPos >= this.expansion.Length)
                 {
                     if (this.table.LegacySortOrder)
@@ -617,18 +664,14 @@ internal abstract partial class Collation
         internal override bool WeightsNul => this.table.LegacySortOrder;
 
         // Its letters and digits order alphabetically, and only ligatures
-        // weigh as more than one character, never two characters as one;
-        // outside the table's repertoire it orders and matches as its inner
-        // invariant-culture body does.
+        // weigh as more than one character, never two characters as one; a
+        // character past its repertoire matches and orders as its Outsider,
+        // which LIKE matches to a run's character only where it weighs as that
+        // character, so the table matches and orders every text by the same
+        // weights, a run's spaces and punctuation included.
         internal override bool SortsAsciiPrefixesTogether => true;
 
-        // Over its repertoire the table matches and orders by the same
-        // weights; a key holding a character outside it orders by the inner
-        // body instead (Compare), which weighs some of the table's own
-        // characters apart from the table.
         internal override bool SortsPrintableAsciiPrefixesTogether => true;
-
-        internal override bool OrdersByFallback(string text) => !this.table.Covers(text);
 
         /// <summary>Whether this is varchar data under sort order 52 (or the Pref name's 53, which weighs alike).</summary>
         internal bool UsesSortOrder52 => ReferenceEquals(this.table, sortOrder52);
@@ -639,113 +682,38 @@ internal abstract partial class Collation
         public override int Compare(string? x, string? y) =>
             x is null ? (y is null ? 0 : -1)
             : y is null ? 1
-            : this.table.Covers(x) && this.table.Covers(y) ? this.CompareInRepertoire(x, y)
-            : this.ComparePastCovered(x, y);
+            : this.CompareWeights(x, y);
 
-        // Kept out of line so the common path above stays small enough to
-        // inline at the identifier-matching call sites.
-        private int ComparePastCovered(string x, string y) =>
-            this.Tabled(x) is { } tx && this.Tabled(y) is { } ty ? this.CompareInRepertoire(tx, ty) : this.inner.Compare(x, y);
-
-        // The string the table can weigh: itself, or its composed form where
-        // a decomposed accent is all that keeps it outside the repertoire —
-        // real weighs 's' + U+0307 as 'ṡ' — or null for the culture fallback.
-        // Composing only when the plain test fails keeps the common path free
-        // of normalization.
-        private string? Tabled(string s)
-        {
-            if (this.table.Covers(s))
-                return s;
-            try
-            {
-                var composed = s.Normalize(NormalizationForm.FormC);
-                return !ReferenceEquals(composed, s) && this.table.Covers(composed) ? composed : null;
-            }
-            catch (ArgumentException)
-            {
-                return null;
-            }
-        }
-
-        // Equality intentionally diverges from Compare == 0 on the
-        // cross-boundary path: Compare routes through the inner
-        // CultureCollation's two-pass minimal-punctuation ORDERING, whose
-        // tie-break checks only minimal-vs-real at each position and so
-        // would equate an apostrophe with a hyphen. Equality uses the
-        // inner's plain equality instead — the same equality/ordering
-        // split CultureCollation itself has — keeping hyphen and
-        // apostrophe distinct marks and staying consistent with the inner
-        // GetHashCode the canonicalized hash path delegates to. Identical
-        // text is equal under any collation, which settles the common
-        // identifier match (a column or alias spelled as declared) without
-        // the weight walks and the ignorable-key tiebreak behind them.
+        // Identical text is equal under any collation, which settles the
+        // common identifier match (a column or alias spelled as declared)
+        // without the weight walks and the minimal-weight tiebreak behind them.
         public override bool Equals(string? x, string? y) =>
             x is null
                 ? y is null
-                : y is not null
-                    && (string.Equals(x, y, StringComparison.Ordinal)
-                        || (this.table.Covers(x) && this.table.Covers(y)
-                            ? this.CompareInRepertoire(x, y) == 0
-                            : this.EqualsPastCovered(x, y)));
+                : y is not null && (string.Equals(x, y, StringComparison.Ordinal) || this.CompareWeights(x, y) == 0);
 
-        private bool EqualsPastCovered(string x, string y) =>
-            this.Tabled(x) is { } tx && this.Tabled(y) is { } ty ? this.CompareInRepertoire(tx, ty) == 0 : this.inner.Equals(x, y);
-
-        public override int GetHashCode(string obj)
-        {
-            // Strings made only of weight-table characters with no
-            // hash-fold entry (the overwhelmingly common case — identifiers
-            // and Latin data) hash directly off their weight runs; the clean
-            // set is the repertoire minus HashFolds' keys, so this walk costs
-            // the same as the repertoire test.
-            var isClean = true;
-            foreach (var ch in obj)
-            {
-                if (!this.table.HashClean(ch))
-                {
-                    isClean = false;
-                    break;
-                }
-            }
-
-            if (isClean)
-                return this.WeightRunHash(obj);
-
-            // Everything else canonicalizes first so that any string the
-            // equality relation can deem equal to an in-repertoire string
-            // (fullwidth spellings, decomposed accents, ICU-ignorable
-            // characters, cross-script homoglyphs) hashes exactly like that
-            // string. Equals routes such cross-boundary pairs through the
-            // inner CultureCollation, whose relation the canonicalizer
-            // provably preserves: every substitution it makes is validated
-            // inner-equal to what it replaces. A canonical form still
-            // outside the repertoire has no in-repertoire equal partner, so
-            // the inner hash (consistent with inner equality) covers it.
-            var canonical = this.HashCanonicalize(obj);
-            return this.table.Covers(canonical)
-                ? this.WeightRunHash(canonical)
-                : this.inner.GetHashCode(canonical);
-        }
+        public override int GetHashCode(string obj) => this.WeightRunHash(obj);
 
         // Hash the primary weight run, a separator, then (where the name weighs
         // accents) the secondary run — mirrors the order Compare consults them,
-        // so Compare-equal strings always hash equal. A trailing run of
-        // elements weighing as a space is left out, as the padding Compare
-        // applies ignores it (the _100_ table's narrow no-break space weighs as
-        // one). Streamed through the cursor so no weight lists are
+        // so Compare-equal strings always hash equal; a foreign element adds
+        // the inner body's hash of its text at the same strength. A trailing
+        // run of elements weighing as a space is left out, as the padding
+        // Compare applies ignores it (the _100_ table's narrow no-break space
+        // weighs as one). Streamed through the cursor so no weight lists are
         // materialized.
         private int WeightRunHash(string s)
         {
             var hash = new HashCode();
             var space = this.table.Space.Primary;
-            var primary = new WeightCursor(s, this.table);
+            var primary = new WeightCursor(s, this);
             var elements = 0;
             var kept = 0;
             var pendingSpaces = 0;
-            while (primary.MoveNext())
+            while (primary.MoveNext() is var element and not Element.End)
             {
                 elements++;
-                if (primary.Primary == space)
+                if (element == Element.Table && primary.Primary == space)
                 {
                     pendingSpaces++;
                     continue;
@@ -753,141 +721,260 @@ internal abstract partial class Collation
                 for (; pendingSpaces > 0; pendingSpaces--)
                     hash.Add(space);
                 hash.Add(primary.Primary);
+                if (element == Element.Foreign)
+                    hash.Add(this.compareInfo.GetHashCode(primary.ForeignText, this.ForeignOptions(Level.Primary)));
                 kept = elements;
             }
             hash.Add(-1);
             if (this.accentSensitive)
             {
-                var secondary = new WeightCursor(s, this.table);
-                for (var i = 0; i < kept && secondary.MoveNext(); i++)
-                    hash.Add(secondary.Secondary);
+                var secondary = new WeightCursor(s, this);
+                for (var i = 0; i < kept; i++)
+                {
+                    hash.Add(secondary.MoveNext() == Element.Foreign
+                        ? this.compareInfo.GetHashCode(secondary.ForeignText, this.ForeignOptions(Level.Secondary))
+                        : secondary.Secondary);
+                }
             }
             return hash.ToHashCode();
         }
 
-        // Rewrites a string onto hash-canonical spellings: NFC composes
-        // decomposed sequences (e + combining acute → é) into their table
-        // characters, then each rune folds through hashFolds (in-repertoire
-        // entries) or the lazily-computed rune fold (everything else).
-        // Every substitution is inner-collation-equal to what it replaces,
-        // so canonicalization preserves the inner equality that governs
-        // cross-repertoire-boundary Equals. Lone surrogates skip
-        // normalization (it rejects invalid Unicode) and pass through
-        // verbatim — the inner collation equates them with nothing.
-        private string HashCanonicalize(string s)
+        /// <summary>
+        /// How a character past the table's repertoire weighs. Real's table
+        /// weighs every character the simulator's leaves out, and the width and
+        /// compatibility variants of its own characters as those characters —
+        /// an ideographic space as a space, a fullwidth hyphen as a hyphen
+        /// (probed 2026-10-24 against SQL Server 2025) — so a character the
+        /// inner body calls equal to its compatibility form in the table weighs
+        /// as that form (<see cref="Spelling"/>, empty for one weighing
+        /// nothing); a combining mark the letter before it doesn't compose with
+        /// weighs as an accent on it (<see cref="Mark"/>); and anything else is
+        /// a foreign element sorting just above <see cref="Anchor"/>, among
+        /// other foreign elements by the inner body's order. Every string then
+        /// has one weight sequence, so the order is one total order, which an
+        /// index's key order, a sort and a seek can all rely on. Comparing a
+        /// pair holding such a character by the inner body instead mixes two
+        /// orders that disagree about the table's own characters — the inner
+        /// body weighs a no-break space as a space, the table apart from one —
+        /// so an ideographic-space spelling would be equal to both.
+        /// </summary>
+        private readonly struct Outsider(string? spelling, int mark, int anchor)
         {
-            string normalized;
-            try
-            {
-                normalized = s.Normalize(NormalizationForm.FormC);
-            }
-            catch (ArgumentException)
-            {
-                normalized = s;
-            }
-
-            var builder = new StringBuilder(normalized.Length);
-            for (var i = 0; i < normalized.Length; i++)
-            {
-                var ch = normalized[i];
-                if (char.IsHighSurrogate(ch) && i + 1 < normalized.Length && char.IsLowSurrogate(normalized[i + 1]))
-                {
-                    var fold = this.runeFoldCache.GetOrAdd(char.ConvertToUtf32(ch, normalized[i + 1]), ComputeRuneFold, this);
-                    _ = fold is null
-                        ? builder.Append(ch).Append(normalized[i + 1])
-                        : builder.Append(fold);
-                    i++;
-                }
-                else if (hashFolds.TryGetValue(ch, out var inRepFold))
-                {
-                    _ = builder.Append(inRepFold);
-                }
-                else if (this.table.Lookup(ch).Kind == WeightKind.Absent)
-                {
-                    var runeFold = this.runeFoldCache.GetOrAdd(ch, ComputeRuneFold, this);
-                    _ = runeFold is null ? builder.Append(ch) : builder.Append(runeFold);
-                }
-                else
-                {
-                    _ = builder.Append(ch);
-                }
-            }
-
-            return builder.ToString();
+            public readonly string? Spelling = spelling;
+            public readonly int Mark = mark;
+            public readonly int Anchor = anchor;
         }
 
-        // Resolves the hash fold of a rune outside the repertoire, cached by
-        // the caller. Candidate generation is NFKC + lower (covers fullwidth
-        // forms, superscripts, compat ligatures, singleton canonical mappings
-        // like the Kelvin sign); a candidate is accepted only when the inner
-        // collation confirms it equal, so an NFKC fold ICU disagrees with
-        // (long s → "s") never lands. Runes whose compat decomposition points
-        // the wrong way (Greek μ vs CP1252 µ, other scripts' decimal digits)
-        // fall to a one-time scan of the repertoire for a single-character
-        // inner-equal partner. Targets are routed back through hashFolds so a
-        // fold can never re-introduce a non-canonical in-repertoire spelling.
-        // Returns null (keep the rune verbatim) when the inner collation
-        // equates it with nothing we can reach — such runes have no
-        // in-repertoire equal partner, and the inner hash covers string pairs
-        // built from them.
-        private static string? ComputeRuneFold(int rune, Latin1GeneralTableCollation self)
+        private Outsider OutsiderOf(int rune) => this.outsiders.GetOrAdd(rune, static (rune, self) => self.ResolveOutsider(rune), this);
+
+        private Outsider ResolveOutsider(int rune)
         {
             // A lone surrogate half reaches here as its own code unit.
-            var s = rune <= char.MaxValue ? ((char)rune).ToString() : char.ConvertFromUtf32(rune);
-            if (self.inner.Equals(s, string.Empty))
-                return string.Empty;
+            var text = rune <= char.MaxValue ? ((char)rune).ToString() : char.ConvertFromUtf32(rune);
+            if (this.inner.Equals(text, string.Empty))
+                return new(string.Empty, 0, 0);
+            if (this.SpellingOf(text) is { } spelling)
+                return new(spelling, 0, 0);
+            if (CharUnicodeInfo.GetUnicodeCategory(rune) is UnicodeCategory.NonSpacingMark or UnicodeCategory.EnclosingMark)
+                return new(null, rune is >= 0x300 and <= 0x36F ? 1 + rune - 0x300 : 113 + (rune % 900), 0);
+            return new(null, 0, this.AnchorOf(text));
+        }
 
-            string? candidate = null;
+        // The table text the inner body's CompareInfo calls a character equal
+        // to under the name's strengths: its compatibility form — the
+        // fullwidth, small, superscript and wide variants' plain characters —
+        // where the table weighs every character of it. CompareInfo rather
+        // than the body's own equality, which weighs a hyphen or apostrophe
+        // apart and so its fullwidth form, which the table weighs as one. A
+        // width variant — the ideographic space, a small or fullwidth form —
+        // weighs as its plain form under a case-sensitive name too, as every
+        // table name is width-insensitive, where CompareInfo's width option
+        // leaves the ideographic space apart.
+        private string? SpellingOf(string text)
+        {
+            string compatible;
             try
             {
-                // Lowercase (not the CA1308-preferred uppercase) is the
-                // fold's target case: the repertoire's expansion-bearing
-                // letters exist only in lowercase (ß) and every hashFolds
-                // target is lowercase; the inner-equality validation below
-                // gates any lossy lowering (İ) out.
-#pragma warning disable CA1308
-                candidate = s.Normalize(NormalizationForm.FormKC).ToLowerInvariant();
-#pragma warning restore CA1308
+                compatible = text.Normalize(NormalizationForm.FormKC);
             }
             catch (ArgumentException)
             {
+                return null;
             }
-
-            if (candidate is not null && candidate != s && candidate.Length > 0
-                && self.table.Covers(candidate) && self.inner.Equals(s, candidate))
-            {
-                return ApplyHashFolds(candidate);
-            }
-
-            // A case-sensitive name's inner equality refuses the lowered
-            // candidate the compat form keeps uppercase ('℃' is '°C').
-            var compat = candidate is null ? null : s.Normalize(NormalizationForm.FormKC);
-            if (compat is not null && compat != s && compat.Length > 0
-                && self.table.Covers(compat) && self.inner.Equals(s, compat))
-            {
-                return ApplyHashFolds(compat);
-            }
-
-            foreach (var repertoireChar in self.table.Repertoire)
-            {
-                if (self.inner.Equals(s, repertoireChar.ToString()))
-                {
-                    // The lowercase spelling where the table holds it (Ɓ's ɓ
-                    // lies past it).
-                    var lower = char.ToLowerInvariant(repertoireChar);
-                    return ApplyHashFolds((self.table.Lookup(lower).Kind == WeightKind.Absent ? repertoireChar : lower).ToString());
-                }
-            }
-
-            return null;
+            if (compatible.Length == 0 || string.Equals(compatible, text, StringComparison.Ordinal) || !this.table.Covers(compatible))
+                return null;
+            if (this.compareInfo.Compare(text, compatible, this.matchingOptions) == 0)
+                return compatible;
+            return text[0] is '\u3000' or (>= '\uFE50' and <= '\uFE6F') or (>= '\uFF00' and <= '\uFFEF')
+                && this.compareInfo.Compare(text, compatible, this.matchingOptions | CompareOptions.IgnoreCase) == 0
+                && char.IsUpper(text[0]) == char.IsUpper(compatible[0])
+                ? compatible
+                : null;
         }
 
-        private static string ApplyHashFolds(string s)
+        // Where a foreign element sorts: just above the table weight of the
+        // last letter the inner body places at or below it by letters alone,
+        // among the letters both orders put in one order — so a script the
+        // table doesn't know follows the table's letters the inner body puts
+        // ahead of it and precedes those it puts after it (Greek, Cyrillic
+        // and the ideographs follow the Latin letters and Greek precedes Thai,
+        // as on real, probed 2026-10-24 against SQL Server 2025), a letter the
+        // two orders place far apart (the micro sign, a symbol to the table, a
+        // Greek letter to the inner body) moving no foreign element with it;
+        // and foreign elements keep the inner body's order among themselves.
+        private int AnchorOf(string text)
         {
-            var builder = new StringBuilder(s.Length);
-            foreach (var ch in s)
-                _ = builder.Append(hashFolds.TryGetValue(ch, out var fold) ? fold : ch.ToString());
-            return builder.ToString();
+            var anchors = this.anchors ??= this.BuildAnchors();
+            var options = this.ForeignOptions(Level.Primary);
+            int low = 0, high = anchors.Length;
+            while (low < high)
+            {
+                var middle = (int)((uint)(low + high) >> 1);
+                if (this.compareInfo.Compare(anchors[middle].Letter, text, options) <= 0)
+                    low = middle + 1;
+                else
+                    high = middle;
+            }
+            return low == 0 ? int.MinValue : anchors[low - 1].Weight;
+        }
+
+        // The table's letters in the inner body's order, cut to the longest
+        // run whose table weights never fall — the letters the two orders
+        // agree on.
+        private (string Letter, int Weight)[] BuildAnchors()
+        {
+            var options = this.ForeignOptions(Level.Primary);
+            var letters = new List<(string Text, int Weight)>();
+            foreach (var ch in this.table.Repertoire)
+            {
+                if (this.table.Lookup(ch) is { Kind: WeightKind.Weighted } entry)
+                    letters.Add((ch.ToString(), entry.Primary));
+            }
+            letters.Sort((x, y) => this.compareInfo.Compare(x.Text, y.Text, options));
+
+            // Patience sorting: tails[k] is the index of the smallest last
+            // weight of a non-falling run of length k + 1.
+            var tails = new List<int>();
+            var previous = new int[letters.Count];
+            for (var i = 0; i < letters.Count; i++)
+            {
+                int low = 0, high = tails.Count;
+                while (low < high)
+                {
+                    var middle = (low + high) >> 1;
+                    if (letters[tails[middle]].Weight <= letters[i].Weight)
+                        low = middle + 1;
+                    else
+                        high = middle;
+                }
+                previous[i] = low > 0 ? tails[low - 1] : -1;
+                if (low == tails.Count)
+                    tails.Add(i);
+                else
+                    tails[low] = i;
+            }
+            var run = new (string Letter, int Weight)[tails.Count];
+            for (int k = run.Length - 1, i = tails.Count == 0 ? -1 : tails[^1]; k >= 0; k--, i = previous[i])
+                run[k] = letters[i];
+            return run;
+        }
+
+        // The inner body's comparison of foreign elements at each level: the
+        // letters alone, then their accents, then the name's own strengths.
+        private CompareOptions ForeignOptions(Level level) => level switch
+        {
+            Level.Primary => this.matchingOptions | CompareOptions.IgnoreCase | CompareOptions.IgnoreNonSpace,
+            Level.Secondary => this.matchingOptions | CompareOptions.IgnoreCase,
+            _ => this.matchingOptions,
+        };
+
+        // The code point at s[i], a surrogate pair read whole.
+        private static int RuneAt(ReadOnlySpan<char> s, int i, out int length)
+        {
+            var ch = s[i];
+            if (char.IsHighSurrogate(ch) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
+            {
+                length = 2;
+                return char.ConvertToUtf32(ch, s[i + 1]);
+            }
+            length = 1;
+            return ch;
+        }
+
+        // The accent a combining mark past the table at s[i] weighs as, 0 for
+        // any other character.
+        private int MarkAt(ReadOnlySpan<char> s, int i, out int length)
+        {
+            length = 1;
+            return this.table.Lookup(s[i]).Kind == WeightKind.Absent ? this.OutsiderOf(RuneAt(s, i, out length)).Mark : 0;
+        }
+
+        // Past the combining marks beyond the table starting at s[i].
+        private int PastMarks(ReadOnlySpan<char> s, int i)
+        {
+            while (i < s.Length && this.MarkAt(s, i, out var length) != 0)
+                i += length;
+            return i;
+        }
+
+        // No character below it is a combining mark or a tone mark, so a
+        // letter followed by one reads no further: the per-character walk's
+        // one test for the marks WithMarks reads.
+        private const char FirstMark = '\u0300';
+
+        // A letter and the marks after it: the table character a letter and
+        // combining marks past the table compose to, as real weighs 's' +
+        // U+0307 as 'ṡ', and the accent weight the marks left add. index
+        // stands just past the letter and moves past the marks.
+        private WeightEntry WithMarks(ReadOnlySpan<char> s, ref int index, WeightEntry letter, out int accents)
+        {
+            letter = this.ComposedWithMarks(s, ref index, letter);
+            accents = this.AccentsAfter(s, ref index);
+            return letter;
+        }
+
+        // The table character a letter and the combining marks past the table
+        // after it compose to, moving index past the marks where they do.
+        private WeightEntry ComposedWithMarks(ReadOnlySpan<char> s, ref int index, WeightEntry letter)
+        {
+            var end = this.PastMarks(s, index);
+            if (end == index)
+                return letter;
+            string composed;
+            try
+            {
+                composed = s[(index - 1)..end].ToString().Normalize(NormalizationForm.FormC);
+            }
+            catch (ArgumentException)
+            {
+                return letter;
+            }
+            if (composed.Length != 1 || this.table.Lookup(composed[0]) is not { Kind: WeightKind.Weighted } entry)
+                return letter;
+            index = end;
+            return entry;
+        }
+
+        // The accent weight a letter's following marks add: a Thai tone mark
+        // the table holds, or combining marks past the table it didn't compose
+        // with, each an accent on the letter below the next letter's own —
+        // real weighs a tone mark as an accent on the letter, so 'a' + mark +
+        // 'b' sorts after 'ab' and before 'áb' (probed 2026-10-02 against SQL
+        // Server 2025).
+        private int AccentsAfter(ReadOnlySpan<char> s, ref int index)
+        {
+            if (index < s.Length && this.table.Lookup(s[index]) is { Kind: WeightKind.Diacritic } mark)
+            {
+                index++;
+                return mark.Secondary;
+            }
+            var accents = 0;
+            while (index < s.Length && this.MarkAt(s, index, out var length) is var accent and not 0)
+            {
+                index += length;
+                accents += accent;
+            }
+            return Math.Min(accents, MarkSpan - 1);
         }
 
         // The levels in Windows' own order — the letters, their diacritics,
@@ -896,7 +983,7 @@ internal abstract partial class Collation
         // the letters and 'aB' < 'Ab' on the first case difference, lowercase
         // first, and a ligature carries the case of its letters ('Æ' = 'AE',
         // probed 2026-10-02 against SQL Server 2025).
-        private int CompareInRepertoire(string x, string y)
+        private int CompareWeights(string x, string y)
         {
             var primary = this.CompareLevel(x, y, Level.Primary);
             if (primary != 0)
@@ -941,6 +1028,14 @@ internal abstract partial class Collation
             Case,
         }
 
+        // What a WeightCursor's MoveNext reached.
+        private enum Element : byte
+        {
+            End,
+            Table,
+            Foreign,
+        }
+
         // Walks both operands through parallel weight cursors, comparing one
         // level at a time. Once a shared prefix ties, the longer run's rest is
         // compared against a space, the padding real applies — so under
@@ -956,44 +1051,74 @@ internal abstract partial class Collation
         // allocation-free.
         private int CompareLevel(string x, string y, Level level)
         {
-            var cx = new WeightCursor(x, this.table);
-            var cy = new WeightCursor(y, this.table);
+            var cx = new WeightCursor(x, this);
+            var cy = new WeightCursor(y, this);
             while (true)
             {
-                var hasX = cx.MoveNext();
-                var hasY = cy.MoveNext();
-                if (!hasX && !hasY)
-                    return 0;
-                if (!hasX || !hasY)
+                var ex = cx.MoveNext();
+                var ey = cy.MoveNext();
+                if (ex == Element.Table && ey == Element.Table)
                 {
+                    var wx = cx.Weight(level);
+                    var wy = cy.Weight(level);
+                    if (wx != wy)
+                        return wx < wy ? -1 : 1;
+                    continue;
+                }
+                if (ex == Element.End || ey == Element.End)
+                {
+                    if (ex == ey)
+                        return 0;
                     var padded = this.table.Space.Weight(level);
+                    var hasX = ex != Element.End;
                     var rest = hasX ? cx : cy;
+                    var element = hasX ? ex : ey;
                     do
                     {
-                        var w = rest.Weight(level);
-                        if (w != padded)
-                            return (w < padded) == hasX ? -1 : 1;
+                        // A foreign element meets the padding as it meets the
+                        // space's own element: below it only where its anchor is.
+                        var order = element == Element.Foreign ? (level == Level.Primary && rest.Primary < padded ? -1 : 1) : rest.Weight(level).CompareTo(padded);
+                        if (order != 0)
+                            return (order < 0) == hasX ? -1 : 1;
                     }
-                    while (rest.MoveNext());
+                    while ((element = rest.MoveNext()) != Element.End);
                     return 0;
                 }
-                var wx = cx.Weight(level);
-                var wy = cy.Weight(level);
-                if (wx != wy)
-                    return wx < wy ? -1 : 1;
+                var compared = this.CompareForeign(ref cx, ex, ref cy, ey, level);
+                if (compared != 0)
+                    return compared < 0 ? -1 : 1;
             }
+        }
+
+        // Two elements at least one of which is foreign: a foreign element
+        // sorts just above the table weight it's anchored at, and two with one
+        // anchor by the inner body at the level's strength.
+        private int CompareForeign(ref WeightCursor x, Element ex, ref WeightCursor y, Element ey, Level level)
+        {
+            if (level == Level.Primary && x.Primary != y.Primary)
+                return x.Primary < y.Primary ? -1 : 1;
+            if (ex != ey)
+                return ex == Element.Foreign ? 1 : -1;
+            return level == Level.Tertiary ? 0 : this.compareInfo.Compare(x.ForeignText, y.ForeignText, this.ForeignOptions(level));
         }
 
         // Yields the (primary, secondary, case, tertiary) weight of each
         // collation element of a string in order: minimal-weight and
         // weightless characters are skipped, a ligature expands to its letters
-        // (tertiary 1, plain characters 0), and a Thai tone mark folds into the
-        // accent weight of the letter before it. One element per MoveNext.
-        private ref struct WeightCursor(string s, WeightTable table)
+        // (tertiary 1, plain characters 0), a Thai tone mark folds into the
+        // accent weight of the letter before it, and a character past the
+        // table weighs as its Outsider — its spelling's elements, an accent on
+        // the letter before it, or a foreign element of its own. One element
+        // per MoveNext.
+        private ref struct WeightCursor(string s, Latin1GeneralTableCollation owner)
         {
-            private readonly string s = s;
+            // The string being read: the cursor's own, or the table text a
+            // character past the table weighs as while that is read.
+            private string s = s;
 
-            private readonly WeightTable table = table;
+            private readonly Latin1GeneralTableCollation owner = owner;
+
+            private readonly WeightTable table = owner.table;
 
             private int index;
 
@@ -1003,6 +1128,12 @@ internal abstract partial class Collation
 
             private char ligature;
 
+            // While a spelling is read, the string it stands in and the
+            // position past its character, read again once the spelling ends.
+            private string? resume;
+
+            private int resumeIndex;
+
             internal int Primary;
 
             internal int Secondary;
@@ -1010,6 +1141,14 @@ internal abstract partial class Collation
             internal int Tertiary;
 
             internal int Case;
+
+            // The last foreign element's text in the string, which no
+            // spelling holds.
+            private int foreignStart;
+
+            private int foreignLength;
+
+            internal readonly ReadOnlySpan<char> ForeignText => this.s.AsSpan(this.foreignStart, this.foreignLength);
 
             internal readonly int Weight(Level level) => level switch
             {
@@ -1019,40 +1158,70 @@ internal abstract partial class Collation
                 _ => this.Tertiary,
             };
 
-            internal bool MoveNext()
+            internal Element MoveNext()
             {
                 if (this.expansion is not null)
                 {
                     this.EmitExpanded();
-                    return true;
+                    return Element.Table;
                 }
 
-                while (this.index < this.s.Length)
+                while (true)
                 {
+                    if (this.index >= this.s.Length)
+                    {
+                        if (this.resume is null)
+                            return Element.End;
+                        (this.s, this.index, this.resume) = (this.resume, this.resumeIndex, null);
+                        continue;
+                    }
+
                     var ch = this.s[this.index++];
                     var entry = this.table.Lookup(ch);
                     switch (entry.Kind)
                     {
                         case WeightKind.Weighted:
+                            var accents = 0;
+                            if (this.index < this.s.Length && this.s[this.index] >= FirstMark)
+                                entry = this.owner.WithMarks(this.s, ref this.index, entry, out accents);
                             this.Primary = entry.Primary;
-                            this.Secondary = this.WithMark(entry.Secondary);
+                            this.Secondary = (entry.Secondary * MarkSpan) + accents;
                             this.Tertiary = 0;
                             this.Case = entry.Case;
-                            return true;
+                            return Element.Table;
                         case WeightKind.Expanding:
                             this.expansion = this.table.Expansions[ch];
                             this.expansionPos = 0;
                             this.ligature = ch;
                             this.EmitExpanded();
-                            return true;
+                            return Element.Table;
+                        case WeightKind.Absent:
+                            var start = this.index - 1;
+                            var rune = RuneAt(this.s, start, out var length);
+                            this.index = start + length;
+                            var outsider = this.owner.OutsiderOf(rune);
+                            if (outsider.Spelling is { } spelling)
+                            {
+                                // The table covers every spelling, so none
+                                // holds a spelling of its own.
+                                if (spelling.Length != 0)
+                                    (this.resume, this.resumeIndex, this.s, this.index) = (this.s, this.index, spelling, 0);
+                                continue;
+                            }
+                            // A combining mark with no table letter to ride on
+                            // weighs nothing at these levels.
+                            if (outsider.Mark != 0)
+                                continue;
+                            this.index = this.owner.PastMarks(this.s, this.index);
+                            (this.Primary, this.Secondary, this.Tertiary, this.Case) = (outsider.Anchor, 0, 0, 0);
+                            (this.foreignStart, this.foreignLength) = (start, this.index - start);
+                            return Element.Foreign;
                         default:
                             // Minimal-weight, weightless, and a tone mark with no
                             // letter before it: nothing at these levels.
                             continue;
                     }
                 }
-
-                return false;
             }
 
             private void EmitExpanded()
@@ -1076,25 +1245,12 @@ internal abstract partial class Collation
                     }
                     else
                     {
-                        this.Secondary = accentedLigature.TryGetValue(this.ligature, out var accent) ? LigatureAccent - 3 + accent : this.WithMark(letter.Secondary);
+                        this.Secondary = accentedLigature.TryGetValue(this.ligature, out var accent)
+                            ? LigatureAccent - 3 + accent
+                            : (letter.Secondary * MarkSpan) + (this.index < this.s.Length && this.s[this.index] >= FirstMark ? this.owner.AccentsAfter(this.s, ref this.index) : 0);
                     }
                     this.expansion = null;
                 }
-            }
-
-            // A letter's accent weight, with the Thai tone mark that follows it
-            // (if any) folded in below the letter's own: real weighs the mark
-            // as an accent on the letter, so 'a' + mark + 'b' sorts after 'ab'
-            // and before 'áb' (probed 2026-10-02 against SQL Server 2025).
-            private int WithMark(int secondary)
-            {
-                var weighted = secondary * MarkSpan;
-                if (this.index < this.s.Length && this.table.Lookup(this.s[this.index]) is { Kind: WeightKind.Diacritic } mark)
-                {
-                    this.index++;
-                    weighted += mark.Secondary;
-                }
-                return weighted;
             }
         }
 
@@ -1126,9 +1282,15 @@ internal abstract partial class Collation
         {
             var key = new List<(int, int)>();
             var preceding = 0;
-            foreach (var ch in s)
+            this.AddMinimalWeights(s, key, ref preceding);
+            return key;
+        }
+
+        private void AddMinimalWeights(ReadOnlySpan<char> s, List<(int, int)> key, ref int preceding)
+        {
+            for (var i = 0; i < s.Length; i++)
             {
-                var entry = this.table.Lookup(ch);
+                var entry = this.table.Lookup(s[i]);
                 switch (entry.Kind)
                 {
                     case WeightKind.MinimalWeight:
@@ -1136,15 +1298,24 @@ internal abstract partial class Collation
                         break;
                     case WeightKind.Expanding:
                         // Count the expanded letters so marks align across a ligature.
-                        preceding += this.table.Expansions[ch].Length;
+                        preceding += this.table.Expansions[s[i]].Length;
                         break;
                     case WeightKind.Weighted:
                         preceding++;
                         break;
+                    case WeightKind.Absent:
+                        // A character past the table counts as its spelling's
+                        // characters, a foreign element as a letter, a mark as
+                        // nothing.
+                        var outsider = this.OutsiderOf(RuneAt(s, i, out var length));
+                        i += length - 1;
+                        if (outsider.Spelling is { } spelling)
+                            this.AddMinimalWeights(spelling, key, ref preceding);
+                        else if (outsider.Mark == 0)
+                            preceding++;
+                        break;
                 }
             }
-
-            return key;
         }
 
         private enum WeightKind : byte
@@ -1186,20 +1357,6 @@ internal abstract partial class Collation
 
             private readonly FrozenDictionary<char, WeightEntry> high;
 
-            private readonly bool[] hashCleanLow;
-
-            // Whether each low character is in the repertoire, apart from its
-            // entry so the scan ahead of every comparison reads a dense array.
-            private readonly bool[] coveredLow;
-
-            // Whether every ASCII character but NUL is in the repertoire (the
-            // Unicode tables leave NUL to the fallback), which lets an ASCII
-            // string without one — nearly every identifier — pass on two
-            // vectorized tests.
-            private readonly bool coversAscii;
-
-            private readonly FrozenSet<char> hashCleanHigh;
-
             public readonly FrozenDictionary<char, string> Expansions;
 
             public readonly bool LegacySortOrder;
@@ -1211,29 +1368,15 @@ internal abstract partial class Collation
             private WeightTable(Dictionary<char, WeightEntry> entries, FrozenDictionary<char, string> expansions, bool legacySortOrder)
             {
                 this.low = new WeightEntry[LowLimit];
-                this.hashCleanLow = new bool[LowLimit];
-                this.coveredLow = new bool[LowLimit];
                 var high = new Dictionary<char, WeightEntry>();
-                var hashCleanHigh = new HashSet<char>();
                 foreach (var (ch, entry) in entries)
                 {
-                    var clean = !hashFolds.ContainsKey(ch);
                     if (ch < LowLimit)
-                    {
                         this.low[ch] = entry;
-                        this.hashCleanLow[ch] = clean;
-                        this.coveredLow[ch] = entry.Kind != WeightKind.Absent;
-                    }
                     else
-                    {
                         high[ch] = entry;
-                        if (clean)
-                            _ = hashCleanHigh.Add(ch);
-                    }
                 }
-                this.coversAscii = Array.TrueForAll(this.coveredLow[1..0x80], covered => covered);
                 this.high = high.ToFrozenDictionary();
-                this.hashCleanHigh = hashCleanHigh.ToFrozenSet();
                 this.Expansions = expansions;
                 this.LegacySortOrder = legacySortOrder;
                 this.Space = entries[' '];
@@ -1243,20 +1386,12 @@ internal abstract partial class Collation
             public WeightEntry Lookup(char ch) =>
                 ch < LowLimit ? this.low[ch] : this.high.GetValueOrDefault(ch);
 
-            public bool HashClean(char ch) =>
-                ch < LowLimit ? this.hashCleanLow[ch] : this.hashCleanHigh.Contains(ch);
-
             /// <summary>Whether every character of <paramref name="s"/> is in the table's repertoire.</summary>
             public bool Covers(ReadOnlySpan<char> s)
             {
-                if (this.coversAscii && Ascii.IsValid(s) && !s.Contains('\0'))
-                    return true;
-                var covered = this.coveredLow;
                 foreach (var ch in s)
                 {
-                    // Against the array's own length, which lets the JIT drop
-                    // the bounds check.
-                    if (ch < covered.Length ? !covered[ch] : !this.high.ContainsKey(ch))
+                    if (this.Lookup(ch).Kind == WeightKind.Absent)
                         return false;
                 }
 

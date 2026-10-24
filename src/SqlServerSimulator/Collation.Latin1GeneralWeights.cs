@@ -232,11 +232,10 @@ internal abstract partial class Collation
             8303, 2, 0, 0, 0, 8364, 0, 120, 123, 120, 8482, 0, 247, 489, 284,
         ];
 
-        // The _100_ table, on the same shape (1085 records). It weighs ¼ and ½
-        // alike and ¾ as a 3 under an _AI name, which the hash folds the
-        // fractions share with the unversioned table can't follow, so the
-        // three are left out with the rest and a string holding one takes the
-        // culture fallback.
+        // The _100_ table, on the same shape (1085 records). Real's _100_
+        // order weighs ¼ and ½ alike and ¾ as a 3 under an _AI name; the three
+        // are left out, so each weighs as a character past the table does, by
+        // its compatibility form (docs/claude/collations.md, Known gaps).
         private static ReadOnlySpan<ushort> Version100Weights =>
         [
             1, 1, 132, 193, 136, 2, 1, 133, 194, 137, 3, 1, 134, 195, 138, 4, 1, 135, 196, 139, 5, 1, 136, 197, 140,

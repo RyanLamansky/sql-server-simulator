@@ -69,11 +69,12 @@ public sealed class LikeIndexSeekTests
             (string, object)[] parameters = escape is null ? [("@p", pattern)] : [("@p", pattern), ("@escape", escape)];
             var expected = Ids(connection, $"select id from scanned where name like @p{escapeClause} order by id", parameters);
             CollectionAssert.AreEqual(expected, Ids(connection, $"select id from seeked where name like @p{escapeClause} order by id", parameters), $"{pattern} under {collation}");
-            // An ordered read walks the index between the same bounds. Which
-            // of the values the collation calls equal comes first isn't
-            // settled across its repertoire boundary (see collations.md), so
-            // the walk is held to the rows it reads.
-            CollectionAssert.AreEquivalent(expected, Ids(connection, $"select id from seeked where name like @p{escapeClause} order by name, id", parameters), $"{pattern} ordered under {collation}");
+            // An ordered read walks the index between the same bounds, in the
+            // order the scan's sort puts its rows in.
+            CollectionAssert.AreEqual(
+                Ids(connection, $"select id from scanned where name like @p{escapeClause} order by name, id", parameters),
+                Ids(connection, $"select id from seeked where name like @p{escapeClause} order by name, id", parameters),
+                $"{pattern} ordered under {collation}");
         }
     }
 

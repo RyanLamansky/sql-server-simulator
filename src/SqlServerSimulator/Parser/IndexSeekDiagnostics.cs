@@ -28,10 +28,7 @@ internal static class IndexSeekDiagnostics
     /// <c>CacheBuild</c> when a seek (re)builds an entry from a full scan and
     /// <c>CacheReplay</c> when it instead applies the incremental journal delta
     /// (the "no warm-up" path), and <c>CacheSlice</c> when a bounded ordered
-    /// read is cut from the entry's cached key order rather than walked, and
-    /// <c>FallbackOrderedKeys</c> when a <c>LIKE</c> range read through its
-    /// prefix's punctuation walks the range of its letters and digits instead,
-    /// over an entry holding a key its collation orders by its fallback order. A test assigns a fresh list, drives a query to
+    /// read is cut from the entry's cached key order rather than walked. A test assigns a fresh list, drives a query to
     /// completion on the same thread (execution is synchronous and in-process),
     /// then inspects the entries. Null disables capture.
     /// </summary>

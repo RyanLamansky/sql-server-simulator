@@ -43,16 +43,28 @@ internal abstract partial class Collation
     /// <summary>
     /// Whether this collation matches <paramref name="text"/> through its own
     /// weight table rather than <see cref="CompareInfo"/> — true only for a
-    /// table-driven body over text inside the table's repertoire.
+    /// table-driven body over text its table weighs.
     /// </summary>
     internal virtual bool MatchesByTable(ReadOnlySpan<char> text) => false;
 
     /// <summary>
     /// How many code units of <paramref name="subject"/> the run matches from
     /// its start under the weight table, or <c>-1</c>; consulted only where
-    /// <see cref="MatchesByTable"/> holds for both.
+    /// <see cref="MatchesByTable"/> holds for both. A run weighing nothing
+    /// matches no code units, or, <paramref name="anchored"/> to the subject's
+    /// start as a <c>LIKE</c> run is, the subject's leading ones weighing
+    /// nothing.
     /// </summary>
-    internal virtual int TableMatch(ReadOnlySpan<char> subject, ReadOnlySpan<char> run) => -1;
+    internal virtual int TableMatch(ReadOnlySpan<char> subject, ReadOnlySpan<char> run, bool anchored) => -1;
+
+    /// <summary>
+    /// Whether a match under the weight table may begin at
+    /// <paramref name="s"/>[<paramref name="index"/>]: never at a character
+    /// weighing nothing or one riding on the character before it, which
+    /// <see cref="CompareInfo"/>'s search begins past too —
+    /// <c>CHARINDEX(N'b', N'a' + NCHAR(888) + N'b')</c> is 3.
+    /// </summary>
+    internal virtual bool BeginsTableMatch(ReadOnlySpan<char> s, int index) => true;
 
     /// <summary>
     /// The index in <paramref name="subject"/> at or after
@@ -165,7 +177,7 @@ internal abstract partial class Collation
         matchLength = 0;
         if (this.MatchesByTable(subject) && this.MatchesByTable(run))
         {
-            var consumed = this.TableMatch(subject, run);
+            var consumed = this.TableMatch(subject, run, anchored: true);
             matchLength = Math.Max(consumed, 0);
             return consumed >= 0;
         }
@@ -263,11 +275,14 @@ internal abstract partial class Collation
 
         if (this.MatchesByTable(window) && this.MatchesByTable(needle))
         {
+            // A needle weighing nothing matches anywhere with no length, which
+            // the callers read; one weighing something begins where a match can.
+            var weighed = this.BeginsTableMatch(needle, 0);
             for (var start = 0; start < window.Length; start++)
             {
-                if (char.IsLowSurrogate(window[start]) && start > 0 && char.IsHighSurrogate(window[start - 1]))
+                if ((char.IsLowSurrogate(window[start]) && start > 0 && char.IsHighSurrogate(window[start - 1])) || (weighed && !this.BeginsTableMatch(window, start)))
                     continue;
-                var consumed = this.TableMatch(window[start..], needle);
+                var consumed = this.TableMatch(window[start..], needle, anchored: false);
                 if (consumed >= 0)
                 {
                     matchLength = consumed;

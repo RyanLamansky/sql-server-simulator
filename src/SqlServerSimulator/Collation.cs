@@ -407,26 +407,13 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
     /// <c>Smith, K</c>, <c>A-9</c> → <c>B</c>). It holds where whatever
     /// <c>LIKE</c> matches to a character of the run weighs as that character
     /// does in the order keys are sorted by: the binary collations, which
-    /// match and order by code unit or byte, and the Latin1-General tables
-    /// over their own repertoire — never across a key
-    /// <see cref="OrdersByFallback"/> names, nor in the invariant-culture
+    /// match and order by code unit or byte, and the Latin1-General tables,
+    /// which weigh every text by the table — never the invariant-culture
     /// order, which weighs an ASCII hyphen or apostrophe at the final level
     /// only and a fullwidth one, which <c>LIKE</c> matches to it, at the
     /// primary level.
     /// </summary>
     internal virtual bool SortsPrintableAsciiPrefixesTogether => false;
-
-    /// <summary>
-    /// Whether this collation orders <paramref name="text"/> by a second
-    /// order beside its own — the invariant-culture order a Latin1-General
-    /// table compares text outside its repertoire by — whose weights for the
-    /// table's own characters differ from the table's (it weighs a no-break
-    /// space as a space, which the table sorts apart), so where such a key
-    /// lands among the others is settled only by the letters and digits both
-    /// orders share, never by a space or punctuation mark
-    /// (<see cref="SortsPrintableAsciiPrefixesTogether"/>).
-    /// </summary>
-    internal virtual bool OrdersByFallback(string text) => false;
 
     /// <summary>
     /// Whether <c>CHAR(0)</c> is a character of its own here — the lowest

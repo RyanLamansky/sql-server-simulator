@@ -1,19 +1,16 @@
-using System.Globalization;
 using System.Text;
-using SqlServerSimulator.Storage;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Guards the <c>IEqualityComparer&lt;string&gt;</c> hash contract on
+/// Guards the <c>IEqualityComparer&lt;string&gt;</c> contract on
 /// <see cref="Collation.Latin1GeneralTableCollation"/>: whenever
 /// <c>Equals(x, y)</c> is true — including across the repertoire boundary,
-/// where equality routes through the inner <see cref="CompareInfo"/> —
-/// <c>GetHashCode</c> must agree. The hybrid hashes in-repertoire strings
-/// by SQL sort-weight runs and everything else through canonicalization +
-/// the inner hash, so the boundary is where inconsistency would hide.
-/// Derivation notes live in <c>docs/claude/collations.md</c>.
+/// where a character past the table weighs as its spelling, an accent or a
+/// foreign element — <c>GetHashCode</c> must agree, and the order must be one
+/// total order, which an index's key order and a sort rely on. Derivation
+/// notes live in <c>docs/claude/collations.md</c>.
 /// </summary>
 [TestClass]
 public sealed class CollationHashConsistencyTests
@@ -76,74 +73,75 @@ public sealed class CollationHashConsistencyTests
             // ICU ignores these; real weighs them.
             IsFalse(collation.Equals("ab", "a\u200Bb"));
             IsFalse(collation.Equals("aｂ", "a\u0001ｂ"));
-            AreEqual(collation.GetHashCode("a\u0001b"), collation.GetHashCode("ab"));
         }
     }
 
     /// <summary>
-    /// An out-of-repertoire spelling can be Equals-equal to two
-    /// in-repertoire strings that are unequal to each other (fullwidth
-    /// <c>２</c> equals both <c>2</c> and superscript <c>²</c> through the
-    /// inner collation), so all three must share a hash — the
-    /// in-repertoire pair's shared hash is a legal collision of unequal
-    /// strings.
+    /// A character past the table weighs as the table spelling ICU calls it
+    /// equal to, so equality across the boundary is the table's own and
+    /// transitive: an ideographic space is a space, which the table holds
+    /// apart from a no-break space, so the two are apart too, as on real
+    /// (probed 2026-10-24 against SQL Server 2025), where comparing such a
+    /// pair by ICU alone would make the ideographic spelling equal to both.
     /// </summary>
     [TestMethod]
-    public void CrossBoundaryTriangles_ShareOneHash()
+    public void CrossBoundarySpellings_WeighAsTheTableSpelling()
     {
         AssertEqualAndHashEqual(Nvarchar, "x2y", "x２y");
         AssertEqualAndHashEqual(Nvarchar, "x²y", "x２y");
-        AreEqual(Nvarchar.GetHashCode("x2y"), Nvarchar.GetHashCode("x²y"));
-
         AssertEqualAndHashEqual(Nvarchar, "a b", "a\u3000b");
-        AssertEqualAndHashEqual(Nvarchar, "a\u00A0b", "a\u3000b");
-        AreEqual(Nvarchar.GetHashCode("a b"), Nvarchar.GetHashCode("a\u00A0b"));
+        IsFalse(Nvarchar.Equals("a\u00A0b", "a\u3000b"));
+        IsLessThan(0, Nvarchar.Compare("a\u3000b", "a\u00A0b"));
+        AssertEqualAndHashEqual(Nvarchar, "a-b", "a\uFF0Db");
+        AssertEqualAndHashEqual(Nvarchar, "a'b", "a\uFF07b");
 
-        // Thai SARA AM: ICU equates the composed U+0E33 with NIKHAHIT +
-        // SARA AA while the weight tables keep the spellings unequal.
-        AssertEqualAndHashEqual(Nvarchar, "กําx", "กำｘ");
+        // Thai SARA AM: the table holds the composed U+0E33 apart from
+        // NIKHAHIT + SARA AA, and a fullwidth x past it changes nothing.
         AssertEqualAndHashEqual(Nvarchar, "กำx", "กำｘ");
-        AreEqual(Nvarchar.GetHashCode("กำx"), Nvarchar.GetHashCode("กําx"));
+        IsFalse(Nvarchar.Equals("กําx", "กำｘ"));
     }
 
     /// <summary>
-    /// Completeness sweep: groups every repertoire character by its inner
-    /// (invariant, CI + width/kana-insensitive) sort key and asserts each
-    /// group's members hash identically in context — the behavioral form
-    /// of "the in-repertoire hash-fold table covers every ICU-equal
-    /// class" (case mates, superscripts, ordinal indicators, NBSP, Thai
-    /// digits, ignorable controls).
+    /// The order over a mix of table characters, their spellings past the
+    /// table, combining marks and foreign scripts is one total order:
+    /// sorting the mix puts every pair in order and equality is
+    /// <c>Compare</c> returning 0, which comparing a pair holding a character
+    /// past the table by ICU alone doesn't give.
     /// </summary>
     [TestMethod]
-    public void InRepertoireIcuEqualClasses_ShareHashes()
+    [DataRow(Collation.Latin1GeneralTableCollation.DefaultName)]
+    [DataRow("Latin1_General_CS_AS")]
+    [DataRow("Latin1_General_100_CI_AI")]
+    public void TheOrder_IsOneTotalOrder(string name)
     {
-        const CompareOptions Options =
-            CompareOptions.IgnoreCase | CompareOptions.IgnoreKanaType | CompareOptions.IgnoreWidth;
-        var compareInfo = CultureInfo.InvariantCulture.CompareInfo;
-
-        var groups = new Dictionary<string, List<char>>(StringComparer.Ordinal);
-        foreach (var ch in Repertoire())
+        var collation = Collation.Get(name);
+        string[] pieces =
+        [
+            "a", "A", "ａ", "b", " ", "\u00A0", "\u3000", "\u2007", "-", "\uFF0D", "\u2010", "'", "\uFF07", "\u2019", ",", "\uFF0C",
+            "2", "²", "２", "⁴", "4", "⑤", "5", "\u0301", "e", "é", "x\u0301", "α", "Α", "ά", "Ω", "\u2126", "К", "中", "あ", "ア", "→", "€", "§", "ß", "ss", "\uD83D\uDE00",
+        ];
+        var random = new Random(20261024);
+        var strings = new List<string>();
+        for (var i = 0; i < 300; i++)
         {
-            var key = Convert.ToBase64String(compareInfo.GetSortKey(ch.ToString(), Options).KeyData);
-            if (!groups.TryGetValue(key, out var members))
-                groups[key] = members = [];
-            members.Add(ch);
+            var builder = new StringBuilder();
+            for (var length = random.Next(1, 5); length > 0; length--)
+                _ = builder.Append(pieces[random.Next(pieces.Length)]);
+            strings.Add(builder.ToString());
         }
+        strings.Sort(collation);
 
-        var mismatches = new List<string>();
-        foreach (var members in groups.Values)
+        var violations = new List<string>();
+        for (var i = 0; i < strings.Count && violations.Count < 10; i++)
         {
-            for (var i = 1; i < members.Count; i++)
+            for (var j = i + 1; j < strings.Count && violations.Count < 10; j++)
             {
-                foreach (var collation in (Collation[])[Nvarchar, Varchar])
-                {
-                    if (collation.GetHashCode($"x{members[0]}z") != collation.GetHashCode($"x{members[i]}z"))
-                        mismatches.Add($"U+{(int)members[0]:X4} vs U+{(int)members[i]:X4} ({(ReferenceEquals(collation, Varchar) ? "varchar" : "nvarchar")})");
-                }
+                var order = collation.Compare(strings[i], strings[j]);
+                if (order > 0 || order != -collation.Compare(strings[j], strings[i]) || collation.Equals(strings[i], strings[j]) != (order == 0))
+                    violations.Add($"{Escape(strings[i])} vs {Escape(strings[j])}: {order}");
             }
         }
-
-        IsEmpty(mismatches, string.Join("; ", mismatches));
+        IsEmpty(violations, string.Join("; ", violations));
     }
 
     /// <summary>
@@ -221,9 +219,9 @@ public sealed class CollationHashConsistencyTests
 
     /// <summary>
     /// Systematic single-character sweep: for each BMP character in the
-    /// blocks the fold machinery covers, derive normalization / case
-    /// variants of a carrier string and assert the hash contract wherever
-    /// Equals holds.
+    /// blocks rich in compatibility and decomposed forms of the table's
+    /// characters, derive normalization / case variants of a carrier string
+    /// and assert the hash contract wherever Equals holds.
     /// </summary>
     [TestMethod]
     public void NormalizationVariantSweep_EqualsImpliesHashEqual()
@@ -276,21 +274,5 @@ public sealed class CollationHashConsistencyTests
 
         foreach (var form in normalized)
             yield return form;
-    }
-
-    private static IEnumerable<char> Repertoire()
-    {
-        var encoding = CharSqlType.Cp1252Encoder;
-        var buffer = new byte[1];
-        for (var b = 1; b <= 255; b++)
-        {
-            buffer[0] = (byte)b;
-            var decoded = encoding.GetString(buffer);
-            if (decoded.Length == 1)
-                yield return decoded[0];
-        }
-
-        for (var cp = 0x0E00; cp <= 0x0E7F; cp++)
-            yield return (char)cp;
     }
 }

@@ -959,32 +959,91 @@ public sealed class IndexSeekTests
         }
     }
 
-    // A key the Latin1-General table orders by its fallback order makes the
-    // keyed order unsortable under one comparison, which a binary search
-    // needs, so however many bounded reads have walked such an entry, they
-    // keep walking it.
+    // A key past the Latin1-General table's repertoire weighs within the
+    // table's one order — an ideographic space or a fullwidth hyphen as the
+    // character it's a wide form of, a combining mark as an accent, a Greek
+    // letter after the table's letters — so the bucket a key is filed under
+    // and the keyed order a binary search cuts both follow the comparison
+    // the bounds are judged by: every read, walked or cut from the keyed
+    // order once bounded reads have flipped the entry onto it, answers as
+    // the scan of an unindexed copy does, whichever spelling came first.
     [TestMethod]
-    public void BoundedReads_OverAKeyOrderedByTheTablesFallback_KeepTheWalk()
+    public void KeysPastTheTable_SeekAsTheScanReads()
     {
         var c = new Simulation().CreateDbConnection();
         c.Open();
         Exec(c, """
-            create table t (id int not null primary key, v nvarchar(20) collate Latin1_General_CI_AS not null);
-            create index ix on t (v);
-            insert t values (1, N'100'), (2, N'100%'), (3, N'112'), (4, nchar(185) + N'12'), (5, N'10/'), (6, N'101'), (7, N'abc'), (8, N'Customer 12')
+            create table seeked (id int not null primary key, v nvarchar(20) collate Latin1_General_CI_AS not null);
+            create index ix on seeked (v);
+            create table scanned (id int not null primary key, v nvarchar(20) collate Latin1_General_CI_AS not null);
             """);
+        string[] values =
+        [
+            "N'Customer' + nchar(160) + N'12'", "N'Customer' + nchar(12288) + N'12'", "N'Customer 12'", "N'Customer' + nchar(8239) + N'12'",
+            "N'Customer' + nchar(65293) + N'12'", "N'Customer-12'", "N'Customer''12'", "N'Customer' + nchar(8217) + N'12'", "N'Customer 13'",
+            "N'100'", "N'100%'", "N'112'", "nchar(185) + N'12'", "N'10/'", "N'101'", "nchar(12288) + N'12'", "nchar(8239) + N'12'",
+            "N'1' + nchar(65293) + N'2'", "N'10' + nchar(769)", "N'-1' + nchar(8217) + N'2'", "N'''1' + nchar(8217) + N'2'", "nchar(945) + N'12'",
+            "nchar(8203) + N'1' + nchar(8239) + N'0' + nchar(8239) + N'0'", "nchar(8203) + N'1' + nchar(8239) + N'0' + nchar(8239) + nchar(8320)",
+        ];
+        for (var id = 0; id < values.Length; id++)
+            Exec(c, $"insert seeked values ({id}, {values[id]}); insert scanned values ({id}, {values[id]});");
+
+        string[] predicates =
+        [
+            "v >= N'10/' and v < N'101'", "v like N'100%'", @"v like N'100\%%' escape '\'", "v >= N'Customer 12' and v < N'Customer 13'",
+            "v = N'Customer 12'", "v = N'Customer-12'", "v like N'Customer 12%'", "v like N'Customer-1%'", "v > N'1'", "v < N'Customer'",
+        ];
         IndexSeekDiagnostics.Sink = [];
         try
         {
             for (var round = 0; round < 12; round++)
-                _ = ReadRows(c, "select id from t where v >= N'10/' and v < N'101'");
+            {
+                foreach (var predicate in predicates)
+                {
+                    CollectionAssert.AreEqual(
+                        ReadRows(c, $"select id from scanned where {predicate} order by v, id"),
+                        ReadRows(c, $"select id from seeked where {predicate} order by v, id"),
+                        $"{predicate} (round {round})");
+                }
+            }
             Contains("CacheSlice", IndexSeekDiagnostics.Sink);
+        }
+        finally
+        {
+            IndexSeekDiagnostics.Sink = null;
+        }
+    }
 
-            Exec(c, "insert t values (9, nchar(12288) + N'12')");
-            IndexSeekDiagnostics.Sink = [];
-            for (var round = 0; round < 12; round++)
-                CollectionAssert.AreEquivalent(new object[] { 1, 2, 5 }, ReadRows(c, "select id from t where v >= N'10/' and v < N'101'"));
-            DoesNotContain("CacheSlice", IndexSeekDiagnostics.Sink);
+    // Once bounded reads have walked as many keys as an entry holds, a bounded
+    // read cuts its run from the keyed order by binary search, which needs the
+    // keys in one total order. Each of these keys holds a character past the
+    // Latin1-General table — a figure, narrow or ideographic space, a
+    // subscript or fullwidth digit, a combining mark — which the table's one
+    // order places, so the cut reads every row the walk does.
+    [TestMethod]
+    public void BoundedReads_OverKeysPastTheTable_SliceTheRowsTheWalkReads()
+    {
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, """
+            create table seeked (id int not null primary key, v nvarchar(20) collate Latin1_General_CI_AS not null);
+            create index ix on seeked (v);
+            create table scanned (id int not null primary key, v nvarchar(20) collate Latin1_General_CI_AS not null);
+            insert seeked values (1, nchar(8199) + N'1' + nchar(160) + N'0-%'), (2, N' 1' + nchar(8239) + N'0' + nchar(8239) + N'0'),
+                (3, N'.1' + nchar(12288) + N'0''' + nchar(8320)), (4, N' 1 0' + nchar(769) + nchar(65296));
+            insert scanned select * from seeked;
+            """);
+        IndexSeekDiagnostics.Sink = [];
+        try
+        {
+            for (var round = 0; round < 6; round++)
+            {
+                CollectionAssert.AreEquivalent(
+                    ReadRows(c, "select id from scanned where v >= N''"),
+                    ReadRows(c, "select id from seeked where v >= N''"),
+                    $"round {round}");
+            }
+            Contains("CacheSlice", IndexSeekDiagnostics.Sink);
         }
         finally
         {
@@ -1577,40 +1636,26 @@ public sealed class IndexSeekTests
         DoesNotContain("Scan(p)", trace);
     }
 
-    // An ideographic space lies outside the Latin1-General table, so its key
-    // orders by the table's invariant-culture fallback, which places it among
-    // the others by weights the table doesn't share; it matches the pattern's
-    // space all the same, so while the index holds it a range read through
-    // the space would miss it, and the read walks the letters and digits.
+    // An ideographic space lies past the Latin1-General table and weighs as
+    // the space it's a wide form of, which LIKE matches it to, so its key
+    // lies in the range read through the pattern's space, beside the
+    // space's own spelling; a no-break space weighs apart from a space and
+    // matches nothing.
     [TestMethod]
-    public void AKeyOrderedByTheTablesFallback_HoldsAPunctuatedPrefixToItsLettersAndDigits()
+    public void AKeyPastTheTable_LiesInThePunctuatedPrefixsRange()
     {
-        using var connection = new Simulation().CreateDbConnection();
-        connection.Open();
-        Exec(connection, """
+        const string Setup = """
             create table c (id int not null primary key, name nvarchar(30) collate Latin1_General_CI_AS not null);
             create index ix on c (name);
-            insert c values (1, N'Customer 1'), (2, N'Customer 12'), (3, N'Customer 123'), (4, N'Customer 2'), (5, N'Customer' + nchar(160) + N'12')
-            """);
-        const string Ordered = "select top (5) id from c where name like N'Customer 12%' order by name";
-        const string Unordered = "select id from c where name like N'Customer 12%'";
-        IndexSeekDiagnostics.Sink = [];
-        try
-        {
-            CollectionAssert.AreEqual(new object[] { 2, 3 }, ReadRows(connection, Ordered));
-            CollectionAssert.AreEquivalent(new object[] { 2, 3 }, ReadRows(connection, Unordered));
-            DoesNotContain("FallbackOrderedKeys", IndexSeekDiagnostics.Sink);
-
-            Exec(connection, "insert c values (6, N'Customer' + nchar(12288) + N'12')");
-            IndexSeekDiagnostics.Sink.Clear();
-            CollectionAssert.AreEquivalent(new object[] { 2, 3, 6 }, ReadRows(connection, Ordered));
-            CollectionAssert.AreEquivalent(new object[] { 2, 3, 6 }, ReadRows(connection, Unordered));
-            Contains("FallbackOrderedKeys", IndexSeekDiagnostics.Sink);
-        }
-        finally
-        {
-            IndexSeekDiagnostics.Sink = null;
-        }
+            insert c values (1, N'Customer 1'), (2, N'Customer 12'), (3, N'Customer 123'), (4, N'Customer 2'),
+                (5, N'Customer' + nchar(160) + N'12'), (6, N'Customer' + nchar(12288) + N'12')
+            """;
+        var (trace, rows) = Run(Setup, "select id from c where name like N'Customer 12%'");
+        Contains("LikeSeek(c)", trace);
+        DoesNotContain("Scan(c)", trace);
+        CollectionAssert.AreEquivalent(new object[] { 2, 3, 6 }, rows);
+        (_, rows) = Run(Setup, "select top (5) id from c where name like N'Customer 12%' order by name, id");
+        CollectionAssert.AreEqual(new object[] { 2, 6, 3 }, rows);
     }
 
     [TestMethod]
