@@ -1265,9 +1265,88 @@ internal sealed class HeapTable : SchemaObject
     /// id 1.</description></item>
     /// </list>
     /// </summary>
+    /// <remarks>
+    /// Every statement charging the index usage counters reads these, and they
+    /// change only with the table's indexes, so the rows are kept with what
+    /// each was built from (<see cref="IdentitySnapshot"/>) and a later call
+    /// checks those in place of building them again. The list is shared with
+    /// every caller, which only ever reads it.
+    /// </remarks>
     public List<IndexIdentity> IndexIdentities()
     {
+        if (Volatile.Read(ref this.identitySnapshot) is { } kept && kept.Holds(this))
+            return kept.Rows;
         this.SettleIndexIds();
+        // The constructor notes the inputs ahead of the rows, so a change
+        // landing between the two fails the next check rather than passing it.
+        var snapshot = new IdentitySnapshot(this) { Rows = this.BuildIndexIdentities() };
+        Volatile.Write(ref this.identitySnapshot, snapshot);
+        return snapshot.Rows;
+    }
+
+    private IdentitySnapshot? identitySnapshot;
+
+    /// <summary>
+    /// What <see cref="IndexIdentities"/> last built its rows from — each key,
+    /// index and hypothetical index in list order, with the id, name and
+    /// bucket count a row reads off it — and the rows themselves.
+    /// </summary>
+    private sealed class IdentitySnapshot(HeapTable table)
+    {
+        public List<IndexIdentity> Rows = [];
+
+        private readonly List<Index> indexes = table.Indexes;
+
+        private readonly IdentitySource[] keySources = [.. table.KeyConstraints.Select(static key => new IdentitySource(key, key.IndexId, key.Name, key.BucketCount))];
+
+        private readonly IdentitySource[] indexSources = [.. table.Indexes.Select(static index => new IdentitySource(index, index.IndexId, index.Name, index.BucketCount))];
+
+        private readonly IdentitySource[] hypotheticalSources = [.. table.HypotheticalIndexes.Select(static index => new IdentitySource(index, index.IndexId, index.Name, index.BucketCount))];
+
+        /// <summary>Whether <paramref name="table"/>'s keys and indexes are still the ones the rows were built from.</summary>
+        public bool Holds(HeapTable table)
+        {
+            if (!ReferenceEquals(table.Indexes, this.indexes) || table.KeyConstraints.Count != this.keySources.Length
+                || table.Indexes.Count != this.indexSources.Length || table.HypotheticalIndexes.Count != this.hypotheticalSources.Length)
+            {
+                return false;
+            }
+            for (var i = 0; i < this.keySources.Length; i++)
+            {
+                var key = table.KeyConstraints[i];
+                if (!this.keySources[i].Matches(key, key.IndexId, key.Name, key.BucketCount))
+                    return false;
+            }
+            return Matches(this.indexSources, table.Indexes) && Matches(this.hypotheticalSources, table.HypotheticalIndexes);
+        }
+
+        private static bool Matches(IdentitySource[] sources, List<Index> indexes)
+        {
+            for (var i = 0; i < sources.Length; i++)
+            {
+                var index = indexes[i];
+                if (!sources[i].Matches(index, index.IndexId, index.Name, index.BucketCount))
+                    return false;
+            }
+            return true;
+        }
+    }
+
+    /// <summary>One identity row's inputs, as <see cref="IdentitySnapshot"/> notes them.</summary>
+    private readonly struct IdentitySource(object backing, int indexId, string name, int bucketCount)
+    {
+        private readonly object backing = backing;
+        private readonly int indexId = indexId;
+        private readonly string name = name;
+        private readonly int bucketCount = bucketCount;
+
+        // A rename assigns a new string, so the name compares by reference.
+        public bool Matches(object backing, int indexId, string name, int bucketCount) =>
+            ReferenceEquals(this.backing, backing) && this.indexId == indexId && ReferenceEquals(this.name, name) && this.bucketCount == bucketCount;
+    }
+
+    private List<IndexIdentity> BuildIndexIdentities()
+    {
         var entries = new List<(int IndexId, bool Clustered, KeyConstraint? Key, Index? Index)>(this.KeyConstraints.Count + this.Indexes.Count);
         foreach (var k in this.KeyConstraints)
             entries.Add((k.IndexId, k.IsClustered, k, null));
