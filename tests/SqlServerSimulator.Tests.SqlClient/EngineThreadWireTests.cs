@@ -21,7 +21,12 @@ public sealed class EngineThreadWireTests
     /// waiting statement to hold a pool thread, the login's own work would
     /// queue behind them all while the pool added threads a few a second.
     /// </summary>
+    // Sequential phase: the login's time is the time its continuations wait
+    // for this process's shared pool, which tests running beside it can hold —
+    // a whole-solution run on a 20-core box broke the bound twice, while the
+    // test alone and its project alone never did.
     [TestMethod]
+    [DoNotParallelize]
     [DataRow("waitfor delay '00:01:00'", "WAITFOR")]
     [DataRow("select v from held where id = 1", "LCK_M_S")]
     public async Task ManyWaitingSessions_LeaveLoginsFast(string wait, string waitType)
