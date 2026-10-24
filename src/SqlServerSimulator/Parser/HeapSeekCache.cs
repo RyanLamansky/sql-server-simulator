@@ -1125,7 +1125,13 @@ internal sealed class HeapSeekCache
             SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive, int candidateCap, List<SqlValueKey>? keys = null)
         {
             var bounded = keys is null && (lower is not null || upper is not null);
-            if (bounded && this.walkedKeys >= this.Buckets.Count)
+            // A binary search needs the keyed order sorted under one
+            // comparison, which a key a collation orders by its fallback order
+            // breaks (HeldFallbackOrderedKey): the table orders two keys of
+            // its own, the fallback any pair holding such a key, and the two
+            // don't compose transitively, so the search can land past a whole
+            // run of keys in range. Such an entry keeps the walk.
+            if (bounded && this.walkedKeys >= this.Buckets.Count && !this.HeldFallbackOrderedKey)
             {
                 IndexSeekDiagnostics.Sink?.Add("CacheSlice");
                 return SliceKeyedOrder(this.KeyedOrder(), lower, lowerInclusive, upper, upperInclusive, candidateCap);

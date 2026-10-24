@@ -959,6 +959,39 @@ public sealed class IndexSeekTests
         }
     }
 
+    // A key the Latin1-General table orders by its fallback order makes the
+    // keyed order unsortable under one comparison, which a binary search
+    // needs, so however many bounded reads have walked such an entry, they
+    // keep walking it.
+    [TestMethod]
+    public void BoundedReads_OverAKeyOrderedByTheTablesFallback_KeepTheWalk()
+    {
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, """
+            create table t (id int not null primary key, v nvarchar(20) collate Latin1_General_CI_AS not null);
+            create index ix on t (v);
+            insert t values (1, N'100'), (2, N'100%'), (3, N'112'), (4, nchar(185) + N'12'), (5, N'10/'), (6, N'101'), (7, N'abc'), (8, N'Customer 12')
+            """);
+        IndexSeekDiagnostics.Sink = [];
+        try
+        {
+            for (var round = 0; round < 12; round++)
+                _ = ReadRows(c, "select id from t where v >= N'10/' and v < N'101'");
+            Contains("CacheSlice", IndexSeekDiagnostics.Sink);
+
+            Exec(c, "insert t values (9, nchar(12288) + N'12')");
+            IndexSeekDiagnostics.Sink = [];
+            for (var round = 0; round < 12; round++)
+                CollectionAssert.AreEquivalent(new object[] { 1, 2, 5 }, ReadRows(c, "select id from t where v >= N'10/' and v < N'101'"));
+            DoesNotContain("CacheSlice", IndexSeekDiagnostics.Sink);
+        }
+        finally
+        {
+            IndexSeekDiagnostics.Sink = null;
+        }
+    }
+
     [TestMethod]
     public void InsertAfterWarmup_ReplaysDelta_FindsNewRow()
     {
