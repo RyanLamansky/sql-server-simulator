@@ -27,7 +27,8 @@ internal static class IndexSeekDiagnostics
     /// plus the per-Heap cache's own maintenance trace —
     /// <c>CacheBuild</c> when a seek (re)builds an entry from a full scan and
     /// <c>CacheReplay</c> when it instead applies the incremental journal delta
-    /// (the "no warm-up" path). A test assigns a fresh list, drives a query to
+    /// (the "no warm-up" path), and <c>CacheSlice</c> when a bounded ordered
+    /// read is cut from the entry's cached key order rather than walked. A test assigns a fresh list, drives a query to
     /// completion on the same thread (execution is synchronous and in-process),
     /// then inspects the entries. Null disables capture.
     /// </summary>

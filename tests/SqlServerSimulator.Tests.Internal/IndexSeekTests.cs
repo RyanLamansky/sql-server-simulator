@@ -895,6 +895,70 @@ public sealed class IndexSeekTests
         }
     }
 
+    // A bounded ordered read walks the entry's sorted keys until the walks
+    // since the table's last write have visited as many keys as the entry
+    // holds; from then on until a write it cuts its run from the cached key
+    // order instead. Every bound shape answers as the scan of an unindexed copy
+    // does on both paths, before and after a write resets the budget.
+    [TestMethod]
+    public void BoundedOrderedReads_CutFromTheKeyOrder_AnswerAsTheWalkDid()
+    {
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, """
+            create table seeked (id int not null primary key, a int not null, b nvarchar(10) null);
+            create index ix on seeked (a, b);
+            create table scanned (id int not null primary key, a int not null, b nvarchar(10) null);
+            """);
+        string[] names = ["", "a", "B", "b", "bb", "C", "x"];
+        var id = 0;
+        for (var a = 0; a < 6; a++)
+        {
+            foreach (var name in (string?[])[.. names, null])
+            {
+                var b = name is null ? "null" : $"N'{name}'";
+                Exec(c, $"insert seeked values ({id}, {a}, {b}); insert scanned values ({id}, {a}, {b});");
+                id++;
+            }
+        }
+
+        string[] ranges =
+        [
+            "a = 2 and b > N'b'", "a = 2 and b >= N'b'", "a = 2 and b < N'b'", "a = 2 and b <= N'B'",
+            "a = 2 and b between N'a' and N'bb'", "a > 2", "a >= 2", "a < 2", "a <= 2", "a between 1 and 3",
+            "a > 1 and a < 4", "a = 5 and b > N''", "a > 5", "a < 0", "a = 3 and b like N'b%'",
+        ];
+        void Check(string phase)
+        {
+            foreach (var range in ranges)
+            {
+                var expected = ReadRows(c, $"select id from scanned where {range} order by a, b, id");
+                CollectionAssert.AreEqual(expected, ReadRows(c, $"select id from seeked where {range} order by a, b, id"), $"{range} ({phase})");
+            }
+        }
+
+        IndexSeekDiagnostics.Sink = [];
+        try
+        {
+            for (var round = 0; round < 6; round++)
+                Check("before the write");
+            Contains("CacheSlice", IndexSeekDiagnostics.Sink);
+            Exec(c, "insert seeked values (100, 2, N'bc'); insert scanned values (100, 2, N'bc');");
+            IndexSeekDiagnostics.Sink = [];
+            CollectionAssert.AreEqual(
+                ReadRows(c, "select id from scanned where a = 2 and b > N'b' order by a, b, id"),
+                ReadRows(c, "select id from seeked where a = 2 and b > N'b' order by a, b, id"));
+            DoesNotContain("CacheSlice", IndexSeekDiagnostics.Sink);
+            for (var round = 0; round < 6; round++)
+                Check("after the write");
+            Contains("CacheSlice", IndexSeekDiagnostics.Sink);
+        }
+        finally
+        {
+            IndexSeekDiagnostics.Sink = null;
+        }
+    }
+
     [TestMethod]
     public void InsertAfterWarmup_ReplaysDelta_FindsNewRow()
     {

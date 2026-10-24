@@ -553,6 +553,15 @@ internal sealed class HeapSeekCache
         // next write shares one walk (AddRid / RemoveRid drop it).
         private (List<(int Page, int Slot)> Order, List<SqlValueKey> Keys)? keyedOrder;
 
+        // The keys the bounded walks of CappedCandidates visited since the last
+        // write. Once they add up to the entry's own key count they have cost
+        // what the keyed order costs to build, so the next bounded walk builds
+        // it, and every one after it until a write slices it by binary search
+        // instead: a walk compares and hashes each key it passes under the
+        // cache's gate, which a read-mostly table's repeated range reads — a
+        // LIKE prefix under an ORDER BY — held across every session seeking it.
+        private int walkedKeys;
+
         public (List<(int Page, int Slot)> Order, List<SqlValueKey> Keys) KeyedOrder()
         {
             if (this.keyedOrder is not { } built)
@@ -760,6 +769,7 @@ internal sealed class HeapSeekCache
         {
             this.keyOrder = null;
             this.keyedOrder = null;
+            this.walkedKeys = 0;
             var added = false;
             if (!this.Buckets.TryGetValue(key, out var bucket))
             {
@@ -820,6 +830,7 @@ internal sealed class HeapSeekCache
         {
             this.keyOrder = null;
             this.keyedOrder = null;
+            this.walkedKeys = 0;
             if (this.Buckets.TryGetValue(key, out var bucket))
             {
                 var at = bucket.BinarySearch(rid);
@@ -1012,6 +1023,13 @@ internal sealed class HeapSeekCache
         public List<(int Page, int Slot)>? CappedCandidates(
             SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive, int candidateCap, List<SqlValueKey>? keys = null)
         {
+            var bounded = keys is null && (lower is not null || upper is not null);
+            if (bounded && this.walkedKeys >= this.Buckets.Count)
+            {
+                IndexSeekDiagnostics.Sink?.Add("CacheSlice");
+                return SliceKeyedOrder(this.KeyedOrder(), lower, lowerInclusive, upper, upperInclusive, candidateCap);
+            }
+
             var sorted = this.EnsureSorted();
             var result = new List<(int Page, int Slot)>();
             if (sorted.Count == 0)
@@ -1024,6 +1042,8 @@ internal sealed class HeapSeekCache
 
             foreach (var key in sorted.GetViewBetween(lowerKey, upperKey))
             {
+                if (bounded)
+                    this.walkedKeys++;
                 if (lower is { } lk && !lowerInclusive && KeyTupleComparer.Instance.Compare(key, lk) == 0)
                     continue;
                 if (upper is { } uk && !upperInclusive && KeyTupleComparer.Instance.Compare(key, uk) == 0)
@@ -1039,6 +1059,43 @@ internal sealed class HeapSeekCache
             }
 
             return result;
+        }
+
+        // The bounded walk above, read off the keyed order: its keys run in the
+        // walk's order under the walk's comparer, so the addresses whose keys
+        // lie within the bounds are one run of it, found by binary search with
+        // the same ragged-arity bound semantics.
+        private static List<(int Page, int Slot)>? SliceKeyedOrder(
+            (List<(int Page, int Slot)> Order, List<SqlValueKey> Keys) keyed,
+            SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive, int candidateCap)
+        {
+            var keys = CollectionsMarshal.AsSpan(keyed.Keys);
+            var start = lower is { } lk ? FirstPast(keys, lk, strictly: !lowerInclusive) : 0;
+            var end = upper is { } uk ? FirstPast(keys, uk, strictly: upperInclusive) : keys.Length;
+            if (end <= start)
+                return [];
+            if (end - start > candidateCap)
+                return null;
+            var run = new List<(int Page, int Slot)>(end - start);
+            run.AddRange(CollectionsMarshal.AsSpan(keyed.Order)[start..end]);
+            return run;
+        }
+
+        // The first index whose key sorts at or past bound, or strictly past it.
+        private static int FirstPast(ReadOnlySpan<SqlValueKey> keys, SqlValueKey bound, bool strictly)
+        {
+            var low = 0;
+            var high = keys.Length;
+            while (low < high)
+            {
+                var middle = (int)((uint)(low + high) >> 1);
+                var compared = KeyTupleComparer.Instance.Compare(keys[middle], bound);
+                if (compared > 0 || (compared == 0 && !strictly))
+                    high = middle;
+                else
+                    low = middle + 1;
+            }
+            return low;
         }
     }
 }
