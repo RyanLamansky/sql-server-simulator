@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.IO.Compression;
+using System.Runtime.ExceptionServices;
 
 namespace SqlServerSimulator.Storage.Bacpac;
 
@@ -301,18 +302,16 @@ internal static class BacpacReader
         var rowCount = 0;
         var identityOrdinal = IdentityOrdinalOf(wireCols);
         Int128? identityMax = null;
-        // Both buffers are rewritten in full every iteration — the wire copy
-        // covers every non-computed column and EvaluateComputedColumns covers
-        // the rest — so one pair serves the whole stream.
-        var wireValues = new SqlValue[decoders.Length];
+        // The full-row buffer is rewritten in full every iteration — the wire
+        // copy covers every non-computed column and EvaluateComputedColumns
+        // covers the rest — so one serves the whole stream.
         var full = new SqlValue[table.Columns.Length];
-        var typedXml = TypedXmlOrdinals(wireCols);
+        var rows = new BcpRows(bcpStream, decoders, wireCols);
         byte[]? rowBytes = null;
-        while (BcpRowReader.TryReadRow(bcpStream, decoders, wireValues))
+        while (rows.Next() is { } wireValues)
         {
             if (identityOrdinal >= 0)
                 TrackIdentityMax(wireValues[identityOrdinal], ref identityMax);
-            ValidateTypedXml(wireCols, typedXml, wireValues);
             for (var w = 0; w < wireValues.Length; w++)
                 full[wireOrdinals[w]] = wireValues[w];
             Simulation.EvaluateComputedColumns(table, full, batch);
@@ -332,17 +331,14 @@ internal static class BacpacReader
         var rowCount = 0;
         var identityOrdinal = IdentityOrdinalOf(wireCols);
         Int128? identityMax = null;
-        // One row buffer for the whole stream — EncodeRow copies what it needs
-        // into the row bytes, so no value outlives the iteration — and one
-        // encoded-bytes buffer beside it, since Insert copies into the page.
-        var values = new SqlValue[decoders.Length];
-        var typedXml = TypedXmlOrdinals(wireCols);
+        // One encoded-bytes buffer for the whole stream, since Insert copies
+        // into the page.
+        var rows = new BcpRows(bcpStream, decoders, wireCols);
         byte[]? rowBytes = null;
-        while (BcpRowReader.TryReadRow(bcpStream, decoders, values))
+        while (rows.Next() is { } values)
         {
             if (identityOrdinal >= 0)
                 TrackIdentityMax(values[identityOrdinal], ref identityMax);
-            ValidateTypedXml(wireCols, typedXml, values);
             var length = RowEncoder.EncodeRowInto(wireCols, values, table.Heap, ref rowBytes);
             _ = table.Heap.Insert(rowBytes.AsSpan(0, length));
             rowCount++;
@@ -375,6 +371,97 @@ internal static class BacpacReader
     {
         foreach (var ordinal in typedXml)
             values[ordinal] = Parser.Expressions.Cast.ValidateTypedXml(values[ordinal], columns[ordinal].XmlSchemaCollection, document: false);
+    }
+
+    /// <summary>
+    /// One BCP stream's rows in stream order, each typed <c>xml</c> value
+    /// validated and canonicalized (<see cref="ValidateTypedXml"/>). A row
+    /// comes back in a buffer a later row overwrites, which nothing downstream
+    /// retains: the encoder copies what it needs into the row bytes.
+    /// </summary>
+    /// <remarks>
+    /// A table with a typed column is read a batch of rows at a time, and the
+    /// batch validated across the thread pool: a value's validation costs many
+    /// times the rest of its row's load, and one table can carry most of a
+    /// bacpac's xml — AdventureWorks' <c>Person.Person</c>, whose load was most
+    /// of the import's wall clock while the other workers sat idle. A value
+    /// that fails, or a row the stream can't decode, raises as a row-at-a-time
+    /// load would, after the rows ahead of it. The batch's threads read the
+    /// collection's compiled schemas at once, as two sessions writing to one
+    /// typed column do; nothing changes a compiled set.
+    /// </remarks>
+    private sealed class BcpRows
+    {
+        private const int BatchRows = 256;
+
+        private readonly BufferedStream stream;
+        private readonly BcpRowReader.ColumnDecoder[] decoders;
+        private readonly HeapColumn[] columns;
+        private readonly int[] typedXml;
+        private readonly SqlValue[][] batch;
+        private readonly ExceptionDispatchInfo?[] failures;
+        private ExceptionDispatchInfo? undecodable;
+        private int count, next;
+
+        public BcpRows(BufferedStream stream, BcpRowReader.ColumnDecoder[] decoders, HeapColumn[] columns)
+        {
+            this.stream = stream;
+            this.decoders = decoders;
+            this.columns = columns;
+            this.typedXml = TypedXmlOrdinals(columns);
+            this.batch = new SqlValue[this.typedXml.Length == 0 ? 1 : BatchRows][];
+            for (var i = 0; i < this.batch.Length; i++)
+                this.batch[i] = new SqlValue[decoders.Length];
+            this.failures = new ExceptionDispatchInfo?[this.typedXml.Length == 0 ? 0 : BatchRows];
+        }
+
+        /// <summary>The next row, or null past the stream's last.</summary>
+        public SqlValue[]? Next()
+        {
+            if (this.typedXml.Length == 0)
+                return BcpRowReader.TryReadRow(this.stream, this.decoders, this.batch[0]) ? this.batch[0] : null;
+            if (this.next == this.count)
+            {
+                this.undecodable?.Throw();
+                if (!this.ReadBatch())
+                    return null;
+            }
+            this.failures[this.next]?.Throw();
+            return this.batch[this.next++];
+        }
+
+        private bool ReadBatch()
+        {
+            this.next = this.count = 0;
+            try
+            {
+                while (this.count < BatchRows && BcpRowReader.TryReadRow(this.stream, this.decoders, this.batch[this.count]))
+                    this.count++;
+            }
+#pragma warning disable CA1031 // A row the stream can't decode raises once the rows ahead of it are taken.
+            catch (Exception failure)
+#pragma warning restore CA1031
+            {
+                this.undecodable = ExceptionDispatchInfo.Capture(failure);
+                if (this.count == 0)
+                    this.undecodable.Throw();
+            }
+            Array.Clear(this.failures);
+            _ = Parallel.For(0, this.count, row =>
+            {
+                try
+                {
+                    ValidateTypedXml(this.columns, this.typedXml, this.batch[row]);
+                }
+#pragma warning disable CA1031 // Whatever a row's validation raises is rethrown in stream order, as the row is reached.
+                catch (Exception failure)
+#pragma warning restore CA1031
+                {
+                    this.failures[row] = ExceptionDispatchInfo.Capture(failure);
+                }
+            });
+            return this.count > 0;
+        }
     }
 
     /// <summary>

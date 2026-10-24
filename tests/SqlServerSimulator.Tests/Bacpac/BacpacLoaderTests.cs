@@ -2280,6 +2280,50 @@ public class BacpacLoaderTests
     }
 
     [TestMethod]
+    public void TypedXmlColumn_ValuesAcrossSeveralBatches_LoadCanonicalWithTheirRows()
+    {
+        // The loader validates a typed column's values a batch at a time across
+        // the thread pool; every row still lands with its own value, made
+        // canonical, whichever thread validated it.
+        const string xsd = "<xsd:schema xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\"><xsd:element name=\"N\" type=\"xsd:int\" /></xsd:schema>";
+        using var bacpac = BacpacBuilder.Create()
+            .XmlSchemaCollection("dbo", "NumberSchema", xsd)
+            .Table("dbo", "Doc", t =>
+            {
+                _ = t.Column("Id", "int").Column("Body", "xml", nullable: true, xmlSchemaCollection: "[dbo].[NumberSchema]");
+                for (var i = 0; i < 700; i++)
+                    _ = t.Row(i, $"<N> 00{i} </N>");
+            })
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual(700, sim.ExecuteScalar("SELECT COUNT(*) FROM Doc WHERE CAST(Body AS nvarchar(max)) = CONCAT('<N>', Id, '</N>');"));
+    }
+
+    [TestMethod]
+    public void TypedXmlColumn_InvalidValuePastTheFirstBatch_FailsTheImport()
+    {
+        const string xsd = "<xsd:schema xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\"><xsd:element name=\"N\" type=\"xsd:int\" /></xsd:schema>";
+        using var bacpac = BacpacBuilder.Create()
+            .XmlSchemaCollection("dbo", "NumberSchema", xsd)
+            .Table("dbo", "Doc", t =>
+            {
+                _ = t.Column("Id", "int").Column("Body", "xml", nullable: true, xmlSchemaCollection: "[dbo].[NumberSchema]");
+                for (var i = 0; i < 700; i++)
+                    _ = t.Row(i, i == 400 ? "<N>four hundred</N>" : $"<N>{i}</N>");
+            })
+            .Build();
+
+        // The table's load fails on the value as an INSERT of it would; the
+        // import surfaces its loading worker's failure.
+        var error = IsInstanceOfType<SimulatedSqlException>(Throws<AggregateException>(() => new Simulation().ImportBacpac(bacpac, out _)).InnerException);
+        AreEqual(6926, error.Number);
+        Contains("'four hundred'", error.Message);
+    }
+
+    [TestMethod]
     public void UntypedXmlColumn_LoadsWith_ZeroXmlCollectionId()
     {
         // An untyped xml column carries no XmlSchemaCollection relationship;

@@ -216,6 +216,7 @@ A `vector` column arrives as `SqlVectorTypeSpecifier`, its `Dimension` a propert
 Typed-xml columns arrive as `SqlXmlTypeSpecifier` (vs `SqlTypeSpecifier` for every other type) carrying an `XmlSchemaCollection` relationship whose `References` names the bound `[schema].[collection]`.
 `TranslateTypeSpecifier` detects the relationship and emits `xml([schema].[collection])` instead of bare `xml`, so `HeapColumn.XmlSchemaCollection` binds and `sys.columns.xml_collection_id` reports the collection's id (0 when untyped).
 Only the default CONTENT facet is handled — AW carries no `XmlStyle`/DOCUMENT property (probe: zero occurrences across the model), so a DOCUMENT facet would need a separate property read.
+Each typed value is validated and canonicalized as an `INSERT`'s is, a batch of the table's rows at a time across the thread pool (`BacpacReader.BcpRows`), the rows still inserted in order and a failing value raising after the rows ahead of it: validated by the one worker loading its table, `Person.Person`'s 20,000 survey documents were most of a cold AdventureWorks import's wall clock, which went from 2.35 to about 1.75 s (Release, measured 2026-10-24).
 
 This closes the round-trip that made AW's re-exported bacpac lose typed xml: `Person.vAdditionalContactInfo`'s `.value()` XQuery needs typed xml for singleton inference, and untyped columns raise Msg 2389 at real-server re-import.
 On the export side, `sys.columns.xml_collection_id` populates from the binding so DacFx re-serializes the `SqlXmlTypeSpecifier` shape.
