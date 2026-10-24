@@ -69,6 +69,20 @@ public sealed class IndexUsageStatsTests
     }
 
     [TestMethod]
+    public void EachStatementOfABatch_CountsItsUse_WhenThePlanCacheReplaysIt()
+    {
+        // The second run of the text replays its cached plans, each statement
+        // counting its seek as the parsed run's did.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(Schema + "insert t values (1, 10, 100, 'a'), (2, 20, 200, 'b')");
+        for (var run = 1; run <= 3; run++)
+        {
+            _ = sim.ExecuteNonQuery("select * from t where id = 1; select * from t where id = 2");
+            AreEqual($"{2 * run}/0/0/1", Usage(sim, "pk_t"));
+        }
+    }
+
+    [TestMethod]
     public void AnUpdate_MaintainsTheIndexesHoldingWhatItSets()
     {
         var sim = new Simulation();

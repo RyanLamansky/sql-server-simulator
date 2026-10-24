@@ -453,28 +453,18 @@ public sealed partial class Simulation
                 // Without the clock a replayed GETDATE() reads
                 // default(DateTime) rather than now; without the per-statement
                 // clears a second statement would read the first's frozen
-                // RAND() draw and cached subquery results. StartLine mirrors
-                // the single-statement dispatch value for ERROR_LINE parity.
-                batch.CurrentStatement.UtcNow = DateTime.UtcNow;
+                // RAND() draw and cached subquery results, and count no use of
+                // an index the first had used. StartLine mirrors the
+                // single-statement dispatch value for ERROR_LINE parity.
+                batch.CurrentStatement.BeginExecution();
                 batch.CurrentStatement.DispatchSerial++;
                 batch.CurrentStatement.StartLine = entry.Spans[statement].Line;
-                batch.CurrentStatement.AutocommitTransactionId = 0;
                 if (batch.Connection.NestingLevel == 0)
                 {
                     batch.Connection.Session.StatementStartIndex = entry.Spans[statement].Start;
                     Volatile.Write(ref batch.Connection.Session.StatementTransactionId, 0);
                 }
-                batch.CurrentStatement.StatementScopedValues = null;
-                batch.CurrentStatement.SubqueryResults = null;
-                batch.CurrentStatement.MaterializedEqualityIndexes = null;
-                batch.CurrentStatement.RowAddresses = null;
-                batch.CurrentStatement.CatalogViewRows = null;
-#if DEBUG
-                batch.CurrentStatement.AuditedCatalogRowSets = null;
-#endif
                 batch.CurrentStatement.ComputedUniqueKeys = null;
-                batch.CurrentStatement.LockTallies = null;
-                batch.CurrentStatement.EscalatedTables = null;
                 batch.CurrentStatement.NullEliminated = false;
                 batch.CurrentStatement.OwesOverflowNotice = batch.CurrentStatement.OwesDivideByZeroNotice = false;
                 batch.RcsiStatementSnapshotXid = null;
@@ -586,7 +576,7 @@ public sealed partial class Simulation
                 // Replay bypasses the dispatch loop, so it stamps the NOCOUNT
                 // suppression and the TEXTSIZE the loop's post-statement
                 // walk would have.
-                replayed?.CountSuppressed = connection.NoCount;
+                _ = replayed?.CountSuppressed = connection.NoCount;
                 if (connection.TextSize >= 0 && replayed is SimulatedQueryResult query)
                     query.ClientTextSize = connection.TextSize;
                 foreach (var message in DrainPendingMessages(connection))
@@ -670,8 +660,11 @@ public sealed partial class Simulation
                 connection.LastErrorNumber = 0;
                 if (batch.CurrentStatement.NullEliminated && connection.AnsiWarnings)
                     yield return NullEliminatedWarning(batch);
-                foreach (var notice in ArithmeticNotices(batch))
-                    yield return notice;
+                if (batch.CurrentStatement.OwesOverflowNotice || batch.CurrentStatement.OwesDivideByZeroNotice)
+                {
+                    foreach (var notice in ArithmeticNotices(batch))
+                        yield return notice;
+                }
                 batch.ReleaseStatementSchemaLocks();
             }
 
