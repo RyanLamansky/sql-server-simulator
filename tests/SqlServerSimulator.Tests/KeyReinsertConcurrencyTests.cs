@@ -111,6 +111,29 @@ public sealed class KeyReinsertConcurrencyTests
         _ = reader.CreateCommand("commit; set transaction isolation level read committed").ExecuteNonQuery();
     }
 
+    /// <summary>
+    /// A range seek waiting on another transaction's uncommitted insert, while
+    /// that transaction deletes a later key or moves it out of the range,
+    /// reads the range as it stands once the wait ends: the inserted row, and
+    /// not the key that left (probed 2026-10-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("delete acc where id = 3; commit")]
+    [DataRow("update acc set id = 9 where id = 3; commit")]
+    public async Task RangeSeekWaitingOnAnInsert_PassesAKeyThatLeftTheRange(string settle)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table acc (id int not null primary key, bal int not null); insert acc values (1, 10), (3, 30), (4, 40)");
+        using var holder = sim.CreateOpenConnection();
+        using var reader = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; insert acc values (2, 20)").ExecuteNonQuery();
+        var blocked = await sim.StartBlocked(reader, "select id from acc where id between 1 and 4", TestContext.CancellationToken);
+        _ = holder.CreateCommand(settle).ExecuteNonQuery();
+
+        CollectionAssert.AreEqual(new object[] { 1, 2, 4 }, await blocked);
+    }
+
     [TestMethod]
     public async Task ScanMeetingADeleteThatRollsBack_ReadsTheRestoredRow()
     {
