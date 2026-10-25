@@ -852,6 +852,28 @@ The sqllogictest replays, three runs per build alternating, medians: `refs/rando
 
 What stays: the first resolution of each name (`ResolveSourceColumnOfAnyKind`, 1.5% of the point `SELECT`, 5% of the SMO column query, much of it the join planner's at run time), the read recorder's own scan of a table query's columns (1.5%), `BuildSqlProjection`'s closure, which captures most of its locals, and the native allocation path, still about a fifth of the samples.
 
+### One-off texts: what every query's parse pays for checks it doesn't need
+
+The same harness, re-run on 2026-10-25, found one-off statements 40–65% slower than the leftovers pass had left them: the release build of that pass's commit, measured the same day on the same box, ran the point `SELECT` in 15.0 µs, the join in 53.3 µs, the `INSERT` in 18.1 µs, the `UPDATE` in 12.2 µs and the EF-style query in 42.6 µs.
+Much of the growth was the capture the plan-cache DMVs added ([below](#the-plan-cache-dmvs)), which reads every statement's Query Store shape whatever the database's store does ([`database-options.md`](database-options.md#capture)); the rest was spread over the fidelity checks a query's parse had gained, several of which paid for structures only their own shapes use.
+Medians of three processes per build alternating, the baseline the commit before:
+
+| Shape | Before | After | KB per execution |
+|---|---|---|---|
+| Point `SELECT` by key | 21.6 µs | 21.7 µs | 35.2 → 34.0 |
+| Three-table join with `WHERE` and `ORDER BY` | 83.4 µs | 74.0 µs | 91.1 → 73.5 |
+| `INSERT … VALUES` of 10 columns | 25.5 µs | 22.7 µs | 35.9 → 29.4 |
+| `UPDATE` of two columns by key | 18.9 µs | 16.8 µs | 32.4 → 29.7 |
+| EF-style parameterized `SELECT` | 69.5 µs | 59.7 µs | 72.7 → 59.4 |
+
+- **Placing `ORDER BY` terms** against the select list, for the repeated-term refusal and the ORDER token alike, built a shape key for the term and for every projection, per term, in each of the two and in both parses — 14 KB of the join.
+  The terms are placed once for both (`Selection.SettleOrderTerms`), a column term matches a column projection by the column each binds to, and any other term builds each projection's key once.
+- **A `MATCH` scope per `WHERE` and `ON` clause**, ten collections each, built whether or not the clause held a `MATCH`; its collections are built as a pattern first fills them.
+- **Closures allocated on entry**: settling a query's `SHORTEST_PATH`s allocated one before finding the query had no `MATCH`, and the forced-seek check one per source, for a lambda only an index hint reaches.
+- **Query Store's shape** of a one-off write rendered its forced-parameterized form, which only a database parameterizing by force reads, and its simple-parameterized text twice where one rendering served both ([`database-options.md`](database-options.md#capture)).
+
+What stays of the capture, switched off to measure it: 2.5 µs of the point `SELECT`, 11 µs of the join, 6.5 µs of the `INSERT` and 4.6 µs of the `UPDATE`, a quarter to nearly half of it the garbage collection of what the plan registry keeps alive — up to 10,000 one-off plans, each with its batch text and statement shapes, the oldest evicted as each new one arrives, which keeps the long-lived ones dying in generation 2 (live heap 15 MB larger over the join's stream, its collections pausing 4.9 µs per statement against 1.0 µs).
+
 ## The plan-cache DMVs
 
 `sys.dm_exec_cached_plans`, `sys.dm_exec_query_stats`, `sys.dm_exec_procedure_stats`, `sys.dm_exec_trigger_stats`, `sys.dm_exec_function_stats`, `sys.dm_exec_query_optimizer_info` and the `sys.dm_exec_plan_attributes` / `sys.dm_exec_query_plan` / `sys.dm_exec_text_query_plan` functions read `Simulation.CachedPlans` (`CachedPlans.cs`, hooks in `Simulation.CachedPlans.cs`), a registry of the plans real would hold.

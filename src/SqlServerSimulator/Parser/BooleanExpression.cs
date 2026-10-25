@@ -267,7 +267,7 @@ internal abstract class BooleanExpression : ExpressionNode
             context.MoveNextRequired();
             operands.Add(ParseAnd(context));
         }
-        if (context.MatchScope is { Edges.Count: > 0, InMergeOn: false })
+        if (context.MatchScope is { HasEdges: true, InMergeOn: false })
             Expressions.MatchPredicate.RejectUnder(operands);
         var chain = new OrExpression([.. operands]);
         return FoldConstantChain(chain, operands, context, absorbing: true);
@@ -417,7 +417,7 @@ internal abstract class BooleanExpression : ExpressionNode
         var atom = ParseAtom(context);
         if (negations > 0 && atom is Expressions.MatchPredicate match && context.MatchScope is { InMergeOn: false } matchScope && match.WithdrawPaths(matchScope) is { } pathFilter)
             return pathFilter;
-        if (negations > 0 && context.MatchScope is { Edges.Count: > 0, InMergeOn: false })
+        if (negations > 0 && context.MatchScope is { HasEdges: true, InMergeOn: false })
             Expressions.MatchPredicate.RejectUnder([atom]);
         return negations % 2 == 1 ? new NotExpression(atom) : atom;
     }

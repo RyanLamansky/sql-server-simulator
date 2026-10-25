@@ -2461,9 +2461,7 @@ internal sealed partial class Selection
         {
             selection.CarrierColumnCount = carrierHidden;
         }
-        RefuseRepeatedOrderTerms(sources, orderBy, expressions, outputColumnNames);
-        if (orderBy.Count > 0 && scope.Position == QueryPosition.Statement)
-            selection.OrderColumns = OrderTokenColumns(sources, orderBy, expressions, outputColumnNames);
+        selection.OrderColumns = SettleOrderTerms(sources, orderBy, expressions, outputColumnNames, scope.Position == QueryPosition.Statement);
         if (parseBatch.Parser.CursorStatement && scope.Position == QueryPosition.Statement)
         {
             parseBatch.Parser.CursorStatement = false;

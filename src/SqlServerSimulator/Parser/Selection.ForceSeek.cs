@@ -115,7 +115,7 @@ partial class Selection
             if (source.WrittenHints is { IndexArguments.Count: > 0 } written)
             {
                 table.SettleIndexIds();
-                if (table.Indexes.Exists(named => NamedByIndexHint(batch, written, named.Name, named.IndexId) && UnusableUnderSessionOptions(batch, table, named)))
+                if (HintsIndexUnusableUnderSessionOptions(batch, written, table))
                     throw SimulatedSqlException.ForceSeekPlanInfeasible();
             }
             if (source.ForcedAccessPath is not { } hints)
@@ -155,6 +155,22 @@ partial class Selection
             if (defers)
                 return true;
             throw SimulatedSqlException.ForceSeekPlanInfeasible();
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Whether an index <paramref name="hints"/> name is one the session's
+    /// SET options leave unusable (see <see cref="UnusableUnderSessionOptions"/>).
+    /// A method of its own, so the loop over the sources that asks it captures
+    /// nothing.
+    /// </summary>
+    private static bool HintsIndexUnusableUnderSessionOptions(BatchContext batch, TableHintInfo hints, HeapTable table)
+    {
+        foreach (var named in table.Indexes)
+        {
+            if (NamedByIndexHint(batch, hints, named.Name, named.IndexId) && UnusableUnderSessionOptions(batch, table, named))
+                return true;
         }
         return false;
     }

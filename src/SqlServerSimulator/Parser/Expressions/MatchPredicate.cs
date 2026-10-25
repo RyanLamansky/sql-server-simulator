@@ -710,14 +710,26 @@ internal sealed class MatchPredicate : BooleanExpression
 /// <c>from</c> end, and the shortest paths and <c>LAST_NODE</c> references
 /// the query settles once the whole WHERE is parsed.
 /// </summary>
+/// <remarks>
+/// Every WHERE and ON clause opens one, and almost none holds a MATCH, so each
+/// collection is built as a pattern first adds to it.
+/// </remarks>
 internal sealed class MatchScope
 {
     /// <summary>The edges of ordinary patterns, which put the MATCH under the OR / NOT refusal.</summary>
-    public readonly List<FromSource> Edges = [];
-    public readonly List<FromSource> Nodes = [];
+    public List<FromSource> Edges => this.edges ??= [];
+
+    private List<FromSource>? edges;
+
+    /// <summary>Whether an ordinary pattern named an edge.</summary>
+    public bool HasEdges => this.edges is { Count: > 0 };
+
+    public List<FromSource> Nodes => field ??= [];
 
     /// <summary>Every edge any pattern or recursive section names, which no second one may name again.</summary>
-    public readonly HashSet<FromSource> AllEdges = [];
+    public HashSet<FromSource> AllEdges => this.allEdges ??= [];
+
+    private HashSet<FromSource>? allEdges;
 
     /// <summary>
     /// The sources the MATCH binds against, when not the query scope's — a
@@ -741,7 +753,7 @@ internal sealed class MatchScope
     public bool InMergeOn;
 
     /// <summary>The <c>SHORTEST_PATH</c>s the WHERE's MATCHes recurse over, in written order.</summary>
-    public readonly List<ShortestPathSpec> ShortestPaths = [];
+    public List<ShortestPathSpec> ShortestPaths => field ??= [];
 
     /// <summary>
     /// The MATCH node tables the query reads as outer joins — each with its
@@ -750,29 +762,31 @@ internal sealed class MatchScope
     /// it by. Applied by <c>Selection.ApplyMatchOuterNodes</c>; a statement
     /// that doesn't apply them reads each MATCH's inner equalities.
     /// </summary>
-    public readonly List<(FromSource Node, BooleanExpression On)> OuterNodes = [];
+    public List<(FromSource Node, BooleanExpression On)> OuterNodes => field ??= [];
 
     /// <inheritdoc cref="OuterNodes"/>
-    public readonly Dictionary<FromSource, Expression> NodeAnchors = [];
+    public Dictionary<FromSource, Expression> NodeAnchors => field ??= [];
 
     /// <summary>The WHERE's MATCH predicates, whose outer-node forms the query switches to as it applies <see cref="OuterNodes"/>.</summary>
-    public readonly List<MatchPredicate> Predicates = [];
+    public List<MatchPredicate> Predicates => field ??= [];
 
     /// <summary>
     /// Each <c>LAST_NODE(x)</c> an ordinary pattern names, with the Msg 13962
     /// state real reports when <c>x</c> ends no path: 4 at a hop's start, 5 at
     /// its end (probed 2026-10-11 against SQL Server 2025).
     /// </summary>
-    public readonly List<(FromSource Source, string Written, byte State)> LastNodeUses = [];
+    public List<(FromSource Source, string Written, byte State)> LastNodeUses => field ??= [];
 
     /// <summary>Each <c>LAST_NODE(x) = LAST_NODE(y)</c>, as bound and as written.</summary>
-    public readonly List<(FromSource Left, string LeftWritten, FromSource Right, string RightWritten)> LastNodeEqualities = [];
+    public List<(FromSource Left, string LeftWritten, FromSource Right, string RightWritten)> LastNodeEqualities => this.lastNodeEqualities ??= [];
+
+    private List<(FromSource Left, string LeftWritten, FromSource Right, string RightWritten)>? lastNodeEqualities;
 
     /// <summary>A <c>FOR PATH</c> node an ordinary pattern names without <c>LAST_NODE</c>.</summary>
-    public readonly List<FromSource> ForPathNodeUses = [];
+    public List<FromSource> ForPathNodeUses => field ??= [];
 
     /// <summary>Whether any pattern bound: an ordinary hop, a shortest path or a <c>LAST_NODE</c> equality.</summary>
-    public bool Bound => this.AllEdges.Count > 0 || this.LastNodeEqualities.Count > 0;
+    public bool Bound => this.allEdges is { Count: > 0 } || this.lastNodeEqualities is { Count: > 0 };
 
     /// <summary>
     /// The order a bare <c>SELECT *</c> expands <paramref name="sources"/> in

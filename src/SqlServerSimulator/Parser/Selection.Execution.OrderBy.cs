@@ -23,6 +23,25 @@ internal sealed partial class Selection
             || BuiltInToken.Equals(source.ImmediateQualifier, term.ImmediateQualifier));
 
     /// <summary>
+    /// Settles a query's <c>ORDER BY</c> against its select list: refuses a
+    /// term repeating another (<see cref="RefuseRepeatedOrderTerms"/>) and,
+    /// for a statement's own query (<paramref name="statement"/>), answers
+    /// the ORDER token's column list (<see cref="OrderTokenColumns"/>); null
+    /// for any other query. Each term is placed once for both.
+    /// </summary>
+    internal static ushort[]? SettleOrderTerms(FromSource[] sources, List<OrderBySpec> orderBy, IReadOnlyList<Expression> projections, string[] outputColumnNames, bool statement)
+    {
+        if (orderBy.Count < (statement ? 1 : 2))
+            return null;
+        var columns = new int[orderBy.Count];
+        ShapeKey?[]? projectionKeys = null;
+        for (var i = 0; i < columns.Length; i++)
+            columns[i] = OrderTermColumn(sources, orderBy[i], projections, outputColumnNames, ref projectionKeys);
+        RefuseRepeatedOrderTerms(sources, orderBy, projections, columns);
+        return statement ? OrderTokenColumns(orderBy, projections, columns) : null;
+    }
+
+    /// <summary>
     /// The ORDER token's column list for a statement's <c>ORDER BY</c>, as
     /// real sends it (probed 2026-10-17 against SQL Server 2025): one entry per
     /// term in written order — the select-list position an ordinal names, an
@@ -32,26 +51,31 @@ internal sealed partial class Selection
     /// and 0 for a term the select list doesn't hold — leaving out a term
     /// that is a constant, written or reached through its column's alias or
     /// ordinal, so a list of constants sends no token at all. A variable,
-    /// <c>GETDATE()</c> or a subquery is no constant.
+    /// <c>GETDATE()</c> or a subquery is no constant. <paramref name="columns"/>
+    /// holds each term's position.
     /// </summary>
-    internal static ushort[]? OrderTokenColumns(FromSource[] sources, List<OrderBySpec> orderBy, IReadOnlyList<Expression> projections, string[] outputColumnNames)
+    private static ushort[]? OrderTokenColumns(List<OrderBySpec> orderBy, IReadOnlyList<Expression> projections, int[] columns)
     {
-        List<ushort>? columns = null;
-        foreach (var term in orderBy)
+        List<ushort>? tokenColumns = null;
+        for (var i = 0; i < columns.Length; i++)
         {
-            var column = OrderTermColumn(sources, term, projections, outputColumnNames);
-            var sorted = column == 0 ? term.Expr : column <= projections.Count ? projections[column - 1] : null;
+            var column = columns[i];
+            var sorted = column == 0 ? orderBy[i].Expr : column <= projections.Count ? projections[column - 1] : null;
             if (sorted is Expressions.NamedExpression named)
                 sorted = named.Inner;
             if (sorted is { IsWrittenConstant: true })
                 continue;
-            (columns ??= []).Add((ushort)column);
+            (tokenColumns ??= []).Add((ushort)column);
         }
-        return columns?.ToArray();
+        return tokenColumns?.ToArray();
     }
 
-    /// <summary>The select-list position <see cref="OrderTokenColumns"/> reports for one term.</summary>
-    private static int OrderTermColumn(FromSource[] sources, OrderBySpec term, IReadOnlyList<Expression> projections, string[] outputColumnNames)
+    /// <summary>
+    /// The select-list position <see cref="OrderTokenColumns"/> reports for
+    /// one term. <paramref name="projectionKeys"/> keeps each projection's
+    /// <see cref="GroupingKey"/> once built, for the query's other terms.
+    /// </summary>
+    private static int OrderTermColumn(FromSource[] sources, OrderBySpec term, IReadOnlyList<Expression> projections, string[] outputColumnNames, ref ShapeKey?[]? projectionKeys)
     {
         if (term.IsOrdinal)
             return term.Ordinal >= 1 && term.Ordinal <= outputColumnNames.Length ? term.Ordinal : 0;
@@ -64,17 +88,47 @@ internal sealed partial class Selection
             if (named >= 0)
                 return named + 1;
         }
-        var key = GroupingKey(sources, WithoutNoOpCollate(sources, written));
+        var sorted = WithoutNoOpCollate(sources, written);
+        // A column's key is the column its name binds to, so it matches only a
+        // projection that is a column binding to the same one.
+        if (sorted is Expressions.Reference column)
+        {
+            var bound = TryResolveSourceColumn(sources, column.ReferencedName);
+            for (var i = 0; i < projections.Count; i++)
+            {
+                if (Unwrapped(projections[i]) is Expressions.Reference candidate && SameGroupingColumn(sources, column.ReferencedName, bound, candidate.ReferencedName))
+                    return i + 1;
+            }
+            return 0;
+        }
+        var key = GroupingKey(sources, sorted);
+        projectionKeys ??= new ShapeKey?[projections.Count];
         for (var i = 0; i < projections.Count; i++)
         {
-            var projection = projections[i] is Expressions.NamedExpression alias ? alias.Inner : projections[i];
-            while (projection is Expressions.Parenthesized wrapped)
-                projection = wrapped.Wrapped;
-            if (key.Equals(GroupingKey(sources, projection)))
+            if (key.Equals(projectionKeys[i] ??= GroupingKey(sources, Unwrapped(projections[i]))))
                 return i + 1;
         }
         return 0;
+
+        static Expression Unwrapped(Expression projection)
+        {
+            if (projection is Expressions.NamedExpression alias)
+                projection = alias.Inner;
+            while (projection is Expressions.Parenthesized wrapped)
+                projection = wrapped.Wrapped;
+            return projection;
+        }
     }
+
+    /// <summary>
+    /// Whether two column names have one <see cref="GroupingKey"/>, the first's
+    /// binding already resolved as <paramref name="leftBound"/>: both bind to
+    /// the same column, or, binding to none, are spelled alike but for case.
+    /// </summary>
+    private static bool SameGroupingColumn(FromSource[] sources, MultiPartName left, (int Source, int Column)? leftBound, MultiPartName right) =>
+        TryResolveSourceColumn(sources, right) is { } rightBound
+            ? leftBound == rightBound
+            : leftBound is null && string.Equals(left.ToString(), right.ToString(), StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// <paramref name="term"/> without a <c>COLLATE</c> naming the collation
@@ -108,17 +162,17 @@ internal sealed partial class Selection
     /// call like any other. A constant and a term holding a subquery never
     /// repeat, nor do two items projecting the same column
     /// (<c>SELECT a, a b … ORDER BY 1, 2</c>) (probed 2026-10-17 against SQL
-    /// Server 2025).
+    /// Server 2025). <paramref name="columns"/> holds each term's position.
     /// </summary>
-    internal static void RefuseRepeatedOrderTerms(FromSource[] sources, List<OrderBySpec> orderBy, IReadOnlyList<Expression> projections, string[] outputColumnNames)
+    private static void RefuseRepeatedOrderTerms(FromSource[] sources, List<OrderBySpec> orderBy, IReadOnlyList<Expression> projections, int[] columns)
     {
         if (orderBy.Count < 2)
             return;
         var seen = new HashSet<object>();
-        foreach (var term in orderBy)
+        for (var i = 0; i < columns.Length; i++)
         {
-            var column = OrderTermColumn(sources, term, projections, outputColumnNames);
-            var sorted = column == 0 ? term.Expr : column <= projections.Count ? projections[column - 1] : null;
+            var column = columns[i];
+            var sorted = column == 0 ? orderBy[i].Expr : column <= projections.Count ? projections[column - 1] : null;
             if (sorted is Expressions.NamedExpression named)
                 sorted = named.Inner;
             if (sorted is null || sorted.IsWrittenConstant || (column == 0 && HoldsSubquery(sorted)))

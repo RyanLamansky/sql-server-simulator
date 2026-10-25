@@ -880,8 +880,7 @@ internal sealed partial class Selection
             // An ordered set operation inlines none of its branches' calls.
             if (combined.IsSetOperationResult)
                 context.Batch.InlinedCalls?.DropFrom(inlinedCallsBefore);
-            RefuseRepeatedOrderTerms([], orderBy, combined.ProjectionExpressions ?? [], combined.ColumnNames);
-            var orderColumns = scope.Position == QueryPosition.Statement ? OrderTokenColumns([], orderBy, combined.ProjectionExpressions ?? [], combined.ColumnNames) : null;
+            var orderColumns = SettleOrderTerms([], orderBy, combined.ProjectionExpressions ?? [], combined.ColumnNames, scope.Position == QueryPosition.Statement);
             combined = ApplyTopLevelOrderBy(combined, orderBy, topLevelTail.OffsetExpression, topLevelTail.FetchExpression);
             combined.OrderColumns = orderColumns;
             bareProjectionStatement = false;
@@ -4199,7 +4198,7 @@ internal sealed partial class Selection
             if (sharing == 0)
                 _ = written.GetSqlType(parseBatch, TypeResolver);
         }
-        RefuseRepeatedOrderTerms([], orderBy, expressions, columnNames);
+        var orderColumns = SettleOrderTerms([], orderBy, expressions, columnNames, scope.Position == QueryPosition.Statement);
         return new Selection(schema, columnNames,
             hasOrderBy: orderBy.Count > 0,
             hasTopOrOffsetOrFetch: topCount.HasValue || offsetCount.HasValue || fetchCount.HasValue,
@@ -4295,7 +4294,7 @@ internal sealed partial class Selection
             // (`select 1` → Int, not IntN). The resolver is never consulted
             // (no column can appear without a source).
             ColumnNullability = ComputeColumnNullability(expressions, [], [], groupingSetsWritten: false, parseBatch, TypeResolver),
-            OrderColumns = orderBy.Count > 0 && scope.Position == QueryPosition.Statement ? OrderTokenColumns([], orderBy, expressions, columnNames) : null,
+            OrderColumns = orderColumns,
             ColumnWireFlags = WireFlagsOf(expressions, [], null, ColumnNullabilityContext([], [], groupingSetsWritten: false, parseBatch, TypeResolver), out var derivedWireFlags, out _),
             ColumnDerivedWireFlags = derivedWireFlags,
         }.NotingSynthesizedDemand(expressions, excluders, orderBy, prunable: referencesOuterColumns && !scope.ProjectionUnread,

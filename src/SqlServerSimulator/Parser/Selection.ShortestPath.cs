@@ -81,6 +81,18 @@ internal sealed partial class Selection
     /// </summary>
     private static List<(ShortestPathSpec Spec, ShortestPathPlan Plan)> ApplyShortestPath(ParserContext context, QueryScope scope, List<FromSource> sources, List<JoinSpec> joins, List<Expression> expressions, FromClause fromClause)
     {
+        // A query with no MATCH settles here, ahead of the closures the
+        // settling of one allocates.
+        if (fromClause.Match is not null)
+            return ApplyMatchedShortestPath(context, scope, sources, joins, expressions, fromClause);
+        if (context.GraphPathAggregates is [var aggregate, ..])
+            throw SimulatedSqlException.GraphPathAggregateWithoutPath(aggregate.LowerName);
+        return [];
+    }
+
+    /// <inheritdoc cref="ApplyShortestPath"/>
+    private static List<(ShortestPathSpec Spec, ShortestPathPlan Plan)> ApplyMatchedShortestPath(ParserContext context, QueryScope scope, List<FromSource> sources, List<JoinSpec> joins, List<Expression> expressions, FromClause fromClause)
+    {
         var aggregates = context.GraphPathAggregates ?? [];
         var match = fromClause.Match;
         var specs = match?.ShortestPaths ?? [];
