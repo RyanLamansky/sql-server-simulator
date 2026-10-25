@@ -162,7 +162,11 @@ internal static class BacpacReader
 
             result.IncrementElementCount("_DataFile");
 
-            var (schemaName, tableName) = ParseDataFolderName(entry.FullName);
+            if (ParseDataFolderName(entry.FullName) is not (var schemaName, var tableName))
+            {
+                result.AddSkipped(new BacpacSkipped("_DataFile", entry.FullName, "Not in a schema.table folder under Data/."));
+                continue;
+            }
             if (!database.Schemas.TryGetValue(schemaName, out var schema)
                 || !schema.HeapTables.TryGetValue(tableName, out var table))
             {
@@ -508,16 +512,19 @@ internal static class BacpacReader
 
     /// <summary>
     /// Splits <c>Data/&lt;schema&gt;.&lt;table&gt;/TableData-NNN-NNNNN.BCP</c>
-    /// into <c>(schema, table)</c>. The folder name is always two bracketed
-    /// segments separated by a single dot — sub-schema dots aren't a concern
-    /// here since SQL Server schemas can't contain dots in their names.
+    /// into <c>(schema, table)</c>, or null for an entry outside such a
+    /// folder. The folder name is always two bracketed segments separated by
+    /// a single dot — sub-schema dots aren't a concern here since SQL Server
+    /// schemas can't contain dots in their names.
     /// </summary>
-    private static (string Schema, string Table) ParseDataFolderName(string entryFullName)
+    private static (string Schema, string Table)? ParseDataFolderName(string entryFullName)
     {
         var firstSlash = entryFullName.IndexOf('/', StringComparison.Ordinal);
         var secondSlash = entryFullName.IndexOf('/', firstSlash + 1);
+        if (secondSlash < 0)
+            return null;
         var folder = entryFullName[(firstSlash + 1)..secondSlash];
         var dot = folder.IndexOf('.', StringComparison.Ordinal);
-        return (folder[..dot], folder[(dot + 1)..]);
+        return dot < 0 ? null : (folder[..dot], folder[(dot + 1)..]);
     }
 }

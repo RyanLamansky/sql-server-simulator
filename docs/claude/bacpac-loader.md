@@ -37,6 +37,8 @@ See [`docs/claude/schemas.md`](schemas.md) for the full multi-database resolutio
 ## Resilient-loader contract
 
 Per-element exceptions land on `Skipped` with a `"Load failed: …"` prefix and the load continues; the entire load doesn't abort because one constraint / view / proc fails.
+A data entry outside a `Data/schema.table/` folder is skipped the same way.
+What can't load at all — an archive that doesn't read, one without `model.xml`, a model that doesn't parse — throws, and the half-made database is unregistered first, so its name takes the next import.
 Deferred-computed-column failures (phase 8, for the rare UDF-forward-ref table) use a `"Deferred: …"` prefix instead, so the `Load_AW_No_Per_Element_Failures` guard test stays meaningful — it would otherwise spuriously fire on known unmodeled-function gaps.
 
 ## Code layout

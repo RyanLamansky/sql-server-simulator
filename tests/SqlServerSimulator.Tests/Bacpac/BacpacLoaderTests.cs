@@ -2757,4 +2757,72 @@ public class BacpacLoaderTests
         sim.ImportBacpac(bacpac, out _);
         AreEqual("DF__t__Qty__1A2B3C4D", sim.ExecuteScalar("SELECT name FROM sys.default_constraints WHERE parent_object_id = OBJECT_ID('dbo.t')"));
     }
+
+    /// <summary>
+    /// A package's entry under <c>Data/</c> outside a <c>schema.table</c>
+    /// folder is skipped, as any element the loader can't place is, and the
+    /// rest of the package loads.
+    /// </summary>
+    [TestMethod]
+    [DataRow("Data/stray.BCP")]
+    [DataRow("Data/nodot/TableData-000-00000.BCP")]
+    public void AStrayDataEntry_IsSkipped(string entryName)
+    {
+        var bacpac = WithEntry(BacpacBuilder.Create().Table("dbo", "T", t => t.Column("Id", "int").Row(1)).Build(), entryName, [1, 2, 3]);
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var result);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from T"));
+        AreEqual(entryName, result.Skipped.Single().ElementName);
+    }
+
+    /// <summary>
+    /// A package that doesn't load — an archive that doesn't read, one
+    /// without its model, a model that doesn't parse — throws and leaves no
+    /// database behind, so the name takes the next import.
+    /// </summary>
+    [TestMethod]
+    [DataRow("truncated", typeof(InvalidDataException))]
+    [DataRow("no model", typeof(InvalidDataException))]
+    [DataRow("model unparsed", typeof(System.Xml.XmlException))]
+    public void APackageThatDoesntLoad_LeavesNoDatabase(string damage, Type thrown)
+    {
+        var good = BacpacBuilder.Create().Table("dbo", "T", t => t.Column("Id", "int").Row(1)).Build();
+        var bytes = new MemoryStream();
+        good.CopyTo(bytes);
+        good.Position = 0;
+        Stream damaged = damage switch
+        {
+            "truncated" => new MemoryStream(bytes.ToArray()[..(int)(bytes.Length / 2)]),
+            "no model" => Without(good, "model.xml"),
+            _ => WithEntry(Without(good, "model.xml"), "model.xml", System.Text.Encoding.UTF8.GetBytes("<DataSchemaModel><Model>")),
+        };
+        var sim = new Simulation();
+        AreEqual(thrown, Throws<Exception>(() => sim.ImportBacpac(damaged, out _, new BacpacImportOptions { DatabaseName = "d" })).GetType());
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.databases where name = 'd'"));
+        sim.ImportBacpac(new MemoryStream(bytes.ToArray()), out _, new BacpacImportOptions { DatabaseName = "d" });
+        AreEqual(1, sim.ExecuteScalar("select count(*) from d.dbo.T"));
+    }
+
+    private static MemoryStream WithEntry(Stream bacpac, string name, byte[] content)
+    {
+        var copy = new MemoryStream();
+        bacpac.CopyTo(copy);
+        using (var archive = new System.IO.Compression.ZipArchive(copy, System.IO.Compression.ZipArchiveMode.Update, leaveOpen: true))
+        {
+            using var entry = archive.CreateEntry(name).Open();
+            entry.Write(content);
+        }
+        copy.Position = 0;
+        return copy;
+    }
+
+    private static MemoryStream Without(Stream bacpac, string name)
+    {
+        var copy = new MemoryStream();
+        bacpac.CopyTo(copy);
+        using (var archive = new System.IO.Compression.ZipArchive(copy, System.IO.Compression.ZipArchiveMode.Update, leaveOpen: true))
+            archive.GetEntry(name)!.Delete();
+        copy.Position = 0;
+        return copy;
+    }
 }
