@@ -351,6 +351,11 @@ public sealed class ServiceBrokerConversationTests
         AreEqual("late", await received.WaitAsync(TimeSpan.FromSeconds(10), TestContext.CancellationToken));
     }
 
+    /// <summary>
+    /// A timer shows on its endpoint until it fires, and a second one
+    /// replaces it; the timer read as set is an hour's, so a loaded runner's
+    /// pause between two statements can't fire it first.
+    /// </summary>
     [TestMethod]
     public void ConversationTimer_SendsADialogTimerMessage()
     {
@@ -358,8 +363,9 @@ public sealed class ServiceBrokerConversationTests
         AreEqual("set|SO;http://schemas.microsoft.com/SQL/ServiceBroker/DialogTimer|-2|E|NULL;1900-01-01 00:00:00", Rows(simulation, """
             declare @h uniqueidentifier;
             begin dialog @h from service init to service 'targ' with encryption = off;
-            begin conversation timer (@h) timeout = 1;
+            begin conversation timer (@h) timeout = 3600;
             select case when dialog_timer > '2000-01-01' then 'set' end, state from sys.conversation_endpoints where conversation_handle = @h;
+            begin conversation timer (@h) timeout = 1;
             waitfor delay '00:00:01.100';
             select message_type_name, message_sequence_number, validation, message_body from iq where conversation_handle = @h;
             select format(dialog_timer, 'yyyy-MM-dd HH:mm:ss') from sys.conversation_endpoints where conversation_handle = @h
