@@ -872,7 +872,8 @@ Medians of three processes per build alternating, the baseline the commit before
 - **Closures allocated on entry**: settling a query's `SHORTEST_PATH`s allocated one before finding the query had no `MATCH`, and the forced-seek check one per source, for a lambda only an index hint reaches.
 - **Query Store's shape** of a one-off write rendered its forced-parameterized form, which only a database parameterizing by force reads, and its simple-parameterized text twice where one rendering served both ([`database-options.md`](database-options.md#capture)).
 
-What stays of the capture, switched off to measure it: 2.5 µs of the point `SELECT`, 11 µs of the join, 6.5 µs of the `INSERT` and 4.6 µs of the `UPDATE`, a quarter to nearly half of it the garbage collection of what the plan registry keeps alive — up to 10,000 one-off plans, each with its batch text and statement shapes, the oldest evicted as each new one arrives, which keeps the long-lived ones dying in generation 2 (live heap 15 MB larger over the join's stream, its collections pausing 4.9 µs per statement against 1.0 µs).
+What stayed of the capture, switched off to measure it, was 2.5 µs of the point `SELECT`, 11 µs of the join, 6.5 µs of the `INSERT` and 4.6 µs of the `UPDATE`, a quarter to nearly half of it the garbage collection of what the plan registry kept alive: up to 10,000 one-off plans, each with its batch text and statement shapes, the oldest evicted as each new one arrived, so each lived long enough to die in generation 2 (the join's stream held 15 MB more live heap, its collections pausing 4.9 µs per statement against 1.0 µs).
+An ad hoc plan used only once now leaves after 1,024 newer ones ([below](#the-plan-cache-dmvs)), which took the point `SELECT` to 20.7 µs, the join to 72.6 µs, the `INSERT` to 21.2 µs and the `UPDATE` to 14.9 µs (the same method), the join's collections to 2.1 µs per statement.
 
 ## The plan-cache DMVs
 
@@ -887,6 +888,10 @@ Real keeps a plan only for a batch holding a statement with a query plan — the
 The plan is added at the batch's first statement that has one (`Simulation.CachedPlanOfBatch`), which also counts the batch's use, and a settings-only batch as it ends.
 A statement simple parameterization rewrites runs under a `Prepared` plan of the rewritten text, its batch an `Adhoc` shell holding no statement of its own; each compile of a shell — the first execution of each distinct ad hoc text — counts a use of the prepared plan, which counts every execution of the statement.
 That text declares its parameters in number order, where Query Store's puts an `UPDATE`'s `WHERE` parameters first — `(@1 varchar(8000),@2 tinyint)` against `(@2 tinyint,@1 varchar(8000))` for `update t set b = 'z' where a = 1` (probed 2026-10-15 against SQL Server 2025).
+
+**Which plans leave.**
+Real keeps its plans while memory lasts, and under pressure removes first the ones whose current cost has reached zero, which is where an ad hoc plan starts and where only a reference to it moves it from (Microsoft's query processing architecture guide, "Remove execution plans from the plan cache").
+The registry stands in for that pressure with counts (`CachedPlanRegistry`): it holds up to 10,000 plans, the oldest leaving first, and judges each ad hoc plan once 1,024 newer ad hoc plans have arrived, removing it then unless a batch used it again — a cap on every one-off batch's plan alone kept each long enough to be collected in generation 2 ([what that cost](#one-off-texts-what-every-querys-parse-pays-for-checks-it-doesnt-need)).
 
 **Modules.**
 A procedure's call, a DML trigger's firing and a call of a scalar or multi-statement function the optimizer doesn't inline each run under a `Proc` or `Trigger` plan of the module, keyed by its object id (`BeginCachedModuleCall` / `EndCachedModuleCall`), whose call statistics feed the three module DMVs — procedures, DML triggers and scalar functions, a multi-statement function getting a plan but no row, as on real.
@@ -919,6 +924,7 @@ A replayed SELECT batch remembers its plan on its parse-cache entry (`BatchConte
 
 - **Timing and I/O columns are the simulator's own measures**: worker and elapsed time in microseconds of its own clock, logical reads as `STATISTICS IO` counts them; physical reads, writes, CLR time, grants, threads, spills, columnstore and page-server figures read 0 and every statement's DOP is 1.
 - **`bucketid`, `size_in_bytes`, `memory_object_address`** are stand-ins derived from the plan, constant for it but not real's values; `refcounts` is 2 and `pool_id` 2 (the default pool) for every plan.
+- **A plan leaves by count, not by memory**: past 1,024 newer ad hoc plans an ad hoc plan used once is gone, and past 10,000 plans the oldest, where real without memory pressure still lists both ([which plans leave](#the-plan-cache-dmvs)).
 - **What makes a statement recompile is coarser for batches**: a batch's statements keep counting across schema changes where real's recompile and start over under a new `plan_generation_num`; a module's start over when its body's plan doesn't stand, all its statements together, where real's recompile one by one, each taking the next generation (probed 2026-10-15: two statements reached generations 2 and 3).
 - **A deferred compile doesn't decline a batch**: real kept no plan for `create table x …; select * from x` or `…; insert x select …` but kept `…; insert x values (…)` and `select … into x …; select * from x` (probed 2026-10-15); the simulator keeps all four.
 - **A plan whose batch never reaches a statement with a plan isn't cached**: real compiles the whole batch first, so `if 1 = 0 select * from t` has a plan whose statement never ran.

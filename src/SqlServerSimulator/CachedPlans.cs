@@ -302,11 +302,23 @@ internal sealed class CachedPlan
 /// statements measured. Separate from the parse caches that speed the
 /// simulator itself up, which keep what is cheap to replay rather than what
 /// real keeps. Bounded at <see cref="Capacity"/> entries, past which the
-/// oldest goes first.
+/// oldest goes first, and an ad hoc plan used once at
+/// <see cref="SingleUseAdhocCapacity"/>.
 /// </summary>
 internal sealed class CachedPlanRegistry
 {
     public const int Capacity = 10_000;
+
+    /// <summary>
+    /// How many of the newest ad hoc plans the registry keeps before judging
+    /// each by its use: the oldest leaves once it is past them, unless a batch
+    /// has used it again. Real's cache under memory pressure removes such a
+    /// plan first — an ad hoc plan's current cost starts at zero and only a
+    /// reference raises it (Microsoft's query processing architecture guide)
+    /// — and keeping every one-off batch's plan to <see cref="Capacity"/>
+    /// held it long enough to die in generation 2.
+    /// </summary>
+    public const int SingleUseAdhocCapacity = 1024;
 
     /// <summary>The plans, read without a lock by every batch's lookup; added to and removed from under <see cref="gate"/>.</summary>
     private readonly ConcurrentDictionary<CachedPlanKey, CachedPlan> entries = new();
@@ -316,8 +328,15 @@ internal sealed class CachedPlanRegistry
     /// <summary>How many plans <see cref="entries"/> holds, kept under <see cref="gate"/>.</summary>
     private int count;
 
-    /// <summary>Keys in the order they were added, which eviction takes from the front; may hold keys already removed.</summary>
+    /// <summary>
+    /// Keys in the order they were added, or for an ad hoc plan the order it
+    /// left <see cref="adhocArrivals"/> still in use, which eviction takes
+    /// from the front; may hold keys already removed.
+    /// </summary>
     private readonly Queue<CachedPlanKey> order = new();
+
+    /// <summary>The newest ad hoc plans in the order they were added; may hold plans already removed.</summary>
+    private readonly Queue<CachedPlan> adhocArrivals = new();
 
     /// <summary>The plan held under <paramref name="key"/>, or null.</summary>
     public CachedPlan? Find(in CachedPlanKey key) => this.entries.GetValueOrDefault(key);
@@ -348,11 +367,42 @@ internal sealed class CachedPlanRegistry
             this.Compilations++;
             _ = this.entries.TryAdd(plan.Key, plan);
             this.count++;
-            this.order.Enqueue(plan.Key);
+            if (plan.Key.Kind == CachedPlanKind.Adhoc)
+            {
+                this.adhocArrivals.Enqueue(plan);
+                if (this.adhocArrivals.Count > SingleUseAdhocCapacity)
+                    this.SettleOldestAdhoc();
+            }
+            else
+            {
+                this.order.Enqueue(plan.Key);
+            }
             if (this.order.Count > 2 * Capacity)
                 this.Compact();
             added = true;
             return plan;
+        }
+    }
+
+    /// <summary>
+    /// Settles the oldest of <see cref="adhocArrivals"/>: kept, in the eviction
+    /// order from here, when a batch used it again since it was added, and
+    /// removed otherwise.
+    /// </summary>
+    private void SettleOldestAdhoc()
+    {
+        var oldest = this.adhocArrivals.Dequeue();
+        if (oldest.Removed)
+            return;
+        if (Volatile.Read(ref oldest.UseCount) > 1)
+        {
+            this.order.Enqueue(oldest.Key);
+            return;
+        }
+        if (this.entries.TryRemove(new KeyValuePair<CachedPlanKey, CachedPlan>(oldest.Key, oldest)))
+        {
+            oldest.Removed = true;
+            this.count--;
         }
     }
 
@@ -395,7 +445,10 @@ internal sealed class CachedPlanRegistry
                 }
             }
             if (matches is null)
+            {
                 this.order.Clear();
+                this.adhocArrivals.Clear();
+            }
         }
     }
 }

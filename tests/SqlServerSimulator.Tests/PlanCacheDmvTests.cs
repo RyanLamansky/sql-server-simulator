@@ -62,6 +62,33 @@ public sealed class PlanCacheDmvTests
         AreEqual("Compiled Plan", sim.ExecuteScalar("select cacheobjtype from sys.dm_exec_cached_plans where objtype = 'Adhoc'"));
     }
 
+    /// <summary>
+    /// An ad hoc plan used once leaves once 1,024 newer ad hoc plans have
+    /// arrived, and one a batch used again stays: real's cache under memory
+    /// pressure removes first an ad hoc plan no reference raised from the zero
+    /// current cost it starts at.
+    /// </summary>
+    [TestMethod]
+    public void AdHocPlanUsedOnce_LeavesFirst()
+    {
+        const string once = "select b from t where b <> 'once'";
+        const string again = "select b from t where b <> 'again'";
+        var sim = WithTable();
+        _ = sim.ExecuteScalar(once);
+        _ = sim.ExecuteScalar(again);
+        _ = sim.ExecuteScalar(again);
+        using (var connection = sim.CreateOpenConnection())
+        {
+            for (var i = 0; i < 1024; i++)
+            {
+                using var command = connection.CreateCommand($"select b from t where b <> 'other {i.ToInvariantString()}'");
+                _ = command.ExecuteScalar();
+            }
+        }
+        IsEmpty(Plans(sim, once));
+        CollectionAssert.AreEqual(new[] { ("Adhoc", 2) }, Plans(sim, again));
+    }
+
     // A statement simple parameterization rewrites runs under a prepared plan
     // of the rewritten text, each ad hoc text a shell plan of its own whose
     // compile counts one use of the prepared plan.
