@@ -909,6 +909,23 @@ Medians of three processes per build alternating, the baseline the commit before
 What stayed of the capture, switched off to measure it, was 2.5 µs of the point `SELECT`, 11 µs of the join, 6.5 µs of the `INSERT` and 4.6 µs of the `UPDATE`, a quarter to nearly half of it the garbage collection of what the plan registry kept alive: up to 10,000 one-off plans, each with its batch text and statement shapes, the oldest evicted as each new one arrived, so each lived long enough to die in generation 2 (the join's stream held 15 MB more live heap, its collections pausing 4.9 µs per statement against 1.0 µs).
 An ad hoc plan used only once now leaves after 1,024 newer ones ([below](#the-plan-cache-dmvs)), which took the point `SELECT` to 20.7 µs, the join to 72.6 µs, the `INSERT` to 21.2 µs and the `UPDATE` to 14.9 µs (the same method), the join's collections to 2.1 µs per statement.
 
+### A long script's statements
+
+A batch of many statements — a seed script of single-row `INSERT`s, the shape of EF Core's Northwind seed — paid three costs per statement that grew with the text ahead of it, so its first run was quadratic in its length:
+
+- **Filing each statement's plan** copied the text's whole `StatementPlanSet`; it files in place.
+- **Each statement's end** searched the whole batch text for a secret statement's marker words (`SecretStatements.MayCarry`); it searches the statement's own text.
+- **Each statement's start**, and each table a query names, counted the line breaks from the start of the text (`Token.LineNumber`); `ParserContext.LineOf` counts on from the line it last placed.
+
+Measured 2026-10-25 (Release, one batch per fresh simulation, the faster of two runs):
+
+| Batch | Before | After |
+|---|---|---|
+| 16,384 single-row `INSERT`s into a keyed table | 2.9 s | 0.25 s |
+| 16,384 single-row `INSERT`s into a heap | 2.1 s | 0.14 s |
+| 16,384 `SET`s | 325 ms | 40 ms |
+| 8,192 `SELECT`s | 614 ms | 72 ms |
+
 ## The plan-cache DMVs
 
 `sys.dm_exec_cached_plans`, `sys.dm_exec_query_stats`, `sys.dm_exec_procedure_stats`, `sys.dm_exec_trigger_stats`, `sys.dm_exec_function_stats`, `sys.dm_exec_query_optimizer_info` and the `sys.dm_exec_plan_attributes` / `sys.dm_exec_query_plan` / `sys.dm_exec_text_query_plan` functions read `Simulation.CachedPlans` (`CachedPlans.cs`, hooks in `Simulation.CachedPlans.cs`), a registry of the plans real would hold.

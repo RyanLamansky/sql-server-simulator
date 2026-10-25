@@ -1178,7 +1178,7 @@ internal sealed partial class Selection
                 // qualified — they're aliases, not real tables).
             AfterBuiltInRowsetDispatch:
                 var beforeObjectName = context.SaveCheckpoint();
-                var objectNameLine = context.Token?.LineNumber ?? 0;
+                var objectNameLine = context.Token is { } objectNameToken ? context.LineOf(objectNameToken) : 0;
                 var objectName = BatchContext.ParseObjectName(context);
                 objectName = BatchContext.TemporaryTableName(context, objectName, readsOrWrites: true);
 

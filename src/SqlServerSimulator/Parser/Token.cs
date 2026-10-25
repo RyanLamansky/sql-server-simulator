@@ -60,11 +60,10 @@ abstract class Token
     /// </summary>
     /// <remarks>
     /// The count is a vectorized <see cref="MemoryExtensions.Count{T}(ReadOnlySpan{T}, T)"/>
-    /// rather than a per-character loop: every statement of a batch asks for
-    /// its starting line, so a long script pays a scan of its whole prefix per
-    /// statement. EF Core's Northwind seed — 830 single-row <c>INSERT</c>s in
-    /// one 300 KB batch — spends a quarter to a third of its first execution in
-    /// a per-character count.
+    /// rather than a per-character loop, but it still reads the whole prefix,
+    /// so a site every statement of a batch reaches asks
+    /// <see cref="ParserContext.LineOf"/> instead, which counts on from the
+    /// line it last placed.
     /// </remarks>
     public static int LineAt(string command, int index) =>
         1 + command.AsSpan(0, index).Count('\n');

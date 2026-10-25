@@ -2621,7 +2621,7 @@ public sealed partial class Simulation
                     yield break;
                 var statementStartIndex = statementToken.StartIndex;
                 if (!nestedBlock && batch.Connection.StatisticsTime)
-                    batch.LastTopLevelStatementLine = IsBeginTry(context) ? -1 : statementToken.LineNumber;
+                    batch.LastTopLevelStatementLine = IsBeginTry(context) ? -1 : context.LineOf(statementToken);
                 if (!nestedBlock && batch.YieldsBetweenStatements && batch.HasDispatchedStatement && !batch.IsSkipping)
                 {
                     yield return new SimulatedStatementBoundary();

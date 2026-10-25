@@ -1216,6 +1216,27 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public int LastLine => Token.LineAt(this.commandText, this.commandText.Length);
 
     /// <summary>
+    /// <see cref="Token.LineNumber"/> of a token of this context's text,
+    /// counting only the line breaks between it and the token last asked
+    /// about: every statement asks for the line it starts on, which counted
+    /// from the text's start made a script's run quadratic in its statements.
+    /// </summary>
+    public int LineOf(Token token)
+    {
+        var index = token.StartIndex;
+        var text = this.commandText.AsSpan();
+        this.lineMemoLine = index >= this.lineMemoIndex
+            ? this.lineMemoLine + text[this.lineMemoIndex..index].Count('\n')
+            : this.lineMemoLine - text[index..this.lineMemoIndex].Count('\n');
+        this.lineMemoIndex = index;
+        return this.lineMemoLine;
+    }
+
+    /// <summary>Where <see cref="LineOf"/> last placed a token, and that token's line.</summary>
+    private int lineMemoIndex;
+    private int lineMemoLine = 1;
+
+    /// <summary>
     /// The command-text character just ahead of <paramref name="token"/>, or
     /// <c>'\0'</c> at the start of the text.
     /// </summary>

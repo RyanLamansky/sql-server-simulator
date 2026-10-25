@@ -33,7 +33,15 @@ internal static class SecretStatements
         SearchValues.Create(["password", "secret", "pwdencrypt", "pwdcompare", "passphrase", "sp_addlogin", "sp_addlinkedsrvlogin", "sp_setapprole"], StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Whether <paramref name="text"/> may carry a secret statement: one vectorized search, which every other text stops at.</summary>
-    public static bool MayCarry(string? text) => text is not null && text.AsSpan().IndexOfAny(Markers) >= 0;
+    public static bool MayCarry(string? text) => text is not null && MayCarry(text.AsSpan());
+
+    /// <summary>
+    /// Whether <paramref name="text"/> may carry a secret statement, or be
+    /// one: each of the statements holds a marker in its own text, so a batch
+    /// asks this of each statement's span rather than of the whole text again
+    /// per statement.
+    /// </summary>
+    public static bool MayCarry(ReadOnlySpan<char> text) => text.IndexOfAny(Markers) >= 0;
 
     /// <summary>The label real reports <paramref name="statement"/> under, or null for a statement it reports as written.</summary>
     public static string? Label(ReadOnlySpan<char> statement)

@@ -225,7 +225,7 @@ partial class Simulation
 
             // Snapshot the statement-start line before parser advance — used as
             // ERROR_LINE() default when an error fires inside this statement.
-            batch.CurrentStatement.StartLine = batch.Parser.Token?.LineNumber ?? 1;
+            batch.CurrentStatement.StartLine = batch.Parser.Token is { } first ? batch.Parser.LineOf(first) : 1;
             batch.CurrentStatement.StartIndex = batch.Parser.Token?.StartIndex ?? 0;
             if (!batch.IsSkipping)
             {
@@ -400,8 +400,9 @@ partial class Simulation
                     if (ends.Record(statementToken.StartIndex, tight, loose))
                     {
                         var text = batch.Parser.Command.CommandText;
-                        if (SecretStatements.MayCarry(text) && tight >= statementToken.StartIndex && tight < text.Length
-                            && SecretStatements.Label(text.AsSpan(statementToken.StartIndex, tight - statementToken.StartIndex + 1)) is { } label)
+                        if (tight >= statementToken.StartIndex && tight < text.Length
+                            && text.AsSpan(statementToken.StartIndex, tight - statementToken.StartIndex + 1) is var statement
+                            && SecretStatements.MayCarry(statement) && SecretStatements.Label(statement) is { } label)
                         {
                             ends.RecordSecret(statementToken.StartIndex, SecretStatements.MaskEnd(text, tight, label), label);
                         }

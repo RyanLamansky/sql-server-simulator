@@ -136,7 +136,7 @@ partial class Simulation
         reqStatic |= (options & CursorOptions.Static) != 0;
 
         context.MoveNextRequired(); // consume FOR
-        var queryLine = context.Token!.LineNumber;
+        var queryLine = context.LineOf(context.Token!);
         Selection selection;
         var reads = new List<SchemaObject>();
         using (ParserScope.Enter(ref context.CursorStatement, true))

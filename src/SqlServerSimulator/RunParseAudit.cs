@@ -17,12 +17,12 @@ internal static class RunParseAudit
 {
     /// <summary>
     /// What the walk's own parse settles afresh however it finds them: the
-    /// debug token trail, a memo of the text, the variables a statement
-    /// reads, which the statement's first read clears, and the kind of write
-    /// a target's alias was noted for, read only beside the alias, which is
-    /// put back.
+    /// debug token trail, the memos of the text — whether it mentions an
+    /// option, the line last placed — the variables a statement reads, which
+    /// the statement's first read clears, and the kind of write a target's
+    /// alias was noted for, read only beside the alias, which is put back.
     /// </summary>
-    private static readonly string[] Unrestored = ["tokens", "commandMentionsOption", "StatementVariables", "RemoteWriteAliasKind"];
+    private static readonly string[] Unrestored = ["tokens", "commandMentionsOption", "lineMemoIndex", "lineMemoLine", "StatementVariables", "RemoteWriteAliasKind"];
 
     /// <summary>The fields of <paramref name="walk"/>'s parser, batch and statement frame, as they stand.</summary>
     public static Dictionary<string, object?> Snapshot(BatchContext walk)

@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 namespace SqlServerSimulator.Parser;
 
 /// <summary>
@@ -181,24 +183,20 @@ internal sealed class StatementPlanEntry(StatementPlanRecording recording, long 
 
 /// <summary>
 /// The statement plans cached for one command text or module body, keyed by
-/// where each statement starts in the text's memoized token sequence.
-/// Copy-on-write: a lookup reads whichever dictionary is published without
-/// locking, and a recording publishes a new one.
+/// where each statement starts in the text's memoized token sequence. A
+/// lookup reads without locking, and a recording files its entry in place:
+/// copying the set per filing made a script's first run quadratic in its
+/// statements, each filing its own.
 /// </summary>
 internal sealed class StatementPlanSet
 {
-    private volatile Dictionary<int, StatementPlanEntry> entries = [];
-    private readonly Lock publishing = new();
+    private readonly ConcurrentDictionary<int, StatementPlanEntry> entries = new(concurrencyLevel: 1, capacity: 4);
 
     /// <summary>The plan cached for the statement starting at token ordinal <paramref name="start"/>, if any.</summary>
     public StatementPlanEntry? Find(int start) => this.entries.TryGetValue(start, out var entry) ? entry : null;
 
     /// <summary>Files <paramref name="entry"/> for the statement starting at <paramref name="start"/>, replacing any stale one.</summary>
-    public void Publish(int start, StatementPlanEntry entry)
-    {
-        lock (this.publishing)
-            this.entries = new Dictionary<int, StatementPlanEntry>(this.entries) { [start] = entry };
-    }
+    public void Publish(int start, StatementPlanEntry entry) => this.entries[start] = entry;
 }
 
 /// <summary>
