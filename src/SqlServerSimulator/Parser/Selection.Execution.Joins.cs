@@ -342,6 +342,11 @@ internal sealed partial class Selection
         var equiPlan = join.Kind is JoinKind.Inner or JoinKind.Left or JoinKind.Right or JoinKind.Full
             ? TryPlanEquiJoin(join, sources, level, batch)
             : null;
+        if (equiPlan is null && join.Kind is JoinKind.Inner or JoinKind.Left && TryPlanDisjunctiveJoin(join, sources, level, batch) is { } disjunctive)
+        {
+            JoinDiagnostics.Sink?.Add($"{join.Kind}:HashMatch(disjuncts={disjunctive.Length})");
+            return DisjunctiveHashJoin(left, right, disjunctive, join, tuple, level, batch, resolve, emitUnmatchedLeft: join.Kind == JoinKind.Left);
+        }
         // INNER / LEFT equi-joins decide hash-vs-seek dynamically inside
         // EquiJoinSeekOrHash (which logs its own strategy); only the other
         // paths' strategy is fixed here.
@@ -590,15 +595,17 @@ internal sealed partial class Selection
     /// collation conflict, cross-category), so those cases keep the exact
     /// per-row error behavior of the streaming operators.
     /// </summary>
-    private static EquiJoinPlan? TryPlanEquiJoin(JoinSpec join, FromSource[] sources, int level, BatchContext batch)
-    {
-        if (join.OnPredicate is null || sources[level].LateralPlan is not null)
-        {
-            return null;
-        }
+    private static EquiJoinPlan? TryPlanEquiJoin(JoinSpec join, FromSource[] sources, int level, BatchContext batch) =>
+        join.OnPredicate is null || sources[level].LateralPlan is not null ? null : TryPlanEquiKeys(join.OnPredicate, sources, level, batch);
 
+    /// <summary>
+    /// <see cref="TryPlanEquiJoin"/>'s split of <paramref name="predicate"/>
+    /// into its equality keys and a residual, for a level that can be hashed.
+    /// </summary>
+    private static EquiJoinPlan? TryPlanEquiKeys(BooleanExpression predicate, FromSource[] sources, int level, BatchContext batch)
+    {
         var conjuncts = new List<BooleanExpression>();
-        join.OnPredicate.CollectConjuncts(conjuncts);
+        predicate.CollectConjuncts(conjuncts);
 
         var keys = new List<EquiKey>();
         var residual = new List<BooleanExpression>();
@@ -610,6 +617,42 @@ internal sealed partial class Selection
                 residual.Add(conjunct);
         }
         return keys.Count == 0 ? null : new EquiJoinPlan([.. keys], [.. residual]);
+    }
+
+    /// <summary>
+    /// The equalities of an ON predicate that holds only through an OR of
+    /// them — <c>b.id = a.id OR b.id = a.id + 1</c> — as one key set per
+    /// disjunct, each disjunct holding at least one equality between the
+    /// level's source and the sources left of it; null when a disjunct holds
+    /// none, or the predicate has an equality conjunct of its own, which
+    /// <see cref="TryPlanEquiJoin"/> plans instead.
+    /// </summary>
+    private static EquiKey[][]? TryPlanDisjunctiveJoin(JoinSpec join, FromSource[] sources, int level, BatchContext batch)
+    {
+        if (join.OnPredicate is null || sources[level].LateralPlan is not null)
+            return null;
+        var conjuncts = new List<BooleanExpression>();
+        join.OnPredicate.CollectConjuncts(conjuncts);
+        foreach (var conjunct in conjuncts)
+        {
+            var disjuncts = new List<BooleanExpression>();
+            conjunct.CollectDisjuncts(disjuncts);
+            if (disjuncts.Count >= 2 && KeysOfEvery(disjuncts, sources, level, batch) is { } branches)
+                return branches;
+        }
+        return null;
+
+        static EquiKey[][]? KeysOfEvery(List<BooleanExpression> disjuncts, FromSource[] sources, int level, BatchContext batch)
+        {
+            var branches = new EquiKey[disjuncts.Count][];
+            for (var i = 0; i < disjuncts.Count; i++)
+            {
+                if (TryPlanEquiKeys(disjuncts[i], sources, level, batch) is not { } branch)
+                    return null;
+                branches[i] = branch.Keys;
+            }
+            return branches;
+        }
     }
 
     /// <summary>
@@ -1142,6 +1185,85 @@ internal sealed partial class Selection
             yield return tuple;
         }
         tuple[level] = null;
+    }
+
+    /// <summary>
+    /// An INNER or LEFT join whose ON predicate holds only through an OR of
+    /// equalities (<see cref="TryPlanDisjunctiveJoin"/>): the right rows are
+    /// read once and bucketed by each disjunct's keys, and each left row
+    /// judges the whole predicate over the rows its keys find in any bucket,
+    /// in the right side's order — the rows the nested loop would pass, since
+    /// a row no disjunct's equality holds for can't — where the nested loop
+    /// judged it over every row.
+    /// </summary>
+    private static IEnumerable<byte[]?[]> DisjunctiveHashJoin(
+        IEnumerable<byte[]?[]> left,
+        FromSource right,
+        EquiKey[][] branches,
+        JoinSpec join,
+        byte[]?[] tuple,
+        int level,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue> resolve,
+        bool emitUnmatchedLeft)
+    {
+        var runtime = new RuntimeContext(resolve, batch);
+        var rightRows = new List<byte[]>(right.BackingTable?.Heap.RowCount ?? 0);
+        foreach (var row in right.RowsFor(batch))
+            rightRows.Add(row);
+        var buckets = new Dictionary<SqlValueKey, List<int>>[branches.Length];
+        for (var b = 0; b < branches.Length; b++)
+        {
+            var keys = branches[b];
+            var bucket = buckets[b] = [];
+            var keyScratch = new SqlValue[keys.Length];
+            for (var i = 0; i < rightRows.Count; i++)
+            {
+                tuple[level] = rightRows[i];
+                if (!TryComputeKeyInto(keys, runtime, rightSide: true, keyScratch, out var key))
+                    continue;
+                ref var rows = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(bucket, key, out var existed);
+                if (!existed)
+                {
+                    rows = [];
+                    keyScratch = new SqlValue[keys.Length];
+                }
+                rows!.Add(i);
+            }
+        }
+        tuple[level] = null;
+        if (!batch.CurrentStatement.WritesRows)
+            batch.Connection.StatementIo?.UseWorktable(hashJoin: true);
+
+        // As in HashEquiJoin, an empty build computes no probe key.
+        var probeScratch = branches.Select(static keys => new SqlValue[keys.Length]).ToArray();
+        var found = new List<int>();
+        foreach (var _ in left)
+        {
+            batch.ThrowIfCancelled();
+            found.Clear();
+            for (var b = 0; rightRows.Count > 0 && b < branches.Length; b++)
+            {
+                if (TryComputeKeyInto(branches[b], runtime, rightSide: false, probeScratch[b], out var probe) && buckets[b].TryGetValue(probe, out var rows))
+                    found.AddRange(rows);
+            }
+            found.Sort();
+            var matched = false;
+            for (var i = 0; i < found.Count; i++)
+            {
+                if (i > 0 && found[i] == found[i - 1])
+                    continue;
+                tuple[level] = rightRows[found[i]];
+                if (join.OnPredicate!.Run(runtime) == true)
+                {
+                    matched = true;
+                    yield return tuple;
+                }
+            }
+            tuple[level] = null;
+            if (emitUnmatchedLeft && !matched)
+                yield return tuple;
+        }
     }
 
     /// <summary>

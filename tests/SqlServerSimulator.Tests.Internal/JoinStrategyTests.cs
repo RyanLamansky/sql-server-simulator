@@ -99,6 +99,15 @@ public sealed class JoinStrategyTests
     public void KeyTheHashCantTake_StaysNestedLoops(string on)
         => Contains("Inner:NestedLoops", CaptureStrategies($"select a.id from a join b on {on}"));
 
+    // An OR of equalities hashes each disjunct's keys; one disjunct with no
+    // key leaves the whole predicate to the nested loop.
+    [TestMethod]
+    [DataRow("b.a_id = a.id or b.id = a.id + 1", "Inner:HashMatch(disjuncts=2)")]
+    [DataRow("(b.a_id = a.id or b.id = a.id) and b.id > 0", "Inner:HashMatch(disjuncts=2)")]
+    [DataRow("b.a_id = a.id or b.id > a.id", "Inner:NestedLoops")]
+    public void DisjunctionOfEqualities_HashesEachDisjunct(string on, string strategy)
+        => Contains(strategy, CaptureStrategies($"select a.id from a join b on {on}"));
+
     [TestMethod]
     public void NonEquiJoin_FallsBackToNestedLoops()
         => Contains("Inner:NestedLoops",

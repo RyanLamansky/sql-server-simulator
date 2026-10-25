@@ -821,4 +821,37 @@ public sealed class JoinTests
             insert b values (2, '2020-01-02', 'AB', 1), (3, '2020-01-03', 'cd', 2), (4, '2020-01-04', 'EF', 3), (null, null, null, null);
             {query}
             """));
+
+    /// <summary>
+    /// An ON predicate that holds only through an OR of equalities matches as
+    /// the nested loop it replaces did, the whole predicate judging each row
+    /// any disjunct's equality finds (probed 2026-10-25 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("a join b on b.id = a.id or b.k = a.k", "1:1,1:6,2:2,2:7,3:3,4:4,5:5,6:6,7:7")]
+    [DataRow("a left join b on b.s = a.s or b.id = a.id + 1", "1:1,1:2,1:6,2:2,2:3,3:4,4:2,4:5,5:3,5:6,6:1,6:6,6:7,7:5")]
+    [DataRow("a join b on (b.id = a.id and b.g = 1) or b.k = a.k or b.s = a.s", "1:1,1:6,2:2,2:7,4:2,4:4,5:3,6:1,6:6,7:5,7:7")]
+    [DataRow("a join b on (b.id = a.id or b.k = a.k) and b.g > 1", "1:6,2:2,4:4,5:5,6:6")]
+    [DataRow("a left join b on b.id = a.id + 10 or b.k = a.k + 10", "1:n,2:n,3:n,4:n,5:n,6:n,7:n")]
+    public void DisjunctionOfEqualities_MatchesAsTheNestedLoopDid(string join, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"""
+            create table a (id int, k bigint, s varchar(10) collate Latin1_General_CI_AS, g int);
+            create table b (id int primary key, k int, s varchar(10) collate Latin1_General_CI_AS, g int);
+            insert a values (1, 1, 'x', 1), (2, 2, 'Y', 2), (3, null, null, 3), (4, 4, 'y', null), (5, 5, 'z', 5), (6, 7, 'X', 1), (7, 2, 'q', 2);
+            insert b values (1, 1, 'X', 1), (2, 3, 'y', 2), (3, null, 'z', null), (4, 4, null, 4), (5, 6, 'Q', 5), (6, 1, 'x', 6), (7, 2, 'w', 1);
+            select string_agg(concat(a.id, ':', isnull(cast(b.id as varchar(5)), 'n')), ',') within group (order by a.id, b.id) from {join}
+            """));
+
+    /// <summary>
+    /// An OR of equalities hashes each disjunct's keys, where the nested loop
+    /// judged every pair of rows.
+    /// </summary>
+    [TestMethod]
+    [Timeout(20000)]
+    public void DisjunctionOfEqualities_RunsInLinearTime()
+        => AreEqual(31999, new Simulation().ExecuteScalar("""
+            create table t (id int primary key, x int); insert t select value, value % 97 from generate_series(1, 16000);
+            select count(*) from t a join t b on b.id = a.id or b.id = a.id + 1
+            """));
 }
