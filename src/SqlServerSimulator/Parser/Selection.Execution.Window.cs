@@ -458,9 +458,10 @@ internal sealed partial class Selection
                 continue;
             }
 
+            var peers = new PartitionPeers(indices, perWindowKeys, w, orderByList);
             for (var i = 0; i < count; i++)
             {
-                var (frameStart, frameEnd) = ComputeFrameExtent(win, indices, perWindowKeys, w, orderByList, i);
+                var (frameStart, frameEnd) = ComputeFrameExtent(win, peers, i);
                 var aggregator = (Aggregators.JsonObjectAggAggregator)Aggregator.Create(aggregate, operandType, resultType);
                 for (var j = frameStart; j <= frameEnd; j++)
                 {
@@ -473,8 +474,53 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// One sorted partition as a window's frames read it: its row count, and
+    /// each position's peer group — the run of rows whose ORDER BY keys
+    /// compare equal — found in one pass when a <c>RANGE</c> bound first asks,
+    /// where walking outward from every row to its group's ends cost the
+    /// group's size per row, a running total over many tied rows quadratic.
+    /// </summary>
+    private sealed class PartitionPeers(List<int> indices, List<(SqlValue[] PartitionKeys, SqlValue[] OrderKeys)[]> perWindowKeys, int w, List<OrderBySpec> orderByList)
+    {
+        private (int[] Starts, int[] Ends)? groups;
+
+        public int Count => indices.Count;
+
+        public bool HasOrderBy => orderByList.Count > 0;
+
+        /// <summary>The first sorted position of position <paramref name="i"/>'s peer group.</summary>
+        public int GroupStart(int i) => this.Groups().Starts[i];
+
+        /// <summary>The last sorted position of position <paramref name="i"/>'s peer group.</summary>
+        public int GroupEnd(int i) => this.Groups().Ends[i];
+
+        private (int[] Starts, int[] Ends) Groups()
+        {
+            if (this.groups is { } built)
+                return built;
+            var count = indices.Count;
+            var starts = new int[count];
+            var ends = new int[count];
+            var groupStart = 0;
+            for (var p = 1; p <= count; p++)
+            {
+                if (p < count && CompareOrderKeys(perWindowKeys[indices[p - 1]][w].OrderKeys, perWindowKeys[indices[p]][w].OrderKeys, orderByList) == 0)
+                    continue;
+                for (var q = groupStart; q < p; q++)
+                {
+                    starts[q] = groupStart;
+                    ends[q] = p - 1;
+                }
+                groupStart = p;
+            }
+            this.groups = (starts, ends);
+            return (starts, ends);
+        }
+    }
+
+    /// <summary>
     /// Computes the per-row frame extent (inclusive <c>[Start, End]</c>
-    /// indices into the partition's sorted <paramref name="indices"/> list)
+    /// positions in the sorted partition <paramref name="peers"/> reads)
     /// for the window function at position <paramref name="i"/>. Returns
     /// <c>(count, count - 1)</c> — i.e. <c>Start &gt; End</c> — when the
     /// frame is empty (theoretical bounds outside the partition, or both
@@ -482,19 +528,13 @@ internal sealed partial class Selection
     /// no <see cref="WindowExpression.Frame"/> + no ORDER BY → whole
     /// partition; no frame + ORDER BY → <c>RANGE UNBOUNDED PRECEDING TO
     /// CURRENT ROW</c> (running-total semantic with peer-tie grouping).
-    /// <c>RANGE CURRENT ROW</c> peer extents are computed by scanning
-    /// outward from <paramref name="i"/> while ORDER BY keys compare equal.
+    /// <c>RANGE CURRENT ROW</c> reaches the ends of the row's peer group
+    /// (<see cref="PartitionPeers"/>).
     /// </summary>
-    private static (int Start, int End) ComputeFrameExtent(
-        WindowExpression win,
-        List<int> indices,
-        List<(SqlValue[] PartitionKeys, SqlValue[] OrderKeys)[]> perWindowKeys,
-        int w,
-        List<OrderBySpec> orderByList,
-        int i)
+    private static (int Start, int End) ComputeFrameExtent(WindowExpression win, PartitionPeers peers, int i)
     {
-        var count = indices.Count;
-        var hasOrderBy = orderByList.Count > 0;
+        var count = peers.Count;
+        var hasOrderBy = peers.HasOrderBy;
         var frame = win.Frame;
 
         if (frame is null && !hasOrderBy)
@@ -505,8 +545,8 @@ internal sealed partial class Selection
         var startBound = frame?.Start ?? FrameBound.UnboundedPreceding;
         var endBound = frame?.End ?? FrameBound.CurrentRow;
 
-        var startPos = ResolveBoundPosition(startBound, isRange, indices, perWindowKeys, w, orderByList, i, count, isStart: true);
-        var endPos = ResolveBoundPosition(endBound, isRange, indices, perWindowKeys, w, orderByList, i, count, isStart: false);
+        var startPos = ResolveBoundPosition(startBound, isRange, peers, i, isStart: true);
+        var endPos = ResolveBoundPosition(endBound, isRange, peers, i, isStart: false);
 
         var actualStart = Math.Max(0, startPos);
         var actualEnd = Math.Min(count - 1, endPos);
@@ -524,62 +564,19 @@ internal sealed partial class Selection
     /// (<c>int.MinValue / 2</c> / <c>int.MaxValue / 2</c>) so the caller's
     /// <c>Math.Max(0, ...)</c> / <c>Math.Min(count - 1, ...)</c> clamps
     /// resolve correctly without overflow.
-    /// <c>RANGE CURRENT ROW</c> walks outward from <paramref name="i"/>
-    /// while ORDER BY keys compare equal — that's the peer extent.
+    /// <c>RANGE CURRENT ROW</c> answers the ends of <paramref name="i"/>'s
+    /// peer group.
     /// <c>ROWS CURRENT ROW</c> simply returns <paramref name="i"/>.
     /// </summary>
-    private static int ResolveBoundPosition(
-        FrameBound bound,
-        bool isRange,
-        List<int> indices,
-        List<(SqlValue[] PartitionKeys, SqlValue[] OrderKeys)[]> perWindowKeys,
-        int w,
-        List<OrderBySpec> orderByList,
-        int i,
-        int count,
-        bool isStart)
+    private static int ResolveBoundPosition(FrameBound bound, bool isRange, PartitionPeers peers, int i, bool isStart) => bound.Kind switch
     {
-        switch (bound.Kind)
-        {
-            case FrameBoundKind.UnboundedPreceding:
-                return int.MinValue / 2;
-            case FrameBoundKind.UnboundedFollowing:
-                return int.MaxValue / 2;
-            case FrameBoundKind.NPreceding:
-                return i - (int)bound.Offset;
-            case FrameBoundKind.NFollowing:
-                return i + (int)bound.Offset;
-            case FrameBoundKind.CurrentRow:
-                if (!isRange)
-                    return i;
-                if (isStart)
-                {
-                    var j = i;
-                    while (j > 0 && CompareOrderKeys(
-                        perWindowKeys[indices[j]][w].OrderKeys,
-                        perWindowKeys[indices[j - 1]][w].OrderKeys,
-                        orderByList) == 0)
-                    {
-                        j--;
-                    }
-                    return j;
-                }
-                else
-                {
-                    var j = i;
-                    while (j < count - 1 && CompareOrderKeys(
-                        perWindowKeys[indices[j]][w].OrderKeys,
-                        perWindowKeys[indices[j + 1]][w].OrderKeys,
-                        orderByList) == 0)
-                    {
-                        j++;
-                    }
-                    return j;
-                }
-            default:
-                throw new InvalidOperationException($"Unknown frame bound kind {bound.Kind}.");
-        }
-    }
+        FrameBoundKind.UnboundedPreceding => int.MinValue / 2,
+        FrameBoundKind.NPreceding => i - (int)bound.Offset,
+        FrameBoundKind.CurrentRow => !isRange ? i : isStart ? peers.GroupStart(i) : peers.GroupEnd(i),
+        FrameBoundKind.NFollowing => i + (int)bound.Offset,
+        FrameBoundKind.UnboundedFollowing => int.MaxValue / 2,
+        _ => throw new InvalidOperationException($"Unknown frame bound kind {bound.Kind}."),
+    };
 
     /// <summary>
     /// Evaluates a window-function scalar argument (NTILE's bucket count,
@@ -1110,9 +1107,10 @@ internal sealed partial class Selection
                         {
                             indices.Sort((a, b) =>
                                 SortOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                            var peers = new PartitionPeers(indices, perWindowKeys, w, orderByList);
                             for (var i = 0; i < indices.Count; i++)
                             {
-                                var (frameStart, frameEnd) = ComputeFrameExtent(win, indices, perWindowKeys, w, orderByList, i);
+                                var (frameStart, frameEnd) = ComputeFrameExtent(win, peers, i);
                                 if (frameStart > frameEnd)
                                 {
                                     results[indices[i]] = SqlValue.Null(operandType);
@@ -1217,6 +1215,7 @@ internal sealed partial class Selection
                             // default frame (no explicit frame, with ORDER BY) is
                             // UNBOUNDED PRECEDING TO CURRENT ROW — start pinned at
                             // row 0, so it's a pure forward accumulation.
+                            var peers = new PartitionPeers(indices, perWindowKeys, w, orderByList);
                             var startAdvances = win.Frame is { } frame && frame.Start.Kind != FrameBoundKind.UnboundedPreceding;
                             var slider = Aggregator.Create(aggregate, operandType, resultType, removable: startAdvances, batch: batch);
 
@@ -1230,7 +1229,7 @@ internal sealed partial class Selection
                                     // Quadratic in the frame, so each row
                                     // polls for a cancel.
                                     batch.PollCancellation();
-                                    var (rebuildStart, rebuildEnd) = ComputeFrameExtent(win, indices, perWindowKeys, w, orderByList, i);
+                                    var (rebuildStart, rebuildEnd) = ComputeFrameExtent(win, peers, i);
                                     var aggregator = Aggregator.Create(aggregate, operandType, resultType, batch: batch);
                                     for (var j = rebuildStart; j <= rebuildEnd; j++)
                                         aggregator.Add(operandByPos[j]);
@@ -1244,7 +1243,7 @@ internal sealed partial class Selection
                             var hi = -1;
                             for (var i = 0; i < count; i++)
                             {
-                                var (frameStart, frameEnd) = ComputeFrameExtent(win, indices, perWindowKeys, w, orderByList, i);
+                                var (frameStart, frameEnd) = ComputeFrameExtent(win, peers, i);
                                 if (frameStart > frameEnd)
                                 {
                                     results[indices[i]] = emptyResult;
