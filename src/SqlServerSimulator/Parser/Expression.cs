@@ -2135,405 +2135,465 @@ internal abstract class Expression : ExpressionNode
     /// Dispatches an uppercased built-in name to its expression parser,
     /// raising Msg 195 when no built-in answers to it.
     /// </summary>
+    /// <remarks>
+    /// A call's arguments parse inside its expression's constructor, below this
+    /// frame, so every level of nested calls holds the dispatch on the stack.
+    /// Each name length dispatches in a method of its own to keep that frame
+    /// one length's: unoptimized code gives every arm's temporaries slots of
+    /// their own, and the whole table in one method made each level several
+    /// times as deep.
+    /// </remarks>
     private static Expression ResolveBuiltInCore(ReadOnlySpan<char> uppercaseName, string name, ParserContext context) =>
         uppercaseName.Length switch
         {
-            2 => uppercaseName switch
-            {
-                "PI" => new Pi(context),
-                _ => null
-            },
-            3 => uppercaseName switch
-            {
-                "ABS" => new AbsoluteValue(context),
-                "AVG" => AggregateExpression.Parse(context, AggregateKind.Avg),
-                "COS" => new TrigFunction(context, TrigKind.Cos),
-                "COT" => new TrigFunction(context, TrigKind.Cot),
-                "DAY" => new DatePart(context, DatePartKind.Day, "day"),
-                "EXP" => new Exp(context),
-                "IIF" => ParseConditional(context, static c => new Iif(c)),
-                "LAG" => WindowExpression.ParseLag(context),
-                "LEN" => new Length(context),
-                "LOG" => new Log(context),
-                "MAX" => AggregateExpression.Parse(context, AggregateKind.Max),
-                "MIN" => AggregateExpression.Parse(context, AggregateKind.Min),
-                "SIN" => new TrigFunction(context, TrigKind.Sin),
-                "STR" => new Str(context),
-                "SUM" => AggregateExpression.Parse(context, AggregateKind.Sum),
-                "TAN" => new TrigFunction(context, TrigKind.Tan),
-                "VAR" => AggregateExpression.Parse(context, AggregateKind.Var),
-                _ => null
-            },
-            4 => uppercaseName switch
-            {
-                "ACOS" => new TrigFunction(context, TrigKind.Acos),
-                "ASIN" => new TrigFunction(context, TrigKind.Asin),
-                "ATAN" => new TrigFunction(context, TrigKind.Atan),
-                "ATN2" => new Atn2(context),
-                "CAST" => new Cast(context),
-                "CHAR" => new CharFromCode(context),
-                "LEAD" => WindowExpression.ParseLead(context),
-                "LEFT" => new Left(context),
-                "RAND" => new Rand(context),
-                "RANK" => WindowExpression.ParseRank(context),
-                "SIGN" => new Sign(context),
-                "SQRT" => new Sqrt(context),
-                "TRIM" => new Trim(context),
-                "VARP" => AggregateExpression.Parse(context, AggregateKind.VarP),
-                "YEAR" => new DatePart(context, DatePartKind.Year, "year"),
-                _ => null
-            },
-            5 => uppercaseName switch
-            {
-                "ASCII" => new Ascii(context),
-                "COUNT" => AggregateExpression.Parse(context, AggregateKind.Count),
-                "DB_ID" => new DbId(context),
-                "FLOOR" => new Floor(context),
-                "LEAST" => new GreatestLeast(context, isLeast: true),
-                "LOG10" => new Log10(context),
-                "LOWER" => new Lower(context),
-                "LTRIM" => new LeftTrim(context),
-                "MATCH" => MatchPredicate.RejectMisplaced(context),
-                "MONTH" => new DatePart(context, DatePartKind.Month, "month"),
-                "NCHAR" => new NCharFromCode(context),
-                "NEWID" => new NewId(context),
-                "NTILE" => WindowExpression.ParseNTile(context),
-                "PARSE" => new ParseFunction(context, tryMode: false),
-                "POWER" => new Power(context),
-                "RIGHT" => new Right(context),
-                "ROUND" => new Round(context),
-                "RTRIM" => new RightTrim(context),
-                "SPACE" => new Space(context),
-                "STDEV" => AggregateExpression.Parse(context, AggregateKind.Stdev),
-                "STUFF" => new Stuff(context),
-                "UPPER" => new Upper(context),
-                _ => null
-            },
-            6 => uppercaseName switch
-            {
-                "CHOOSE" => new Choose(context),
-                "CONCAT" => new StringConcat(context, StringConcatKind.Concat),
-                "FORMAT" => new Format(context),
-                "ISDATE" => new IsDate(context),
-                "ISJSON" => new IsJson(context),
-                "ISNULL" => ParseConditional(context, static c => new IsNullExpression(c)),
-                "KEY_ID" => new CryptographicFunction(context, CryptographicFunctionKind.KeyId),
-                "NULLIF" => ParseConditional(context, static c => new NullIf(c)),
-                "SQUARE" => new TrigFunction(context, TrigKind.Square),
-                "STDEVP" => AggregateExpression.Parse(context, AggregateKind.StdevP),
-                "UNISTR" => new Unistr(context),
-                _ => null
-            },
-            7 => uppercaseName switch
-            {
-                "CEILING" => new Ceiling(context),
-                "CERT_ID" => new CryptographicFunction(context, CryptographicFunctionKind.CertId),
-                "CONVERT" => new ConvertExpression(context, tryMode: false),
-                "DATEADD" => new DateAdd(context),
-                "DB_NAME" => new DbName(context),
-                "DEGREES" => new Degrees(context),
-                "EOMONTH" => new EOMonth(context),
-                "FILE_ID" => new FileId(context, extended: false),
-                "GETDATE" => new CurrentTimeFunction(context, CurrentTimeKind.GetDate),
-                "GET_BIT" => new GetBit(context),
-                "HOST_ID" => new HostId(context),
-                "PRODUCT" => AggregateExpression.Parse(context, AggregateKind.Product),
-                "RADIANS" => new Radians(context),
-                "REPLACE" => new Replace(context),
-                "REVERSE" => new Reverse(context),
-                "SET_BIT" => new SetBit(context),
-                "SOUNDEX" => new Soundex(context),
-                "TEXTPTR" => new TextPointer(context),
-                "TYPE_ID" => new TypeId(context),
-                "UNICODE" => new UnicodeCodepoint(context),
-                "USER_ID" => new PrincipalIdLookup(context, PrincipalIdKind.UserId),
-                _ => null
-            },
-            8 => uppercaseName switch
-            {
-                "APP_NAME" => new AppName(context),
-                "CHECKSUM" => new Checksum(context, isBinary: false),
-                "COALESCE" => ParseConditional(context, static c => new Coalesce(c)),
-                "COL_NAME" => new ColName(context),
-                "COMPRESS" => new Compress(context),
-                "DATEDIFF" => new DateDiff.Standard(context),
-                "DATENAME" => new DateName(context),
-                "DATEPART" => new DatePart(context),
-                "GREATEST" => new GreatestLeast(context, isLeast: false),
-                "GROUPING" => new Grouping(context),
-                "KEY_GUID" => new CryptographicFunction(context, CryptographicFunctionKind.KeyGuid),
-                "KEY_NAME" => new CryptographicFunction(context, CryptographicFunctionKind.KeyName),
-                "PATINDEX" => new PatIndex(context),
-                "SUSER_ID" => new PrincipalIdLookup(context, PrincipalIdKind.SUserId),
-                "TRY_CAST" => new Cast(context, tryMode: true),
-                _ => null
-            },
-            9 => uppercaseName switch
-            {
-                "BIT_COUNT" => new BitCount(context),
-                "CHARINDEX" => new CharIndex(context),
-                "CONCAT_WS" => new StringConcat(context, StringConcatKind.ConcatWs),
-                "COUNT_BIG" => AggregateExpression.Parse(context, AggregateKind.CountBig),
-                "CUME_DIST" => WindowExpression.ParseCumeDist(context),
-                "DATETRUNC" => new DateTrunc(context),
-                "EVENTDATA" => new EventDataFunction(context),
-                "FILE_IDEX" => new FileId(context, extended: true),
-                "FILE_NAME" => new FileNameLookup(context),
-                "HASHBYTES" => new HashBytes(context),
-                "HOST_NAME" => new HostName(context),
-                "INDEX_COL" => new IndexCol(context),
-                "ISNUMERIC" => new IsNumeric(context),
-                "IS_MEMBER" => new RoleMemberCheck(context, serverScope: false),
-                "OBJECT_ID" => new ObjectId(context),
-                "ODBCSCALE" => new OdbcScale(context),
-                "PARSENAME" => new ParseName(context),
-                "QUOTENAME" => new QuoteName(context),
-                "REPLICATE" => new Replicate(context),
-                "SCHEMA_ID" => new SchemaId(context),
-                "SUBSTRING" => new Substring(context),
-                "SUSER_SID" => new SUserSid(context),
-                "TEXTVALID" => new TextValid(context),
-                "TRANSLATE" => new Translate(context),
-                "TRY_PARSE" => new ParseFunction(context, tryMode: true),
-                "TYPE_NAME" => new TypeName(context),
-                "USER_NAME" => new UserName(context),
-                _ => null
-            },
-            10 => uppercaseName switch
-            {
-                "ASYMKEY_ID" => new CryptographicFunction(context, CryptographicFunctionKind.AsymKeyId),
-                "COL_LENGTH" => new ColLength(context),
-                "DATALENGTH" => new DataLength(context),
-                "DECOMPRESS" => new Decompress(context),
-                "DENSE_RANK" => WindowExpression.ParseDenseRank(context),
-                "DIFFERENCE" => new Difference(context),
-                "ERROR_LINE" => new ErrorLineFunction(context),
-                "GETUTCDATE" => new CurrentTimeFunction(context, CurrentTimeKind.GetUtcDate),
-                "IDENT_INCR" => new IdentSeedIncrement(context, isSeed: false),
-                "IDENT_SEED" => new IdentSeedIncrement(context, isSeed: true),
-                "JSON_ARRAY" => new JsonArray(context),
-                "JSON_QUERY" => new JsonQuery(context),
-                "JSON_VALUE" => new JsonValue(context),
-                "LAST_VALUE" => WindowExpression.ParseLastValue(context),
-                "LEFT_SHIFT" => new BitShift(context, isLeftShift: true),
-                "PWDCOMPARE" => new PwdCompare(context),
-                "PWDENCRYPT" => new PwdEncrypt(context),
-                "ROW_NUMBER" => WindowExpression.ParseRowNumber(context),
-                "SID_BINARY" => new SidBinary(context),
-                "SIGNBYCERT" => new CryptographicFunction(context, CryptographicFunctionKind.SignByCert),
-                "STATS_DATE" => new StatsDate(context),
-                "STRING_AGG" => AggregateExpression.Parse(context, AggregateKind.StringAgg),
-                "SUSER_NAME" => new SUserName(context, isSidVariant: false),
-                "XACT_STATE" => new XactState(context),
-                _ => null
-            },
-            11 => uppercaseName switch
-            {
-                "CERTENCODED" => new CertificateFunction(context, isPrivateKey: false),
-                "DATE_BUCKET" => new DateBucket(context),
-                "ERROR_STATE" => new ErrorStateFunction(context),
-                "FIRST_VALUE" => WindowExpression.ParseFirstValue(context),
-                "GETANSINULL" => new GetAnsiNull(context),
-                // Real folds an argument-less GROUPING_ID() to the literal 0,
-                // anywhere — WHERE and a query with no GROUP BY included — so
-                // ORDER BY GROUPING_ID() is Msg 108's position 0 (probed
-                // 2026-10-15 against SQL Server 2025).
-                "GROUPING_ID" => context.Token is Operator { Character: ')' }
-                    ? new Value(SqlValue.FromInt32(0), integerLiteralDigitCount: 1)
-                    : new GroupingId(context),
-                "JSON_MODIFY" => new JsonModify(context),
-                "JSON_OBJECT" => new JsonObject(context),
-                "OBJECT_NAME" => new ObjectName(context),
-                "PERMISSIONS" => new Permissions(context),
-                "RIGHT_SHIFT" => new BitShift(context, isLeftShift: false),
-                "SCHEMA_NAME" => new SchemaName(context),
-                "SUSER_SNAME" => new SUserName(context, isSidVariant: true),
-                "SYSDATETIME" => new CurrentTimeFunction(context, CurrentTimeKind.SysDateTime),
-                "TRY_CONVERT" => new ConvertExpression(context, tryMode: true),
-                "VECTOR_NORM" => new VectorNorm(context, normalize: false),
-                _ => null
-            },
-            12 => uppercaseName switch
-            {
-                "APPLOCK_MODE" => new AppLockMode(context),
-                "APPLOCK_TEST" => new AppLockTest(context),
-                "CERTPROPERTY" => new CryptographicFunction(context, CryptographicFunctionKind.CertProperty),
-                "CHECKSUM_AGG" => AggregateExpression.Parse(context, AggregateKind.ChecksumAgg),
-                "CONTEXT_INFO" => new ContextInfoFunction(context),
-                "DATEDIFF_BIG" => new DateDiff.Big(context),
-                "DECRYPTBYKEY" => new CryptographicFunction(context, CryptographicFunctionKind.DecryptByKey),
-                "ENCRYPTBYKEY" => new CryptographicFunction(context, CryptographicFunctionKind.EncryptByKey),
-                "ERROR_NUMBER" => new ErrorNumberFunction(context),
-                "FILEGROUP_ID" => new FilegroupId(context),
-                "FILEPROPERTY" => new FileProperty(context),
-                "HAS_DBACCESS" => new HasDbAccess(context),
-                "PERCENT_RANK" => WindowExpression.ParsePercentRank(context),
-                "REGEXP_COUNT" => RegexpScalar.ParseCall(context, RegexpScalarKind.Count),
-                "REGEXP_INSTR" => RegexpScalar.ParseCall(context, RegexpScalarKind.Instr),
-                "ROWCOUNT_BIG" => new RowCountBig(context),
-                "SWITCHOFFSET" => new SwitchOffset(context),
-                "TYPEPROPERTY" => new TypeProperty(context),
-                _ => null
-            },
-            13 => uppercaseName switch
-            {
-                "BASE64_DECODE" => new Base64Decode(context),
-                "BASE64_ENCODE" => new Base64Encode(context),
-                "COLLATIONNAME" => new CollationName(context),
-                "CURSOR_STATUS" => new CursorStatusFunction(context),
-                "DATEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateFromParts),
-                "DECRYPTBYCERT" => new CryptographicFunction(context, CryptographicFunctionKind.DecryptByCert),
-                "ENCRYPTBYCERT" => new CryptographicFunction(context, CryptographicFunctionKind.EncryptByCert),
-                "ERROR_MESSAGE" => new ErrorMessageFunction(context),
-                "FORMATMESSAGE" => new FormatMessage(context),
-                "IDENT_CURRENT" => new IdentCurrent(context),
-                "INDEXPROPERTY" => new IndexProperty(context),
-                "IS_ROLEMEMBER" => new RoleMemberCheck(context, serverScope: false),
-                "JSON_ARRAYAGG" => AggregateExpression.Parse(context, AggregateKind.JsonArrayAgg),
-                "JSON_CONTAINS" => new JsonContains(context),
-                "LOGINPROPERTY" => new LoginProperty(context),
-                "REGEXP_SUBSTR" => RegexpScalar.ParseCall(context, RegexpScalarKind.Substr),
-                "SIGNBYASYMKEY" => new CryptographicFunction(context, CryptographicFunctionKind.SignByAsymKey),
-                "STRING_ESCAPE" => new StringEscape(context),
-                "TIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.TimeFromParts),
-                _ => null
-            },
-            14 => uppercaseName switch
-            {
-                "CERTPRIVATEKEY" => new CertificateFunction(context, isPrivateKey: true),
-                "COLUMNPROPERTY" => new ColumnProperty(context),
-                "ERROR_SEVERITY" => new ErrorSeverityFunction(context),
-                "FILEGROUP_NAME" => new FilegroupName(context),
-                "FILEPROPERTYEX" => new FilePropertyEx(context),
-                "JSON_OBJECTAGG" => AggregateExpression.Parse(context, AggregateKind.JsonObjectAgg),
-                "OBJECTPROPERTY" => new ObjectProperty(context),
-                "ORIGINAL_LOGIN" => new OriginalLogin(context),
-                "REGEXP_REPLACE" => RegexpScalar.ParseCall(context, RegexpScalarKind.Replace),
-                "SCOPE_IDENTITY" => new LastIdentityExpression(context),
-                "SERVERPROPERTY" => new ServerProperty(context),
-                "SYMKEYPROPERTY" => new CryptographicFunction(context, CryptographicFunctionKind.SymKeyProperty),
-                "SYSUTCDATETIME" => new CurrentTimeFunction(context, CurrentTimeKind.SysUtcDateTime),
-                "VECTORPROPERTY" => new VectorProperty(context),
-                _ => null
-            },
-            15 => uppercaseName switch
-            {
-                "ASYMKEYPROPERTY" => new CryptographicFunction(context, CryptographicFunctionKind.AsymKeyProperty),
-                "BINARY_CHECKSUM" => new Checksum(context, isBinary: true),
-                "COLUMNS_UPDATED" => new ColumnsUpdatedFunction(context),
-                "ERROR_PROCEDURE" => new ErrorProcedureFunction(context),
-                "IS_OBJECTSIGNED" => new CryptographicFunction(context, CryptographicFunctionKind.IsObjectSigned),
-                "NEWSEQUENTIALID" => new NewSequentialId(context),
-                "PERCENTILE_CONT" => WindowExpression.ParsePercentile(context, WindowKind.PercentileCont),
-                "PERCENTILE_DISC" => WindowExpression.ParsePercentile(context, WindowKind.PercentileDisc),
-                "SESSIONPROPERTY" => new SessionProperty(context),
-                "SESSION_CONTEXT" => new SessionContext(context),
-                "VECTOR_DISTANCE" => new VectorDistance(context),
-                _ => null
-            },
-            16 => uppercaseName switch
-            {
-                "ASSEMBLYPROPERTY" => new AssemblyProperty(context),
-                "CRYPT_GEN_RANDOM" => new CryptGenRandom(context),
-                "CURRENT_TIMEZONE" => new CurrentTimeZone(context, id: false),
-                "DECRYPTBYASYMKEY" => new CryptographicFunction(context, CryptographicFunctionKind.DecryptByAsymKey),
-                "ENCRYPTBYASYMKEY" => new CryptographicFunction(context, CryptographicFunctionKind.EncryptByAsymKey),
-                "IS_SRVROLEMEMBER" => new RoleMemberCheck(context, serverScope: true),
-                "JSON_PATH_EXISTS" => new JsonPathExists(context),
-                "OBJECTPROPERTYEX" => new ObjectPropertyEx(context),
-                "ORIGINAL_DB_NAME" => new OriginalDbName(context),
-                "TERTIARY_WEIGHTS" => new TertiaryWeights(context),
-                "TODATETIMEOFFSET" => new ToDateTimeOffset(context),
-                "VECTOR_NORMALIZE" => new VectorNorm(context, normalize: true),
-                _ => null
-            },
-            17 => uppercaseName switch
-            {
-                "COLLATIONPROPERTY" => new CollationProperty(context),
-                "DATETIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTimeFromParts),
-                "FILEGROUPPROPERTY" => new FilegroupProperty(context),
-                "HAS_PERMS_BY_NAME" => new HasPermsByName(context),
-                "INDEXKEY_PROPERTY" => new IndexKeyProperty(context),
-                "OBJECT_DEFINITION" => new ObjectDefinition(context),
-                "SYSDATETIMEOFFSET" => new CurrentTimeFunction(context, CurrentTimeKind.SysDateTimeOffset),
-                "TRIGGER_NESTLEVEL" => new TriggerNestLevelFunction(context),
-                _ => null
-            },
-            18 => uppercaseName switch
-            {
-                "CONNECTIONPROPERTY" => new ConnectionProperty(context),
-                "CURRENT_REQUEST_ID" => new CurrentRequestId(context),
-                "DATABASEPROPERTYEX" => new DatabasePropertyEx(context),
-                "DATETIME2FROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTime2FromParts),
-                "EDGE_ID_FROM_PARTS" => new GraphIdFromParts(context, edge: true),
-                "NODE_ID_FROM_PARTS" => new GraphIdFromParts(context, edge: false),
-                "OBJECT_SCHEMA_NAME" => new ObjectSchemaName(context),
-                "VERIFYSIGNEDBYCERT" => new CryptographicFunction(context, CryptographicFunctionKind.VerifySignedByCert),
-                _ => null
-            },
-            19 => uppercaseName switch
-            {
-                "CURRENT_TIMEZONE_ID" => new CurrentTimeZone(context, id: true),
-                "DECRYPTBYPASSPHRASE" => new CryptographicFunction(context, CryptographicFunctionKind.DecryptByPassPhrase),
-                "ENCRYPTBYPASSPHRASE" => new CryptographicFunction(context, CryptographicFunctionKind.EncryptByPassPhrase),
-                _ => null
-            },
-            20 => uppercaseName switch
-            {
-                "DECRYPTBYKEYAUTOCERT" => new CryptographicFunction(context, CryptographicFunctionKind.DecryptByKeyAutoCert),
-                "PUBLISHINGSERVERNAME" => new PublishingServerName(context),
-                "SQL_VARIANT_PROPERTY" => new SqlVariantProperty(context),
-                "XML_SCHEMA_NAMESPACE" => new XmlSchemaNamespaceFunction(context),
-                _ => null
-            },
-            21 => uppercaseName switch
-            {
-                "APPROX_COUNT_DISTINCT" => AggregateExpression.Parse(context, AggregateKind.ApproxCountDistinct, name),
-                "DATABASE_PRINCIPAL_ID" => new PrincipalIdLookup(context, PrincipalIdKind.DatabasePrincipalId),
-                "GRAPH_ID_FROM_EDGE_ID" => new GraphIdPart(context, GraphIdPartKind.GraphIdFromEdge),
-                "GRAPH_ID_FROM_NODE_ID" => new GraphIdPart(context, GraphIdPartKind.GraphIdFromNode),
-                "MIN_ACTIVE_ROWVERSION" => new MinActiveRowVersion(context),
-                "VERIFYSIGNEDBYASYMKEY" => new CryptographicFunction(context, CryptographicFunctionKind.VerifySignedByAsymKey),
-                _ => null
-            },
-            22 => uppercaseName switch
-            {
-                "APPROX_PERCENTILE_CONT" => AggregateExpression.ParseApproxPercentile(context, AggregateKind.ApproxPercentileCont),
-                "APPROX_PERCENTILE_DISC" => AggregateExpression.ParseApproxPercentile(context, AggregateKind.ApproxPercentileDisc),
-                "CURRENT_TRANSACTION_ID" => new CurrentTransactionId(context),
-                "OBJECT_ID_FROM_EDGE_ID" => new GraphIdPart(context, GraphIdPartKind.ObjectIdFromEdge),
-                "OBJECT_ID_FROM_NODE_ID" => new GraphIdPart(context, GraphIdPartKind.ObjectIdFromNode),
-                "SMALLDATETIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.SmallDateTimeFromParts),
-                _ => null
-            },
-            23 => uppercaseName switch
-            {
-                "DATETIMEOFFSETFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTimeOffsetFromParts),
-                "DECRYPTBYKEYAUTOASYMKEY" => new CryptographicFunction(context, CryptographicFunctionKind.DecryptByKeyAutoAsymKey),
-                "FULLTEXTCATALOGPROPERTY" => new FullTextCatalogProperty(context),
-                "FULLTEXTSERVICEPROPERTY" => new FullTextServiceProperty(context),
-                _ => null
-            },
-            31 => uppercaseName switch
-            {
-                "CHANGE_TRACKING_CURRENT_VERSION" => new ChangeTrackingCurrentVersion(context),
-                _ => null
-            },
-            33 => uppercaseName switch
-            {
-                "CHANGE_TRACKING_IS_COLUMN_IN_MASK" => new ChangeTrackingIsColumnInMask(context),
-                "CHANGE_TRACKING_MIN_VALID_VERSION" => new ChangeTrackingMinValidVersion(context),
-                _ => null
-            },
-            34 => uppercaseName switch
-            {
-                "GET_FILESTREAM_TRANSACTION_CONTEXT" => new GetFilestreamTransactionContext(context),
-                _ => null
-            },
+            2 => ResolveBuiltInOfLength2(uppercaseName, context),
+            3 => ResolveBuiltInOfLength3(uppercaseName, context),
+            4 => ResolveBuiltInOfLength4(uppercaseName, context),
+            5 => ResolveBuiltInOfLength5(uppercaseName, context),
+            6 => ResolveBuiltInOfLength6(uppercaseName, context),
+            7 => ResolveBuiltInOfLength7(uppercaseName, context),
+            8 => ResolveBuiltInOfLength8(uppercaseName, context),
+            9 => ResolveBuiltInOfLength9(uppercaseName, context),
+            10 => ResolveBuiltInOfLength10(uppercaseName, context),
+            11 => ResolveBuiltInOfLength11(uppercaseName, context),
+            12 => ResolveBuiltInOfLength12(uppercaseName, context),
+            13 => ResolveBuiltInOfLength13(uppercaseName, context),
+            14 => ResolveBuiltInOfLength14(uppercaseName, context),
+            15 => ResolveBuiltInOfLength15(uppercaseName, context),
+            16 => ResolveBuiltInOfLength16(uppercaseName, context),
+            17 => ResolveBuiltInOfLength17(uppercaseName, context),
+            18 => ResolveBuiltInOfLength18(uppercaseName, context),
+            19 => ResolveBuiltInOfLength19(uppercaseName, context),
+            20 => ResolveBuiltInOfLength20(uppercaseName, context),
+            21 => ResolveBuiltInOfLength21(uppercaseName, name, context),
+            22 => ResolveBuiltInOfLength22(uppercaseName, context),
+            23 => ResolveBuiltInOfLength23(uppercaseName, context),
+            31 => ResolveBuiltInOfLength31(uppercaseName, context),
+            33 => ResolveBuiltInOfLength33(uppercaseName, context),
+            34 => ResolveBuiltInOfLength34(uppercaseName, context),
             _ => null
         } ?? throw (BuiltInToken.EqualsAny(name, "fn_builtin_permissions", "fn_helpcollations", "fn_listextendedproperty", "fn_my_permissions", "fn_validate_plan_guide", "fn_virtualfilestats")
             ? SimulatedSqlException.UnrecognizedSystemFunction(name)
             : SimulatedSqlException.UnrecognizedBuiltInFunction(name));
+
+#pragma warning disable CA1859 // A length one built-in answers to keeps the dispatch's signature rather than that built-in's type.
+    private static Expression? ResolveBuiltInOfLength2(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "PI" => new Pi(context),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength3(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "ABS" => new AbsoluteValue(context),
+        "AVG" => AggregateExpression.Parse(context, AggregateKind.Avg),
+        "COS" => new TrigFunction(context, TrigKind.Cos),
+        "COT" => new TrigFunction(context, TrigKind.Cot),
+        "DAY" => new DatePart(context, DatePartKind.Day, "day"),
+        "EXP" => new Exp(context),
+        "IIF" => ParseConditional(context, static c => new Iif(c)),
+        "LAG" => WindowExpression.ParseLag(context),
+        "LEN" => new Length(context),
+        "LOG" => new Log(context),
+        "MAX" => AggregateExpression.Parse(context, AggregateKind.Max),
+        "MIN" => AggregateExpression.Parse(context, AggregateKind.Min),
+        "SIN" => new TrigFunction(context, TrigKind.Sin),
+        "STR" => new Str(context),
+        "SUM" => AggregateExpression.Parse(context, AggregateKind.Sum),
+        "TAN" => new TrigFunction(context, TrigKind.Tan),
+        "VAR" => AggregateExpression.Parse(context, AggregateKind.Var),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength4(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "ACOS" => new TrigFunction(context, TrigKind.Acos),
+        "ASIN" => new TrigFunction(context, TrigKind.Asin),
+        "ATAN" => new TrigFunction(context, TrigKind.Atan),
+        "ATN2" => new Atn2(context),
+        "CAST" => new Cast(context),
+        "CHAR" => new CharFromCode(context),
+        "LEAD" => WindowExpression.ParseLead(context),
+        "LEFT" => new Left(context),
+        "RAND" => new Rand(context),
+        "RANK" => WindowExpression.ParseRank(context),
+        "SIGN" => new Sign(context),
+        "SQRT" => new Sqrt(context),
+        "TRIM" => new Trim(context),
+        "VARP" => AggregateExpression.Parse(context, AggregateKind.VarP),
+        "YEAR" => new DatePart(context, DatePartKind.Year, "year"),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength5(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "ASCII" => new Ascii(context),
+        "COUNT" => AggregateExpression.Parse(context, AggregateKind.Count),
+        "DB_ID" => new DbId(context),
+        "FLOOR" => new Floor(context),
+        "LEAST" => new GreatestLeast(context, isLeast: true),
+        "LOG10" => new Log10(context),
+        "LOWER" => new Lower(context),
+        "LTRIM" => new LeftTrim(context),
+        "MATCH" => MatchPredicate.RejectMisplaced(context),
+        "MONTH" => new DatePart(context, DatePartKind.Month, "month"),
+        "NCHAR" => new NCharFromCode(context),
+        "NEWID" => new NewId(context),
+        "NTILE" => WindowExpression.ParseNTile(context),
+        "PARSE" => new ParseFunction(context, tryMode: false),
+        "POWER" => new Power(context),
+        "RIGHT" => new Right(context),
+        "ROUND" => new Round(context),
+        "RTRIM" => new RightTrim(context),
+        "SPACE" => new Space(context),
+        "STDEV" => AggregateExpression.Parse(context, AggregateKind.Stdev),
+        "STUFF" => new Stuff(context),
+        "UPPER" => new Upper(context),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength6(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "CHOOSE" => new Choose(context),
+        "CONCAT" => new StringConcat(context, StringConcatKind.Concat),
+        "FORMAT" => new Format(context),
+        "ISDATE" => new IsDate(context),
+        "ISJSON" => new IsJson(context),
+        "ISNULL" => ParseConditional(context, static c => new IsNullExpression(c)),
+        "KEY_ID" => new CryptographicFunction(context, CryptographicFunctionKind.KeyId),
+        "NULLIF" => ParseConditional(context, static c => new NullIf(c)),
+        "SQUARE" => new TrigFunction(context, TrigKind.Square),
+        "STDEVP" => AggregateExpression.Parse(context, AggregateKind.StdevP),
+        "UNISTR" => new Unistr(context),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength7(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "CEILING" => new Ceiling(context),
+        "CERT_ID" => new CryptographicFunction(context, CryptographicFunctionKind.CertId),
+        "CONVERT" => new ConvertExpression(context, tryMode: false),
+        "DATEADD" => new DateAdd(context),
+        "DB_NAME" => new DbName(context),
+        "DEGREES" => new Degrees(context),
+        "EOMONTH" => new EOMonth(context),
+        "FILE_ID" => new FileId(context, extended: false),
+        "GETDATE" => new CurrentTimeFunction(context, CurrentTimeKind.GetDate),
+        "GET_BIT" => new GetBit(context),
+        "HOST_ID" => new HostId(context),
+        "PRODUCT" => AggregateExpression.Parse(context, AggregateKind.Product),
+        "RADIANS" => new Radians(context),
+        "REPLACE" => new Replace(context),
+        "REVERSE" => new Reverse(context),
+        "SET_BIT" => new SetBit(context),
+        "SOUNDEX" => new Soundex(context),
+        "TEXTPTR" => new TextPointer(context),
+        "TYPE_ID" => new TypeId(context),
+        "UNICODE" => new UnicodeCodepoint(context),
+        "USER_ID" => new PrincipalIdLookup(context, PrincipalIdKind.UserId),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength8(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "APP_NAME" => new AppName(context),
+        "CHECKSUM" => new Checksum(context, isBinary: false),
+        "COALESCE" => ParseConditional(context, static c => new Coalesce(c)),
+        "COL_NAME" => new ColName(context),
+        "COMPRESS" => new Compress(context),
+        "DATEDIFF" => new DateDiff.Standard(context),
+        "DATENAME" => new DateName(context),
+        "DATEPART" => new DatePart(context),
+        "GREATEST" => new GreatestLeast(context, isLeast: false),
+        "GROUPING" => new Grouping(context),
+        "KEY_GUID" => new CryptographicFunction(context, CryptographicFunctionKind.KeyGuid),
+        "KEY_NAME" => new CryptographicFunction(context, CryptographicFunctionKind.KeyName),
+        "PATINDEX" => new PatIndex(context),
+        "SUSER_ID" => new PrincipalIdLookup(context, PrincipalIdKind.SUserId),
+        "TRY_CAST" => new Cast(context, tryMode: true),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength9(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "BIT_COUNT" => new BitCount(context),
+        "CHARINDEX" => new CharIndex(context),
+        "CONCAT_WS" => new StringConcat(context, StringConcatKind.ConcatWs),
+        "COUNT_BIG" => AggregateExpression.Parse(context, AggregateKind.CountBig),
+        "CUME_DIST" => WindowExpression.ParseCumeDist(context),
+        "DATETRUNC" => new DateTrunc(context),
+        "EVENTDATA" => new EventDataFunction(context),
+        "FILE_IDEX" => new FileId(context, extended: true),
+        "FILE_NAME" => new FileNameLookup(context),
+        "HASHBYTES" => new HashBytes(context),
+        "HOST_NAME" => new HostName(context),
+        "INDEX_COL" => new IndexCol(context),
+        "ISNUMERIC" => new IsNumeric(context),
+        "IS_MEMBER" => new RoleMemberCheck(context, serverScope: false),
+        "OBJECT_ID" => new ObjectId(context),
+        "ODBCSCALE" => new OdbcScale(context),
+        "PARSENAME" => new ParseName(context),
+        "QUOTENAME" => new QuoteName(context),
+        "REPLICATE" => new Replicate(context),
+        "SCHEMA_ID" => new SchemaId(context),
+        "SUBSTRING" => new Substring(context),
+        "SUSER_SID" => new SUserSid(context),
+        "TEXTVALID" => new TextValid(context),
+        "TRANSLATE" => new Translate(context),
+        "TRY_PARSE" => new ParseFunction(context, tryMode: true),
+        "TYPE_NAME" => new TypeName(context),
+        "USER_NAME" => new UserName(context),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength10(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "ASYMKEY_ID" => new CryptographicFunction(context, CryptographicFunctionKind.AsymKeyId),
+        "COL_LENGTH" => new ColLength(context),
+        "DATALENGTH" => new DataLength(context),
+        "DECOMPRESS" => new Decompress(context),
+        "DENSE_RANK" => WindowExpression.ParseDenseRank(context),
+        "DIFFERENCE" => new Difference(context),
+        "ERROR_LINE" => new ErrorLineFunction(context),
+        "GETUTCDATE" => new CurrentTimeFunction(context, CurrentTimeKind.GetUtcDate),
+        "IDENT_INCR" => new IdentSeedIncrement(context, isSeed: false),
+        "IDENT_SEED" => new IdentSeedIncrement(context, isSeed: true),
+        "JSON_ARRAY" => new JsonArray(context),
+        "JSON_QUERY" => new JsonQuery(context),
+        "JSON_VALUE" => new JsonValue(context),
+        "LAST_VALUE" => WindowExpression.ParseLastValue(context),
+        "LEFT_SHIFT" => new BitShift(context, isLeftShift: true),
+        "PWDCOMPARE" => new PwdCompare(context),
+        "PWDENCRYPT" => new PwdEncrypt(context),
+        "ROW_NUMBER" => WindowExpression.ParseRowNumber(context),
+        "SID_BINARY" => new SidBinary(context),
+        "SIGNBYCERT" => new CryptographicFunction(context, CryptographicFunctionKind.SignByCert),
+        "STATS_DATE" => new StatsDate(context),
+        "STRING_AGG" => AggregateExpression.Parse(context, AggregateKind.StringAgg),
+        "SUSER_NAME" => new SUserName(context, isSidVariant: false),
+        "XACT_STATE" => new XactState(context),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength11(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "CERTENCODED" => new CertificateFunction(context, isPrivateKey: false),
+        "DATE_BUCKET" => new DateBucket(context),
+        "ERROR_STATE" => new ErrorStateFunction(context),
+        "FIRST_VALUE" => WindowExpression.ParseFirstValue(context),
+        "GETANSINULL" => new GetAnsiNull(context),
+        // Real folds an argument-less GROUPING_ID() to the literal 0,
+        // anywhere — WHERE and a query with no GROUP BY included — so
+        // ORDER BY GROUPING_ID() is Msg 108's position 0 (probed
+        // 2026-10-15 against SQL Server 2025).
+        "GROUPING_ID" => context.Token is Operator { Character: ')' }
+            ? new Value(SqlValue.FromInt32(0), integerLiteralDigitCount: 1)
+            : new GroupingId(context),
+        "JSON_MODIFY" => new JsonModify(context),
+        "JSON_OBJECT" => new JsonObject(context),
+        "OBJECT_NAME" => new ObjectName(context),
+        "PERMISSIONS" => new Permissions(context),
+        "RIGHT_SHIFT" => new BitShift(context, isLeftShift: false),
+        "SCHEMA_NAME" => new SchemaName(context),
+        "SUSER_SNAME" => new SUserName(context, isSidVariant: true),
+        "SYSDATETIME" => new CurrentTimeFunction(context, CurrentTimeKind.SysDateTime),
+        "TRY_CONVERT" => new ConvertExpression(context, tryMode: true),
+        "VECTOR_NORM" => new VectorNorm(context, normalize: false),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength12(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "APPLOCK_MODE" => new AppLockMode(context),
+        "APPLOCK_TEST" => new AppLockTest(context),
+        "CERTPROPERTY" => new CryptographicFunction(context, CryptographicFunctionKind.CertProperty),
+        "CHECKSUM_AGG" => AggregateExpression.Parse(context, AggregateKind.ChecksumAgg),
+        "CONTEXT_INFO" => new ContextInfoFunction(context),
+        "DATEDIFF_BIG" => new DateDiff.Big(context),
+        "DECRYPTBYKEY" => new CryptographicFunction(context, CryptographicFunctionKind.DecryptByKey),
+        "ENCRYPTBYKEY" => new CryptographicFunction(context, CryptographicFunctionKind.EncryptByKey),
+        "ERROR_NUMBER" => new ErrorNumberFunction(context),
+        "FILEGROUP_ID" => new FilegroupId(context),
+        "FILEPROPERTY" => new FileProperty(context),
+        "HAS_DBACCESS" => new HasDbAccess(context),
+        "PERCENT_RANK" => WindowExpression.ParsePercentRank(context),
+        "REGEXP_COUNT" => RegexpScalar.ParseCall(context, RegexpScalarKind.Count),
+        "REGEXP_INSTR" => RegexpScalar.ParseCall(context, RegexpScalarKind.Instr),
+        "ROWCOUNT_BIG" => new RowCountBig(context),
+        "SWITCHOFFSET" => new SwitchOffset(context),
+        "TYPEPROPERTY" => new TypeProperty(context),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength13(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "BASE64_DECODE" => new Base64Decode(context),
+        "BASE64_ENCODE" => new Base64Encode(context),
+        "COLLATIONNAME" => new CollationName(context),
+        "CURSOR_STATUS" => new CursorStatusFunction(context),
+        "DATEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateFromParts),
+        "DECRYPTBYCERT" => new CryptographicFunction(context, CryptographicFunctionKind.DecryptByCert),
+        "ENCRYPTBYCERT" => new CryptographicFunction(context, CryptographicFunctionKind.EncryptByCert),
+        "ERROR_MESSAGE" => new ErrorMessageFunction(context),
+        "FORMATMESSAGE" => new FormatMessage(context),
+        "IDENT_CURRENT" => new IdentCurrent(context),
+        "INDEXPROPERTY" => new IndexProperty(context),
+        "IS_ROLEMEMBER" => new RoleMemberCheck(context, serverScope: false),
+        "JSON_ARRAYAGG" => AggregateExpression.Parse(context, AggregateKind.JsonArrayAgg),
+        "JSON_CONTAINS" => new JsonContains(context),
+        "LOGINPROPERTY" => new LoginProperty(context),
+        "REGEXP_SUBSTR" => RegexpScalar.ParseCall(context, RegexpScalarKind.Substr),
+        "SIGNBYASYMKEY" => new CryptographicFunction(context, CryptographicFunctionKind.SignByAsymKey),
+        "STRING_ESCAPE" => new StringEscape(context),
+        "TIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.TimeFromParts),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength14(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "CERTPRIVATEKEY" => new CertificateFunction(context, isPrivateKey: true),
+        "COLUMNPROPERTY" => new ColumnProperty(context),
+        "ERROR_SEVERITY" => new ErrorSeverityFunction(context),
+        "FILEGROUP_NAME" => new FilegroupName(context),
+        "FILEPROPERTYEX" => new FilePropertyEx(context),
+        "JSON_OBJECTAGG" => AggregateExpression.Parse(context, AggregateKind.JsonObjectAgg),
+        "OBJECTPROPERTY" => new ObjectProperty(context),
+        "ORIGINAL_LOGIN" => new OriginalLogin(context),
+        "REGEXP_REPLACE" => RegexpScalar.ParseCall(context, RegexpScalarKind.Replace),
+        "SCOPE_IDENTITY" => new LastIdentityExpression(context),
+        "SERVERPROPERTY" => new ServerProperty(context),
+        "SYMKEYPROPERTY" => new CryptographicFunction(context, CryptographicFunctionKind.SymKeyProperty),
+        "SYSUTCDATETIME" => new CurrentTimeFunction(context, CurrentTimeKind.SysUtcDateTime),
+        "VECTORPROPERTY" => new VectorProperty(context),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength15(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "ASYMKEYPROPERTY" => new CryptographicFunction(context, CryptographicFunctionKind.AsymKeyProperty),
+        "BINARY_CHECKSUM" => new Checksum(context, isBinary: true),
+        "COLUMNS_UPDATED" => new ColumnsUpdatedFunction(context),
+        "ERROR_PROCEDURE" => new ErrorProcedureFunction(context),
+        "IS_OBJECTSIGNED" => new CryptographicFunction(context, CryptographicFunctionKind.IsObjectSigned),
+        "NEWSEQUENTIALID" => new NewSequentialId(context),
+        "PERCENTILE_CONT" => WindowExpression.ParsePercentile(context, WindowKind.PercentileCont),
+        "PERCENTILE_DISC" => WindowExpression.ParsePercentile(context, WindowKind.PercentileDisc),
+        "SESSIONPROPERTY" => new SessionProperty(context),
+        "SESSION_CONTEXT" => new SessionContext(context),
+        "VECTOR_DISTANCE" => new VectorDistance(context),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength16(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "ASSEMBLYPROPERTY" => new AssemblyProperty(context),
+        "CRYPT_GEN_RANDOM" => new CryptGenRandom(context),
+        "CURRENT_TIMEZONE" => new CurrentTimeZone(context, id: false),
+        "DECRYPTBYASYMKEY" => new CryptographicFunction(context, CryptographicFunctionKind.DecryptByAsymKey),
+        "ENCRYPTBYASYMKEY" => new CryptographicFunction(context, CryptographicFunctionKind.EncryptByAsymKey),
+        "IS_SRVROLEMEMBER" => new RoleMemberCheck(context, serverScope: true),
+        "JSON_PATH_EXISTS" => new JsonPathExists(context),
+        "OBJECTPROPERTYEX" => new ObjectPropertyEx(context),
+        "ORIGINAL_DB_NAME" => new OriginalDbName(context),
+        "TERTIARY_WEIGHTS" => new TertiaryWeights(context),
+        "TODATETIMEOFFSET" => new ToDateTimeOffset(context),
+        "VECTOR_NORMALIZE" => new VectorNorm(context, normalize: true),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength17(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "COLLATIONPROPERTY" => new CollationProperty(context),
+        "DATETIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTimeFromParts),
+        "FILEGROUPPROPERTY" => new FilegroupProperty(context),
+        "HAS_PERMS_BY_NAME" => new HasPermsByName(context),
+        "INDEXKEY_PROPERTY" => new IndexKeyProperty(context),
+        "OBJECT_DEFINITION" => new ObjectDefinition(context),
+        "SYSDATETIMEOFFSET" => new CurrentTimeFunction(context, CurrentTimeKind.SysDateTimeOffset),
+        "TRIGGER_NESTLEVEL" => new TriggerNestLevelFunction(context),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength18(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "CONNECTIONPROPERTY" => new ConnectionProperty(context),
+        "CURRENT_REQUEST_ID" => new CurrentRequestId(context),
+        "DATABASEPROPERTYEX" => new DatabasePropertyEx(context),
+        "DATETIME2FROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTime2FromParts),
+        "EDGE_ID_FROM_PARTS" => new GraphIdFromParts(context, edge: true),
+        "NODE_ID_FROM_PARTS" => new GraphIdFromParts(context, edge: false),
+        "OBJECT_SCHEMA_NAME" => new ObjectSchemaName(context),
+        "VERIFYSIGNEDBYCERT" => new CryptographicFunction(context, CryptographicFunctionKind.VerifySignedByCert),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength19(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "CURRENT_TIMEZONE_ID" => new CurrentTimeZone(context, id: true),
+        "DECRYPTBYPASSPHRASE" => new CryptographicFunction(context, CryptographicFunctionKind.DecryptByPassPhrase),
+        "ENCRYPTBYPASSPHRASE" => new CryptographicFunction(context, CryptographicFunctionKind.EncryptByPassPhrase),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength20(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "DECRYPTBYKEYAUTOCERT" => new CryptographicFunction(context, CryptographicFunctionKind.DecryptByKeyAutoCert),
+        "PUBLISHINGSERVERNAME" => new PublishingServerName(context),
+        "SQL_VARIANT_PROPERTY" => new SqlVariantProperty(context),
+        "XML_SCHEMA_NAMESPACE" => new XmlSchemaNamespaceFunction(context),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength21(ReadOnlySpan<char> uppercaseName, string name, ParserContext context) => uppercaseName switch
+    {
+        "APPROX_COUNT_DISTINCT" => AggregateExpression.Parse(context, AggregateKind.ApproxCountDistinct, name),
+        "DATABASE_PRINCIPAL_ID" => new PrincipalIdLookup(context, PrincipalIdKind.DatabasePrincipalId),
+        "GRAPH_ID_FROM_EDGE_ID" => new GraphIdPart(context, GraphIdPartKind.GraphIdFromEdge),
+        "GRAPH_ID_FROM_NODE_ID" => new GraphIdPart(context, GraphIdPartKind.GraphIdFromNode),
+        "MIN_ACTIVE_ROWVERSION" => new MinActiveRowVersion(context),
+        "VERIFYSIGNEDBYASYMKEY" => new CryptographicFunction(context, CryptographicFunctionKind.VerifySignedByAsymKey),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength22(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "APPROX_PERCENTILE_CONT" => AggregateExpression.ParseApproxPercentile(context, AggregateKind.ApproxPercentileCont),
+        "APPROX_PERCENTILE_DISC" => AggregateExpression.ParseApproxPercentile(context, AggregateKind.ApproxPercentileDisc),
+        "CURRENT_TRANSACTION_ID" => new CurrentTransactionId(context),
+        "OBJECT_ID_FROM_EDGE_ID" => new GraphIdPart(context, GraphIdPartKind.ObjectIdFromEdge),
+        "OBJECT_ID_FROM_NODE_ID" => new GraphIdPart(context, GraphIdPartKind.ObjectIdFromNode),
+        "SMALLDATETIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.SmallDateTimeFromParts),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength23(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "DATETIMEOFFSETFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTimeOffsetFromParts),
+        "DECRYPTBYKEYAUTOASYMKEY" => new CryptographicFunction(context, CryptographicFunctionKind.DecryptByKeyAutoAsymKey),
+        "FULLTEXTCATALOGPROPERTY" => new FullTextCatalogProperty(context),
+        "FULLTEXTSERVICEPROPERTY" => new FullTextServiceProperty(context),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength31(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "CHANGE_TRACKING_CURRENT_VERSION" => new ChangeTrackingCurrentVersion(context),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength33(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "CHANGE_TRACKING_IS_COLUMN_IN_MASK" => new ChangeTrackingIsColumnInMask(context),
+        "CHANGE_TRACKING_MIN_VALID_VERSION" => new ChangeTrackingMinValidVersion(context),
+        _ => null
+    };
+
+    private static Expression? ResolveBuiltInOfLength34(ReadOnlySpan<char> uppercaseName, ParserContext context) => uppercaseName switch
+    {
+        "GET_FILESTREAM_TRANSACTION_CONTEXT" => new GetFilestreamTransactionContext(context),
+        _ => null
+    };
+#pragma warning restore CA1859
 
     /// <summary>
     /// Handles the <c>NEXT VALUE FOR [schema.]sequence [OVER (ORDER BY ...)]</c>

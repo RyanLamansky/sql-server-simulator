@@ -18,16 +18,50 @@ internal abstract class TwoSidedExpression : Expression
     // don't force it). Callers gate on the result being decimal, so a
     // non-arithmetic subclass (string concat, comparison) propagating an
     // operand's flag here is harmless — the non-decimal result is filtered out.
-    internal override bool ResultReportsNumeric => this.left.ResultReportsNumeric || this.right.ResultReportsNumeric;
+    internal sealed override bool ResultReportsNumeric => !this.EveryOperand(static operand => !operand.ResultReportsNumeric);
 
     // Every subclass is arithmetic, bitwise or concatenation over the two
     // operands — value-only, with no BatchContext write between them — so the
     // pair's own answer settles the node's.
-    internal override bool ParallelSafe => this.left.ParallelSafe && this.right.ParallelSafe;
+    internal sealed override bool ParallelSafe => this.EveryOperand(static operand => operand.ParallelSafe);
 
-    private protected override bool IsStructuralConstant => this.left.IsWrittenConstant && this.right.IsWrittenConstant;
+    private protected sealed override bool IsStructuralConstant
+    {
+        get
+        {
+            // Iterative left-spine walk (see EveryOperand), stopping at a node
+            // marked folded, whose mark answers for its whole subtree.
+            var node = this;
+            while (node.right.IsWrittenConstant)
+            {
+                if (node.left is not TwoSidedExpression { FoldedOverConstantArguments: false } next)
+                    return node.left.IsWrittenConstant;
+                node = next;
+            }
+            return false;
+        }
+    }
 
-    internal override bool IsNonNullConstantComputation => this.left.IsNonNullConstantComputation && this.right.IsNonNullConstantComputation;
+    internal sealed override bool IsNonNullConstantComputation => this.EveryOperand(static operand => operand.IsNonNullConstantComputation);
+
+    /// <summary>
+    /// Whether <paramref name="test"/> holds for every operand along this
+    /// node's left spine — each right operand, then the leftmost — walked
+    /// iteratively as <see cref="Run(RuntimeContext)"/> walks it: a flat chain
+    /// thousands of terms long nests a level per term, which a recursive walk
+    /// would take a stack frame per level to read.
+    /// </summary>
+    private bool EveryOperand(Func<Expression, bool> test)
+    {
+        var node = this;
+        while (test(node.right))
+        {
+            if (node.left is not TwoSidedExpression next)
+                return test(node.left);
+            node = next;
+        }
+        return false;
+    }
 
     /// <summary>
     /// Builds the <see cref="TwoSidedExpression"/> that corresponds to a
@@ -767,7 +801,21 @@ internal abstract class TwoSidedExpression : Expression
 
     protected abstract char Operator { get; }
 
-    internal sealed override string DebugDisplay() => $"{left.DebugDisplay()} {Operator} {right.DebugDisplay()}";
+    internal sealed override string DebugDisplay()
+    {
+        // Iterative left-spine walk (see Run).
+        var spine = new List<TwoSidedExpression>();
+        Expression node = this;
+        while (node is TwoSidedExpression twoSided)
+        {
+            spine.Add(twoSided);
+            node = twoSided.left;
+        }
+        var text = new System.Text.StringBuilder(node.DebugDisplay());
+        for (var i = spine.Count - 1; i >= 0; i--)
+            _ = text.Append(' ').Append(spine[i].Operator).Append(' ').Append(spine[i].right.DebugDisplay());
+        return text.ToString();
+    }
 
     /// <summary>
     /// True when <paramref name="predicate"/> holds for both operands. Lets a

@@ -34,6 +34,15 @@ internal static class EngineThreads
     /// </summary>
     private const int IdleSpins = 50;
 
+    /// <summary>
+    /// The stack a worker's thread reserves, which holds every depth of nesting
+    /// real accepts — 1,008 nested <c>IF</c>s, 1,013 nested calls, 100 derived
+    /// tables — together, and while the runtime still runs the engine's code
+    /// unoptimized. A default thread's, 1 MB on Windows, runs out short of
+    /// them, failing a statement real runs with Msg 8631.
+    /// </summary>
+    private const int StackSize = 16 * 1024 * 1024;
+
     private static readonly Lock IdleGate = new();
 
     /// <summary>The idle workers, the latest first, linked through <see cref="Worker.NextIdle"/>.</summary>
@@ -71,7 +80,7 @@ internal static class EngineThreads
         // The worker's own thread disposes it as it retires. The thread starts
         // with no execution context of its own: each job brings its own.
         worker = new Worker { Job = job };
-        new Thread(worker.Loop) { IsBackground = true, Name = "Simulated engine" }.UnsafeStart();
+        new Thread(worker.Loop, StackSize) { IsBackground = true, Name = "Simulated engine" }.UnsafeStart();
     }
 
     /// <summary>

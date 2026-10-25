@@ -1,3 +1,4 @@
+using System.Globalization;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -91,6 +92,23 @@ public sealed class ExpressionNestingLimitTests
             "select 1 where " + string.Concat(Enumerable.Repeat("not ", 50000)) + "1=1", SmallStack);
         IsNull(failure, "deep NOT stack should evaluate, not raise");
         AreEqual(1, result);
+    }
+
+    // A flat chain nests a level per term down its left side, which no level
+    // charges to the nesting budget, so whatever reads the whole chain walks
+    // it without recursing — a `+` checked for constants inside a folded call,
+    // a `||` evaluated — or probes the stack as it recurses (`<<`): on a small
+    // thread a chain answers or raises Msg 8631, never ends the process.
+    [TestMethod]
+    [Timeout(60000)]
+    [DataRow("select len({0})", " + ", "'a'")]
+    [DataRow("select {0}", " || ", "'a'")]
+    [DataRow("select {0}", " << ", "1")]
+    public void OperatorChain_ExtremeDepth_OnSmallStackThread_IsGracefulNeverProcessDeath(string shape, string op, string term)
+    {
+        var sql = string.Format(CultureInfo.InvariantCulture, shape, string.Join(op, Enumerable.Repeat(term, 20000)));
+        var failure = Extensions.ExecuteScalarOnStack(sql, SmallStack).Failure;
+        IsTrue(failure is null || failure.Number == 8631, $"raised {failure?.Number}");
     }
 
     // --- Stacked / chained unary signs: genuinely nested. ---
@@ -212,17 +230,33 @@ public sealed class ExpressionNestingLimitTests
 
     [TestMethod]
     [Timeout(60000)]
-    [DataRow("functions")]
-    [DataRow("derived tables")]
-    public void NestedQueriesAndCalls_OnSmallStackThread_RaiseMsg8631NotProcessDeath(string construct)
+    [DataRow("functions", SmallStack)]
+    [DataRow("derived tables", SmallStack / 2)]
+    public void NestedQueriesAndCalls_OnSmallStackThread_RaiseMsg8631NotProcessDeath(string construct, int stack)
     {
-        // The frames run the stack out far below real's limit, so the probe
+        // The frames run the stack out below real's limit, so the probe
         // converts the overflow into Msg 8631 rather than faulting the process.
         var sql = construct == "functions"
             ? "select " + string.Concat(Enumerable.Repeat("abs(", 5000)) + "1" + new string(')', 5000)
             : NestedDerivedTables(100);
-        AreEqual(8631, Extensions.ExecuteScalarOnStack(sql, SmallStack).Failure.ErrorNumber());
+        AreEqual(8631, Extensions.ExecuteScalarOnStack(sql, stack).Failure.ErrorNumber());
     }
+
+#if !DEBUG
+    // A default-size thread (1 MB on Windows) holds real's limit for nested
+    // derived tables and subqueries, whose levels keep their frames small for
+    // it; a Debug build's frames are unoptimized and run out sooner.
+    [TestMethod]
+    [Timeout(60000)]
+    [DataRow("subqueries")]
+    [DataRow("derived tables")]
+    public void NestedQueries_ReachRealsLimit_OnADefaultSizedStack(string construct)
+    {
+        var (result, failure) = Extensions.ExecuteScalarOnStack(construct == "subqueries" ? NestedSubqueries(168) : NestedDerivedTables(100), 1024 * 1024);
+        IsNull(failure);
+        AreEqual(1, result);
+    }
+#endif
 
     // A speculative read of a query's FROM ahead of its select list, retried in
     // order when it failed, read every nested level's FROM twice — an error at

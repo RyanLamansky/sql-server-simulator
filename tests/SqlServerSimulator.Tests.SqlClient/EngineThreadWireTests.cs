@@ -80,4 +80,44 @@ public sealed class EngineThreadWireTests
                 await session.DisposeAsync();
         }
     }
+
+    /// <summary>
+    /// A session's statements run on threads whose stack holds the deepest
+    /// nesting real accepts, where a default-size thread's (1 MB on Windows)
+    /// runs out short of it with Msg 8631; one level past real's limit is
+    /// real's own Msg 191.
+    /// </summary>
+    [TestMethod]
+    [DataRow("calls", 1013, null)]
+    [DataRow("calls", 1014, 191)]
+    [DataRow("subqueries", 168, null)]
+    [DataRow("subqueries", 169, 191)]
+    [DataRow("derived tables", 100, null)]
+    [DataRow("derived tables", 101, 191)]
+    public async Task NestingRealAccepts_FitsASessionsThread(string construct, int depth, int? error)
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        var query = "select 1 as x";
+        for (var level = 0; level < depth; level++)
+        {
+            query = construct switch
+            {
+                "calls" => query.Replace("select ", "select abs(", StringComparison.Ordinal).Replace(" as x", ") as x", StringComparison.Ordinal),
+                "subqueries" => $"select ({query}) as x",
+                _ => $"select x from ({query}) as d",
+            };
+        }
+        await using var command = new SqlCommand(query, connection);
+        if (error is null)
+        {
+            AreEqual(1, await command.ExecuteScalarAsync(TestContext.CancellationToken));
+        }
+        else
+        {
+            var ex = await ThrowsAsync<SqlException>(async () => await command.ExecuteScalarAsync(TestContext.CancellationToken));
+            AreEqual(error, ex.Number);
+        }
+    }
 }

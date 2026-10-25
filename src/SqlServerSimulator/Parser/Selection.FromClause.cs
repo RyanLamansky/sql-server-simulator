@@ -1081,9 +1081,29 @@ internal sealed partial class Selection
     /// return, the cursor is at the first un-consumed token after the
     /// source — typically WHERE / ORDER / a JOIN keyword / ON / etc.
     /// </summary>
+    /// <remarks>
+    /// Every level of nested derived tables holds this frame and
+    /// <see cref="ParseParenthesizedSource"/>'s while the next level parses, so
+    /// each source kind parses in a method of its own, and a derived table's
+    /// body binds as a source in yet another (<see cref="DerivedTableSource"/>)
+    /// once its parse returns: one method holding every kind's locals made
+    /// each level several times as deep.
+    /// </remarks>
     private static FromSource ParseSingleFromSourceCore(ParserContext context, QueryScope scope)
     {
         var token = context.GetNextRequired();
+        return token is Operator { Character: '(' }
+            ? ParseParenthesizedSource(context, scope)
+            : ParseUnparenthesizedSource(context, scope, token);
+    }
+
+    /// <summary>
+    /// Parses a FROM source that doesn't open with a parenthesis — a table,
+    /// view, CTE, table variable, rowset function or catalog view — whose
+    /// first token, <paramref name="token"/>, the cursor is on.
+    /// </summary>
+    private static FromSource ParseUnparenthesizedSource(ParserContext context, QueryScope scope, Token token)
+    {
         // A nested DML source feeding a linked server's table is refused
         // before its own grammar is judged.
         if (token is ReservedKeyword { Keyword: Keyword.Insert or Keyword.Update or Keyword.Delete or Keyword.Merge }
@@ -1095,8 +1115,7 @@ internal sealed partial class Selection
         // table variable, rowset function or catalog view — opens the
         // statement's transaction; a derived table opens it only through a
         // source of its own.
-        if (token is not Operator { Character: '(' })
-            context.Batch.CurrentStatement.MarkOpensTransaction();
+        context.Batch.CurrentStatement.MarkOpensTransaction();
         if (token is Operator { Character: ':' })
             token = ParseLegacyFunctionPrefix(context);
         switch (token)
@@ -1937,136 +1956,6 @@ internal sealed partial class Selection
                     backingTable: tvTable,
                     writtenObjectName: tvName.Leaf);
 
-            case Operator { Character: '(' }:
-                var afterOpenParen = context.GetNextRequired();
-
-                // Table-value-constructor derived table: `(VALUES …) alias(cols)`.
-                // Rides the same deferred lateral-plan seam as a derived-table
-                // SELECT, so a VALUES source correlates to outer scope the same
-                // way (needed for a comma-FROM VALUES referencing an outer CTE).
-                switch (afterOpenParen)
-                {
-                    case ReservedKeyword { Keyword: Keyword.Values }:
-                        return ParseValuesDerivedTable(context, context.OuterTypeResolver ?? scope.OuterTypeResolver);
-                    case ReservedKeyword { Keyword: Keyword.Insert or Keyword.Update or Keyword.Delete or Keyword.Merge }:
-                        throw context.Batch.CurrentStatement.RemoteWrite is not null
-                            ? SimulatedSqlException.RemoteDmlTargetWithOutput()
-                            : NestedDmlRefusal(context, scope);
-                }
-
-                if (afterOpenParen is not (ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' }))
-                {
-                    // A CTE prefix inside a derived table is real's Msg 156
-                    // rather than the generic Msg 102 — a WITH may only
-                    // precede a statement, never a parenthesized query
-                    // (probe-confirmed; real follows it with Msg 319 and
-                    // Msg 102, of which the simulator raises the first).
-                    throw afterOpenParen is ReservedKeyword { Keyword: Keyword.With } withKeyword
-                        ? SimulatedSqlException.SyntaxErrorNearKeyword(withKeyword)
-                        : SimulatedSqlException.SyntaxErrorNear(context);
-                }
-
-                // Derived tables can correlate to outer scope (SQL Server
-                // allows any FROM derived table to reference outer columns,
-                // not just APPLY). Static parse-time correlation detection
-                // misses runtime-only references (WHERE / ON predicates use
-                // Run, not GetSqlType), so the safe path is to always defer
-                // execution into FromSource.LateralPlan and re-run per outer
-                // resolver invocation. Non-correlated derived tables pay the
-                // same per-Execute cost as before (the inner plan still runs
-                // once per outer Execute call, just routed through
-                // lateralPlan.Execute).
-                //
-                // Pass through the chained outer-type-resolver so the inner
-                // Parse can statically type-resolve any projection / GROUP
-                // BY references that point at outer columns. Both
-                // <see cref="ParserContext.OuterTypeResolver"/> (set inside
-                // the WHERE / GROUP BY / HAVING parse of the enclosing
-                // Selection) and the explicit <paramref name="scope"/> resolver
-                // chain (set when this FROM source is itself nested inside
-                // a subquery) are honored.
-                Selection derivedSelection;
-                var derivedFlattens = context.BrowseFlattenFrom;
-                using (ParserScope.Enter(ref context.BrowseFlatten, derivedFlattens))
-                using (ParserScope.Enter(ref context.ForceSeekDeferrable, true))
-                using (ParserScope.Enter(ref context.CarriesDeferredReads, !derivedFlattens && context.MayCarryDeferredReads))
-                {
-                    derivedSelection = ParseNestedQueryRejectingNextValueFor(context,
-                        QueryScope.Nested(QueryPosition.Derived, context.OuterTypeResolver ?? scope.OuterTypeResolver));
-                }
-                var derivedHidden = derivedSelection.TrailingHiddenColumnCount;
-
-                // Inner SELECT result rows are LOB-inline (projections never
-                // emit LOB pointers because they have no destination Heap),
-                // so build a HeapColumn[] schema from the SqlType[] so the
-                // decoder still strips marker bytes for text/ntext/image
-                // columns; lobStore is null because no chain to follow.
-                var derivedColumns = new HeapColumn[derivedSelection.Schema.Length];
-                for (var ci = 0; ci < derivedColumns.Length; ci++)
-                {
-                    derivedColumns[ci] = new HeapColumn(string.Empty, derivedSelection.Schema[ci], maxLength: null, nullable: derivedSelection.ColumnNullability?[ci] ?? true, isHidden: ci >= derivedColumns.Length - derivedHidden, spelledNumeric: derivedSelection.ColumnReportsNumeric is { } derivedNumeric && derivedNumeric[ci])
-                    {
-                        IsUntypedNull = derivedSelection.ColumnIsUntypedNull is { } derivedNulls && derivedNulls[ci],
-                        AliasType = derivedSelection.ColumnAliasTypes?[ci],
-                        XmlSchemaCollection = derivedSelection.ColumnXmlTypings?[ci].Collection,
-                        XmlDocument = derivedSelection.ColumnXmlTypings?[ci].Document ?? false,
-                        IdentitySource = derivedSelection.ColumnIdentitySources?[ci],
-                        DerivedMask = derivedSelection.ColumnMasks?[ci],
-                    };
-                }
-
-                // A body that never closed its paren is Msg 102 naming what the
-                // parse stopped on — the last token of the batch when the input
-                // simply ended (probed 2026-08-05: `SELECT * FROM (SELECT 1 AS a`
-                // reports `near 'a'`). Checked before the alias, whose own
-                // diagnostic below assumes a closing paren was there to name.
-                if (context.Token is not Operator { Character: ')' })
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-
-                // Msg 1033: a derived table is one of the five constructs the
-                // message names, and its ORDER BY needs a companion TOP /
-                // OFFSET / FETCH — the same test the view and CTE bodies run
-                // (probe-confirmed 2026-08-06: `FROM (SELECT v FROM … ORDER BY v) d`
-                // raises, and adding TOP or OFFSET clears it).
-                if (derivedSelection.HasOrderBy && !derivedSelection.HasTopOrOffsetOrFetch)
-                    throw SimulatedSqlException.OrderByInvalidInCte();
-
-                // A derived table has no native name, so the alias is
-                // mandatory: real reports Msg 102 near the token where it
-                // belongs, the closing ')' when the batch ends there (probed
-                // 2026-09-26: `FROM (SELECT 1 a);` is near ';'). A FOR PATH
-                // sits ahead of it, as after a table's name.
-                var derivedForPath = ParseOptionalForPath(context);
-                var derivedQualifier = ConsumeOptionalAlias(context)
-                    ?? throw SimulatedSqlException.SyntaxErrorNear(context);
-                // A FOR JSON / FOR XML document's column name belongs to the
-                // client result; read as a derived table it is unnamed
-                // (Msg 8155, probed 2026-10-02 against SQL Server 2025).
-                var derivedNames = ResolveDerivedTableColumnNames(context, derivedSelection.IsForClauseDocument ? [""] : derivedSelection.ColumnNames[..^derivedHidden], derivedQualifier);
-                if (derivedHidden > 0)
-                    derivedNames = [.. derivedNames, .. Enumerable.Range(derivedNames.Length, derivedHidden).Select(derivedSelection.TrailingHiddenName)];
-                // A derived table takes no TABLESAMPLE; real stops at the
-                // keyword itself (Msg 156, probed 2026-09-24).
-                if (context.Token is ReservedKeyword { Keyword: Keyword.TableSample } tableSample)
-                    throw SimulatedSqlException.SyntaxErrorNearKeyword(tableSample);
-
-                return new FromSource(
-                    qualifier: derivedQualifier,
-                    columnNames: derivedNames,
-                    columns: derivedColumns,
-                    storedSchema: derivedColumns,
-                    storageOrdinals: null,
-                    lobStore: null,
-                    rows: [],
-                    lateralPlan: derivedSelection,
-                    lateralIsQueryBody: true,
-                    derivedTable: new DerivedTableBinding(derivedSelection, derivedQualifier, derivedNames, context.CurrentDatabase))
-                {
-                    ForPath = derivedForPath,
-                    BrowseBody = derivedFlattens ? derivedSelection : null,
-                    GraphIdentityTable = derivedSelection.GraphIdentityColumnCount > 0 ? derivedSelection.GraphIdentityTable : null,
-                };
-
             case ReservedKeyword { Keyword: Keyword.OpenXml }:
                 // OPENXML dispatch: the pre-OPENJSON XML rowset, read over a
                 // document sp_xml_preparedocument put in the session's store.
@@ -2161,6 +2050,152 @@ internal sealed partial class Selection
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
+    }
+
+    /// <summary>
+    /// Parses a FROM source opening with a parenthesis — a derived table or a
+    /// <c>(VALUES …)</c> constructor — with the cursor on the parenthesis.
+    /// </summary>
+    private static FromSource ParseParenthesizedSource(ParserContext context, QueryScope scope)
+    {
+        var afterOpenParen = context.GetNextRequired();
+
+        // Table-value-constructor derived table: `(VALUES …) alias(cols)`.
+        // Rides the same deferred lateral-plan seam as a derived-table
+        // SELECT, so a VALUES source correlates to outer scope the same
+        // way (needed for a comma-FROM VALUES referencing an outer CTE).
+        switch (afterOpenParen)
+        {
+            case ReservedKeyword { Keyword: Keyword.Values }:
+                return ParseValuesDerivedTable(context, context.OuterTypeResolver ?? scope.OuterTypeResolver);
+            case ReservedKeyword { Keyword: Keyword.Insert or Keyword.Update or Keyword.Delete or Keyword.Merge }:
+                throw context.Batch.CurrentStatement.RemoteWrite is not null
+                    ? SimulatedSqlException.RemoteDmlTargetWithOutput()
+                    : NestedDmlRefusal(context, scope);
+        }
+
+        if (afterOpenParen is not (ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' }))
+        {
+            // A CTE prefix inside a derived table is real's Msg 156
+            // rather than the generic Msg 102 — a WITH may only
+            // precede a statement, never a parenthesized query
+            // (probe-confirmed; real follows it with Msg 319 and
+            // Msg 102, of which the simulator raises the first).
+            throw afterOpenParen is ReservedKeyword { Keyword: Keyword.With } withKeyword
+                ? SimulatedSqlException.SyntaxErrorNearKeyword(withKeyword)
+                : SimulatedSqlException.SyntaxErrorNear(context);
+        }
+
+        // Derived tables can correlate to outer scope (SQL Server
+        // allows any FROM derived table to reference outer columns,
+        // not just APPLY). Static parse-time correlation detection
+        // misses runtime-only references (WHERE / ON predicates use
+        // Run, not GetSqlType), so the safe path is to always defer
+        // execution into FromSource.LateralPlan and re-run per outer
+        // resolver invocation. Non-correlated derived tables pay the
+        // same per-Execute cost as before (the inner plan still runs
+        // once per outer Execute call, just routed through
+        // lateralPlan.Execute).
+        //
+        // Pass through the chained outer-type-resolver so the inner
+        // Parse can statically type-resolve any projection / GROUP
+        // BY references that point at outer columns. Both
+        // <see cref="ParserContext.OuterTypeResolver"/> (set inside
+        // the WHERE / GROUP BY / HAVING parse of the enclosing
+        // Selection) and the explicit <paramref name="scope"/> resolver
+        // chain (set when this FROM source is itself nested inside
+        // a subquery) are honored.
+        Selection derivedSelection;
+        var derivedFlattens = context.BrowseFlattenFrom;
+        using (ParserScope.Enter(ref context.BrowseFlatten, derivedFlattens))
+        using (ParserScope.Enter(ref context.ForceSeekDeferrable, true))
+        using (ParserScope.Enter(ref context.CarriesDeferredReads, !derivedFlattens && context.MayCarryDeferredReads))
+        {
+            derivedSelection = ParseNestedQueryRejectingNextValueFor(context,
+                QueryScope.Nested(QueryPosition.Derived, context.OuterTypeResolver ?? scope.OuterTypeResolver));
+        }
+        return DerivedTableSource(context, derivedSelection, derivedFlattens);
+    }
+
+    /// <summary>
+    /// Binds a derived table's parsed body, <paramref name="derivedSelection"/>,
+    /// as a FROM source, with the cursor on the parenthesis closing it: the
+    /// body's columns, then the alias and column list the source takes.
+    /// </summary>
+    private static FromSource DerivedTableSource(ParserContext context, Selection derivedSelection, bool derivedFlattens)
+    {
+        var derivedHidden = derivedSelection.TrailingHiddenColumnCount;
+
+        // Inner SELECT result rows are LOB-inline (projections never
+        // emit LOB pointers because they have no destination Heap),
+        // so build a HeapColumn[] schema from the SqlType[] so the
+        // decoder still strips marker bytes for text/ntext/image
+        // columns; lobStore is null because no chain to follow.
+        var derivedColumns = new HeapColumn[derivedSelection.Schema.Length];
+        for (var ci = 0; ci < derivedColumns.Length; ci++)
+        {
+            derivedColumns[ci] = new HeapColumn(string.Empty, derivedSelection.Schema[ci], maxLength: null, nullable: derivedSelection.ColumnNullability?[ci] ?? true, isHidden: ci >= derivedColumns.Length - derivedHidden, spelledNumeric: derivedSelection.ColumnReportsNumeric is { } derivedNumeric && derivedNumeric[ci])
+            {
+                IsUntypedNull = derivedSelection.ColumnIsUntypedNull is { } derivedNulls && derivedNulls[ci],
+                AliasType = derivedSelection.ColumnAliasTypes?[ci],
+                XmlSchemaCollection = derivedSelection.ColumnXmlTypings?[ci].Collection,
+                XmlDocument = derivedSelection.ColumnXmlTypings?[ci].Document ?? false,
+                IdentitySource = derivedSelection.ColumnIdentitySources?[ci],
+                DerivedMask = derivedSelection.ColumnMasks?[ci],
+            };
+        }
+
+        // A body that never closed its paren is Msg 102 naming what the
+        // parse stopped on — the last token of the batch when the input
+        // simply ended (probed 2026-08-05: `SELECT * FROM (SELECT 1 AS a`
+        // reports `near 'a'`). Checked before the alias, whose own
+        // diagnostic below assumes a closing paren was there to name.
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        // Msg 1033: a derived table is one of the five constructs the
+        // message names, and its ORDER BY needs a companion TOP /
+        // OFFSET / FETCH — the same test the view and CTE bodies run
+        // (probe-confirmed 2026-08-06: `FROM (SELECT v FROM … ORDER BY v) d`
+        // raises, and adding TOP or OFFSET clears it).
+        if (derivedSelection.HasOrderBy && !derivedSelection.HasTopOrOffsetOrFetch)
+            throw SimulatedSqlException.OrderByInvalidInCte();
+
+        // A derived table has no native name, so the alias is
+        // mandatory: real reports Msg 102 near the token where it
+        // belongs, the closing ')' when the batch ends there (probed
+        // 2026-09-26: `FROM (SELECT 1 a);` is near ';'). A FOR PATH
+        // sits ahead of it, as after a table's name.
+        var derivedForPath = ParseOptionalForPath(context);
+        var derivedQualifier = ConsumeOptionalAlias(context)
+            ?? throw SimulatedSqlException.SyntaxErrorNear(context);
+        // A FOR JSON / FOR XML document's column name belongs to the
+        // client result; read as a derived table it is unnamed
+        // (Msg 8155, probed 2026-10-02 against SQL Server 2025).
+        var derivedNames = ResolveDerivedTableColumnNames(context, derivedSelection.IsForClauseDocument ? [""] : derivedSelection.ColumnNames[..^derivedHidden], derivedQualifier);
+        if (derivedHidden > 0)
+            derivedNames = [.. derivedNames, .. Enumerable.Range(derivedNames.Length, derivedHidden).Select(derivedSelection.TrailingHiddenName)];
+        // A derived table takes no TABLESAMPLE; real stops at the
+        // keyword itself (Msg 156, probed 2026-09-24).
+        if (context.Token is ReservedKeyword { Keyword: Keyword.TableSample } tableSample)
+            throw SimulatedSqlException.SyntaxErrorNearKeyword(tableSample);
+
+        return new FromSource(
+            qualifier: derivedQualifier,
+            columnNames: derivedNames,
+            columns: derivedColumns,
+            storedSchema: derivedColumns,
+            storageOrdinals: null,
+            lobStore: null,
+            rows: [],
+            lateralPlan: derivedSelection,
+            lateralIsQueryBody: true,
+            derivedTable: new DerivedTableBinding(derivedSelection, derivedQualifier, derivedNames, context.CurrentDatabase))
+        {
+            ForPath = derivedForPath,
+            BrowseBody = derivedFlattens ? derivedSelection : null,
+            GraphIdentityTable = derivedSelection.GraphIdentityColumnCount > 0 ? derivedSelection.GraphIdentityTable : null,
+        };
     }
 
     /// <summary>

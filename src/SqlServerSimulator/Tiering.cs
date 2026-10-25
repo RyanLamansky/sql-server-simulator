@@ -5,7 +5,8 @@ namespace SqlServerSimulator;
 /// <summary>
 /// The JIT tiering choice for the bookkeeping every statement or row passes
 /// through — lock grants and releases, the seek cache, I/O statistics, the
-/// name memo — written as <c>[MethodImpl(Tiering.OptimizeFirstCall)]</c>.
+/// name memo — and for the parser frame every nested query holds, written as
+/// <c>[MethodImpl(Tiering.OptimizeFirstCall)]</c>.
 /// </summary>
 internal static class Tiering
 {
@@ -21,5 +22,14 @@ internal static class Tiering
     /// delegate in their hot path: what they give up is the profile-guided
     /// recompile, whose main gain is devirtualizing exactly those calls.
     /// </summary>
+    /// <remarks>
+    /// The parser's query-block method takes it for its stack instead: while
+    /// unoptimized it gives every local and temporary a slot of its own, a
+    /// frame several times the optimized one's, and each level of nested
+    /// queries holds that frame, so a cold process met Msg 8631 at a fraction
+    /// of the nesting real accepts. Its optimized compile lands ahead of the
+    /// first query rather than in the background, which a process that runs
+    /// on would have paid for anyway.
+    /// </remarks>
     internal const MethodImplOptions OptimizeFirstCall = MethodImplOptions.AggressiveOptimization;
 }

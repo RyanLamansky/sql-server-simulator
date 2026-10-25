@@ -379,6 +379,11 @@ internal sealed class BitShift : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
+        // A chain of shifts (`a << b << c …`) nests a level per term down its
+        // first operand, so each level probes the stack: past what the thread
+        // holds the chain is Msg 8631, never an overflow (real's own Msg 8631
+        // comes at 3,029 terms, probed 2026-10-25 against SQL Server 2025).
+        Expression.EnsureParseStack();
         var v = this.numArg.Run(runtime);
         if (v.Type is BinarySqlType or VarbinarySqlType)
         {
@@ -416,6 +421,8 @@ internal sealed class BitShift : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
+        // Each level of a chain probes the stack, as Run's does.
+        Expression.EnsureParseStack();
         var type = BitOperandHelpers.RequireOperand(this.numArg, batch, resolveColumnType, this.functionName, acceptsBinary: true);
         ScalarArguments.RequireNumericSlot(this.shiftArg, batch, resolveColumnType, this.functionName, 2, NumericSlot.Integer);
         return type;

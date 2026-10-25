@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
@@ -2016,6 +2017,8 @@ internal sealed partial class Selection
         return ParseQueryBlock(context, scope, aggregates, windows, allowOrderBy);
     }
 
+    // Every level of nested queries holds this frame (see Tiering's remarks).
+    [MethodImpl(Tiering.OptimizeFirstCall)]
     private static Selection ParseQueryBlock(ParserContext context, QueryScope scope, List<AggregateExpression> aggregates, List<WindowExpression> windows, bool allowOrderBy)
     {
         var distinct = false;

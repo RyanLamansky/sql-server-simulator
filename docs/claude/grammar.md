@@ -428,10 +428,22 @@ Probe-confirmed: nesting in a `WHEN` condition counts identically to a `THEN` / 
 ### Msg 8631 backstop
 
 **Msg 8631, Class 17** (`ServerStackLimitReached()`, `Internal error: Server stack limit has been reached. …`) is raised from a runtime stack probe (`Expression.EnsureParseStack`, over `RuntimeHelpers.EnsureSufficientExecutionStack()`) at every recursive spine the parser and the dispatcher walk: `Expression.Parse`, `BooleanExpression.ParseNot`, every `EnterNesting` and `EnterStatementNesting` charge, and every statement dispatch (`DispatchFramedStatement`), which nested blocks, module bodies and dynamic batches all pass through.
-The depths real accepts need more stack than the simulator's frames find on a default thread — a derived-table level takes about 21 KB and a `BEGIN` block about 5 KB (Release, measured 2026-10-24), so a 1 MB thread meets the probe near 45 derived tables — so there the probe answers first with Msg 8631, never a stack overflow; on a large enough stack (the tests use 64 MB) every limit is real's.
 It composes across nested proc / dynamic-SQL batches, since it measures the real stack.
 The projection demand a query hands down to the bodies of its sources probes as well (`Selection.AcceptDemand`), since a chain of CTEs each reading the last hands it down the whole chain, and real reads 850 such CTEs (probed 2026-10-25 against SQL Server 2025).
 The languages a statement carries in its text probe too: an XQuery argument as it parses (`XmlQueryParser.ParseExprSingle` / `ParseUnary`) and again as it evaluates (`XmlQueryExpr.Evaluate`, since evaluating takes more stack per level than parsing did), and a full-text condition's parenthesized groups (`FullTextSearchCondition`); real reads 3,000 nested XQuery parentheses and raises Msg 8631 at 10,000 (probed 2026-10-25 against SQL Server 2025).
+
+Whether a depth real accepts fits is a matter of the thread's stack against each level's frames.
+The engine's own threads — a TDS session's, a statement's coroutine, a queue's activation (`EngineThreads`) — reserve 16 MB, enough for every limit real accepts at once: 1,008 nested `IF`s over 1,013 nested calls need about 8.4 MB in Release and 11.5 MB in Debug while the code still runs unoptimized (measured 2026-10-25), so a TCP client meets real's Msg 191, never Msg 8631.
+An in-process caller brings its own thread, 1 MB by default on Windows.
+Unoptimized, as a cold process runs it, a level takes about 4 KB for a derived table, 4.5 KB for a scalar subquery, 3 KB for a function call, 0.9 KB for a paren and 5 KB for an `IF`, `BEGIN`, `WHILE` or `TRY` (Release, measured 2026-10-25; a Debug build's frames are about twice as large), so such a thread holds real's 100 derived tables and 168 subqueries but meets Msg 8631 short of the other limits; on a large enough stack (the tests use 64 MB) every limit is real's.
+
+A level's frame is that of every method the level passes through, and unoptimized code gives each local and temporary of a method a slot of its own, so a method every level holds keeps to that level's work.
+That is why the FROM-source parse puts each source kind and a derived table's binding in methods of their own (`Selection.ParseSingleFromSourceCore`) — one 1,080-line method holding every kind made a derived-table level 21 KB — and why the built-in dispatch splits by name length (`Expression.ResolveBuiltInCore`), whose one switch made a call level 14 KB.
+The query-block parse, which doesn't split that way, compiles optimized from its first call (`Tiering.OptimizeFirstCall`): about 9 ms more ahead of a fresh process's first query, against 3 ms unoptimized (measured 2026-10-25).
+The attribute reaches no iterator's `MoveNext`, so the statement dispatch's iterators keep their unoptimized frames; a hand-written enumerator in their place would take a block level to about 1 KB, at the price of hand-writing the `finally` blocks their yields sit in.
+
+A flat operator chain nests a level per term down its left side without charging the nesting budget, so whatever reads a whole chain walks that spine iteratively — `TwoSidedExpression`'s and `Concatenate`'s members — or probes the stack as it recurses, as a `<<` / `>>` chain (`BitShift`) does.
+**Divergence:** real raises Msg 8631 for a flat chain past about 3,030 terms — 3,030 `+` or `*` terms run and 3,031 fail, a `<<` chain 3,028, `||` inside `LEN` 3,029, `AT TIME ZONE` or a `hierarchyid` method chain inside a `CAST` 3,026, and an `AND` chain 8,871 (probed 2026-10-25 against SQL Server 2025) — where the simulator runs tens of thousands, and a postfix chain past several thousand overflows a 1 MB thread.
 
 ### A chain of set operations is not nesting
 

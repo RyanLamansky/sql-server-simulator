@@ -15,22 +15,79 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// the result is <c>nvarchar</c> when either operand is a national string, else
 /// <c>varchar</c>.
 /// </summary>
+/// <remarks>
+/// A flat chain <c>a || b || c …</c> nests a level per term down its left
+/// side, so every member that reads the whole chain walks that spine
+/// iteratively rather than recursing once per term, as
+/// <see cref="TwoSidedExpression"/>'s members do.
+/// </remarks>
 internal sealed class Concatenate(Expression left, Expression right) : Expression
 {
+    private readonly Expression left = left;
+    private readonly Expression right = right;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var leftValue = left.Run(runtime);
-        var rightValue = right.Run(runtime);
+        if (this.left is not Concatenate)
+            return Concatenated(this.left.Run(runtime), this.right.Run(runtime));
+        var spine = this.LeftSpine(out var leftmost);
+        var accumulated = leftmost.Run(runtime);
+        for (var i = spine.Count - 1; i >= 0; i--)
+            accumulated = Concatenated(accumulated, spine[i].right.Run(runtime));
+        return accumulated;
+    }
+
+    private static SqlValue Concatenated(SqlValue leftValue, SqlValue rightValue)
+    {
         var resultType = ResolveResultType(leftValue.Type, rightValue.Type);
         return leftValue.IsNull || rightValue.IsNull
             ? SqlValue.Null(resultType)
             : SqlValue.FromString(resultType, StringScalars.ClipToFamilyCap(Stringify(leftValue, resultType) + Stringify(rightValue, resultType), resultType));
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        ResolveResultType(
-            left.GetSqlType(batch, resolveColumnType),
-            right.GetSqlType(batch, resolveColumnType));
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        if (this.left is not Concatenate)
+            return ResolveResultType(this.left.GetSqlType(batch, resolveColumnType), this.right.GetSqlType(batch, resolveColumnType));
+        var spine = this.LeftSpine(out var leftmost);
+        var accumulated = leftmost.GetSqlType(batch, resolveColumnType);
+        for (var i = spine.Count - 1; i >= 0; i--)
+            accumulated = ResolveResultType(accumulated, spine[i].right.GetSqlType(batch, resolveColumnType));
+        return accumulated;
+    }
+
+    /// <summary>
+    /// The concatenations down this node's left side, this one first, and the
+    /// operand at the bottom of them, <paramref name="leftmost"/>.
+    /// </summary>
+    private List<Concatenate> LeftSpine(out Expression leftmost)
+    {
+        var spine = new List<Concatenate>();
+        Expression node = this;
+        while (node is Concatenate concatenate)
+        {
+            spine.Add(concatenate);
+            node = concatenate.left;
+        }
+        leftmost = node;
+        return spine;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="test"/> holds for every operand along this
+    /// node's left spine — each right operand, then the leftmost.
+    /// </summary>
+    private bool EveryOperand(Func<Expression, bool> test)
+    {
+        var node = this;
+        while (test(node.right))
+        {
+            if (node.left is not Concatenate next)
+                return test(node.left);
+            node = next;
+        }
+        return false;
+    }
 
     /// <summary>
     /// Settles the <c>nvarchar</c> / <c>varchar</c> result type (with resolved
@@ -74,16 +131,38 @@ internal sealed class Concatenate(Expression left, Expression right) : Expressio
     };
 
 
-    internal override string DebugDisplay() => $"{left.DebugDisplay()} || {right.DebugDisplay()}";
+    internal override string DebugDisplay()
+    {
+        var spine = this.LeftSpine(out var leftmost);
+        var text = new System.Text.StringBuilder(leftmost.DebugDisplay());
+        for (var i = spine.Count - 1; i >= 0; i--)
+            _ = text.Append(" || ").Append(spine[i].right.DebugDisplay());
+        return text.ToString();
+    }
 
-    internal override void Describe(NodeShape shape) => shape.Child(left).Child(right);
+    internal override void Describe(NodeShape shape) => shape.Child(this.left).Child(this.right);
 
-    internal override bool IsRowIndependent => left.IsRowIndependent && right.IsRowIndependent;
+    internal override bool IsRowIndependent => this.EveryOperand(static operand => operand.IsRowIndependent);
 
     // Concatenation propagates operand nullability, the same rule string `+`
     // takes (and the opposite of arithmetic `+`, which claims nullable).
     internal override bool ResultIsNullable(NullabilityContext context) =>
-        left.ResultIsNullable(context) || right.ResultIsNullable(context);
+        !this.EveryOperand(operand => !operand.ResultIsNullable(context));
 
-    private protected override bool IsStructuralConstant => left.IsWrittenConstant && right.IsWrittenConstant;
+    // A node marked folded answers for its whole subtree, as its
+    // IsWrittenConstant does.
+    private protected override bool IsStructuralConstant
+    {
+        get
+        {
+            var node = this;
+            while (node.right.IsWrittenConstant)
+            {
+                if (node.left is not Concatenate { FoldedOverConstantArguments: false } next)
+                    return node.left.IsWrittenConstant;
+                node = next;
+            }
+            return false;
+        }
+    }
 }
