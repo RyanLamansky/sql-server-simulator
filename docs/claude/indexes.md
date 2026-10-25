@@ -727,7 +727,8 @@ The statement parses mid-batch (DacFx precedes it with a `SELECT TOP 1` probe in
 The named statistic resolves through [`IndexIdentities()`](#index-id-allocation) and the standalone statistics, and the result sets come from its snapshot ([The statistics lifecycle](#the-statistics-lifecycle)): `STAT_HEADER` (one row, every value NULL but the name for a statistic never built), `DENSITY_VECTOR` and `HISTOGRAM`, in that fixed order, all three without a `WITH`.
 The histogram is the probe-confirmed 5 columns: `RANGE_HI_KEY` (typed as the **leading key column's own type** — `int` for an int PK, `datetime2` / `nvarchar` for those keys, reaching real SqlClient through the standard TDS codecs), `RANGE_ROWS` `real`, `EQ_ROWS` `real`, `DISTINCT_RANGE_ROWS` `bigint`, `AVG_RANGE_ROWS` `real`.
 Errors mirror real: unresolvable table → Msg 2501, unknown statistic → Msg 2767, NULL / unparseable argument → Msg 2560, an option it doesn't know → Msg 195 state 4 (all probe-confirmed class/state); one argument → Msg 2583 state 5, and a caller without `SELECT` on the table → Msg 229 then Msg 2557 state 7 naming the table as written, Msg 2528 closing each of these and the Msg 2767 (probed 2026-10-04 against SQL Server 2025).
-Msg 2528 follows the rows unless `NO_INFOMSGS` joins the options.
+A statistic whose leading column the caller reads masked is Msg 2557 alone, whatever the options ask for, since its histogram's steps are the column's values; a masked column past the first, or in the statistic's filter, shows no value and is no bar (probed 2026-10-25 against SQL Server 2025) → [`data-masking.md`](data-masking.md#unmask).
+Msg 2528 follows the rows, the Msg 2767 and the permission refusals unless `NO_INFOMSGS` joins the options (probed 2026-10-25 for the refusals).
 `STATS_STREAM` (the serialized histogram blob SMO's `Statistic.Stream` reads) raises `NotSupportedException` — see [`backlog.md`](backlog.md).
 
 ## Index DMVs

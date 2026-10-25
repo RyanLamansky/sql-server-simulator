@@ -240,7 +240,52 @@ public sealed class DbccShowStatisticsTests
         var denied = sim.AssertSqlError("execute as user = 'lo'; dbcc show_statistics('dbo.t', ix_b) with histogram", 229);
         CollectionAssert.AreEqual(new[] { 229, 2557, 2528 }, denied.Errors.Select(static e => e.Number).ToArray());
         AreEqual("User 'lo' does not have permission to run DBCC SHOW_STATISTICS for object 'dbo.t'.", denied.Errors[1].Message);
+        CollectionAssert.AreEqual(new[] { 229, 2557 }, sim.AssertSqlError("execute as user = 'lo'; dbcc show_statistics('dbo.t', ix_b) with histogram, no_infomsgs", 229).Errors.Select(static e => e.Number).ToArray());
     }
+
+    private static Simulation MaskedSalary()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            """
+            create table m (id int primary key, salary int masked with (function = 'default()'), other int);
+            insert m values (1, 424242, 7), (2, 515151, 8);
+            create statistics st_sal on m (salary);
+            create statistics st_so on m (salary, other);
+            create statistics st_os on m (other, salary);
+            create statistics st_f on m (other) where salary > 0;
+            create user pu without login;
+            create user pc without login;
+            grant select on m to pu, pc;
+            grant unmask on m (salary) to pc
+            """);
+        return sim;
+    }
+
+    /// <summary>
+    /// A statistic leading on a column the principal reads masked is refused
+    /// whatever part of it is asked for — Msg 2557 alone, without Msg 229 —
+    /// since its histogram's steps are the column's values (probed 2026-10-25
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("st_sal", "")]
+    [DataRow("st_sal", " with stat_header")]
+    [DataRow("st_sal", " with density_vector")]
+    [DataRow("st_so", " with histogram")]
+    public void LeadingColumnMasked_Refused(string statistic, string options)
+    {
+        var ex = MaskedSalary().AssertSqlError($"execute as user = 'pu'; dbcc show_statistics('m', {statistic}){options}", 2557);
+        CollectionAssert.AreEqual(new[] { 2557, 2528 }, ex.Errors.Select(static e => e.Number).ToArray());
+        AreEqual("User 'pu' does not have permission to run DBCC SHOW_STATISTICS for object 'm'.", ex.Errors[0].Message);
+    }
+
+    [TestMethod]
+    [DataRow("pu", "st_os", 7)]
+    [DataRow("pu", "st_f", 7)]
+    [DataRow("pc", "st_sal", 424242)]
+    public void MaskedColumnNotLeading_OrUnmasked_Shows(string user, string statistic, int firstStep)
+        => AreEqual(firstStep, MaskedSalary().ExecuteScalar($"execute as user = '{user}'; dbcc show_statistics('m', {statistic}) with histogram"));
 
     private const string Indexed = """
         create table t (id int not null constraint pk_t primary key, a int);

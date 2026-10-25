@@ -54,6 +54,7 @@ The ordinary checker answers: a column DENY masks that column under a database-w
 An output column reading several masked columns is unmasked only when every one is.
 `UNMASK` is checked on the table a view or module reads, and ownership chaining doesn't unmask: a `dbo` procedure or view read by a restricted principal returns masked values.
 A `#temp` table's creator reads it unmasked; a table variable masks for its reader and is unmasked by a database-scope grant (an assumption — a table variable has no object grant to probe).
+`DBCC SHOW_STATISTICS` of a statistic leading on a column the caller reads masked is refused rather than masked (Msg 2557) → [`indexes.md`](indexes.md#dbcc-show_statisticstable-stat).
 
 ## What a principal without UNMASK reads
 

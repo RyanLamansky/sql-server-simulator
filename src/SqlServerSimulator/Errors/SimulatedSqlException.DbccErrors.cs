@@ -120,11 +120,16 @@ partial class SimulatedSqlException
     /// then Msg 2557 class 16 state 7 naming the table as written (probed
     /// 2026-10-04 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException ShowStatisticsPermissionDenied(string userName, string tableName, string databaseName, string schemaName, string writtenName)
-    {
-        var message = $"User '{userName}' does not have permission to run DBCC SHOW_STATISTICS for object '{writtenName}'.";
-        return FollowedBy(PermissionDenied("SELECT", tableName, databaseName, schemaName), new(message, 2557, 16, 7));
-    }
+    internal static SimulatedSqlException ShowStatisticsPermissionDenied(string userName, string tableName, string databaseName, string schemaName, string writtenName) =>
+        FollowedBy(PermissionDenied("SELECT", tableName, databaseName, schemaName), ShowStatisticsOfMaskedColumnDenied(userName, writtenName));
+
+    /// <summary>
+    /// <c>DBCC SHOW_STATISTICS</c> of a statistic leading on a column the
+    /// principal reads masked: Msg 2557 class 16 state 7 alone, naming the
+    /// table as written (probed 2026-10-25 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ShowStatisticsOfMaskedColumnDenied(string userName, string writtenName) =>
+        new($"User '{userName}' does not have permission to run DBCC SHOW_STATISTICS for object '{writtenName}'.", 2557, 16, 7);
 
     /// <summary>Msg 129 state 2: a <c>DBCC DBREINDEX</c> fill factor outside 0 .. 100, at run time (probed 2026-10-04 against SQL Server 2025).</summary>
     internal static SimulatedSqlException DbccFillFactorNotValid(long value) =>

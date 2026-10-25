@@ -233,13 +233,16 @@ partial class Simulation
         if (!batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.CannotFindTableOrObject(tableText);
         // Reading statistics takes SELECT on the table: Msg 229 then Msg 2557
-        // without it (probed 2026-10-04 against SQL Server 2025).
+        // without it (probed 2026-10-04 against SQL Server 2025), and
+        // NO_INFOMSGS drops the completion message after them (probed
+        // 2026-10-25).
         var database = batch.DatabaseFor(table);
         if (!table.IsTableVariable && table.Name is not ['#', ..]
             && !PermissionEnforcement.HoldsPermission(batch, database, Permission.Select, PermissionChecker.ClassObject, table.ObjectId, table.SchemaId))
         {
-            throw SimulatedSqlException.FollowedByDbccCompleted(SimulatedSqlException.ShowStatisticsPermissionDenied(
-                batch.Connection.Security.Effective.DatabasePrincipalName, table.Name, database.Name, SchemaNameOf(database, table), tableText), batch.Connection.Language);
+            var denied = SimulatedSqlException.ShowStatisticsPermissionDenied(
+                batch.Connection.Security.Effective.DatabasePrincipalName, table.Name, database.Name, SchemaNameOf(database, table), tableText);
+            throw informational ? SimulatedSqlException.FollowedByDbccCompleted(denied, batch.Connection.Language) : denied;
         }
 
         var collation = batch.CurrentDatabase.Collation;
@@ -256,6 +259,16 @@ partial class Simulation
         {
             var missing = SimulatedSqlException.CouldNotLocateStatistics(statName.Leaf);
             throw informational ? SimulatedSqlException.FollowedByDbccCompleted(missing, batch.Connection.Language) : missing;
+        }
+        // A statistic leading on a column the principal reads masked is
+        // refused whatever part of it is asked for, since its histogram's
+        // steps are the column's values; a masked column past the first, or
+        // in the filter, shows no value and is no bar (probed 2026-10-25
+        // against SQL Server 2025).
+        if (DataMask.ForTableColumn(table, statistic.LeadingOrdinal) is { } leadingMask && DataMasking.Applies(batch, leadingMask))
+        {
+            var masked = SimulatedSqlException.ShowStatisticsOfMaskedColumnDenied(batch.Connection.Security.Effective.DatabasePrincipalName, tableText);
+            throw informational ? SimulatedSqlException.FollowedByDbccCompleted(masked, batch.Connection.Language) : masked;
         }
         if (statsStream)
             throw new NotSupportedException("DBCC SHOW_STATISTICS WITH STATS_STREAM (the serialized statistic) isn't modeled.");
