@@ -531,7 +531,7 @@ internal sealed partial class Database
     /// two databases may share one with at most one of them enabled, and
     /// <c>NEW_BROKER</c> draws another (probed 2026-10-16 against SQL Server 2025).
     /// </summary>
-    public Guid ServiceBrokerGuid = Guid.NewGuid();
+    public Guid ServiceBrokerGuid = DrawGuid();
 
     private DatabaseBroker? serviceBroker;
 
@@ -651,14 +651,31 @@ internal sealed partial class Database
     /// <c>sys.database_recovery_status.database_guid</c>: this database's
     /// identity, drawn when it's created.
     /// </summary>
-    public Guid DatabaseGuid = Guid.NewGuid();
+    public Guid DatabaseGuid = DrawGuid();
 
     /// <summary>
     /// <c>sys.database_recovery_status</c>'s <c>family_guid</c> and
     /// <c>recovery_fork_guid</c>, one value for a database that has never been
     /// restored.
     /// </summary>
-    public Guid RecoveryForkGuid = Guid.NewGuid();
+    public Guid RecoveryForkGuid = DrawGuid();
+
+    /// <summary>
+    /// A random version-4 GUID from the process's shared generator, for a
+    /// database's identities as it is created: <see cref="Guid.NewGuid"/>
+    /// reads the operating system's secure source for each, which was the
+    /// bulk of a new database's construction, and none of them is a secret.
+    /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "CA5394:Do not use insecure randomness", Justification = "A database's GUIDs identify it; none is a secret.")]
+    private static Guid DrawGuid()
+    {
+        Span<byte> bytes = stackalloc byte[16];
+        Random.Shared.NextBytes(bytes);
+        // The version and RFC 4122 variant bits Guid.NewGuid sets.
+        bytes[7] = (byte)((bytes[7] & 0x0F) | 0x40);
+        bytes[8] = (byte)((bytes[8] & 0x3F) | 0x80);
+        return new Guid(bytes);
+    }
 
     /// <summary>
     /// The differential base and log chain this database's backups have left

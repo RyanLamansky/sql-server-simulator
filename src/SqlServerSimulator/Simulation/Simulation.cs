@@ -30,7 +30,6 @@ public sealed partial class Simulation
     public Simulation()
     {
         using var culture = CultureScope.Engine();
-        RandomNumberGenerator.Fill(this.newSequentialIdAnchor);
         this.LobReclamation = new(this);
         this.ErrorLog = new(this.SeedDate);
         // The lock manager sweeps abandoned sessions before every acquisition,
@@ -1050,9 +1049,20 @@ public sealed partial class Simulation
     /// Random 12-byte tail (raw bytes [4..15] of the produced GUID) for
     /// <see cref="GenerateNewSequentialId"/>. Filled once at construction —
     /// stands in for SQL Server's "MAC address + boot timestamp" anchor that
-    /// distinguishes one server's sequence from another's.
+    /// distinguishes one server's sequence from another's, a value no secret
+    /// rests on, so it is drawn from the process's shared generator rather
+    /// than the cryptographic one, which every new simulation's construction
+    /// paid for.
     /// </summary>
-    private readonly byte[] newSequentialIdAnchor = new byte[12];
+    private readonly byte[] newSequentialIdAnchor = DrawSequentialIdAnchor();
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "CA5394:Do not use insecure randomness", Justification = "The anchor tells one simulation's sequence from another's; it is no secret.")]
+    private static byte[] DrawSequentialIdAnchor()
+    {
+        var anchor = new byte[12];
+        Random.Shared.NextBytes(anchor);
+        return anchor;
+    }
 
     /// <summary>
     /// Per-Simulation monotonic counter for session ids. Each
