@@ -142,10 +142,16 @@ internal sealed class Coalesce : Expression
         {
             value = this.Arguments[i].Run(runtime);
             if (!value.IsNull)
-                return this.cachedResultType is { } target && value.Type != target ? Cast.CoerceArm(value, target, runtime.Batch) : value;
+                return this.ArmTarget(value.Type) is { } target ? Cast.CoerceArm(value, target, runtime.Batch) : value;
         }
         return value; // all NULL — return the last (typed-NULL) result
     }
+
+    /// <summary>
+    /// The type the first non-NULL value converts to when it is of
+    /// <paramref name="type"/>, or null when it is returned as it is.
+    /// </summary>
+    internal SqlType? ArmTarget(SqlType type) => this.cachedResultType is { } target && type != target ? target : null;
 
     // Untyped-NULL arguments yield to the typed arguments (so
     // `COALESCE(NULL, 'z')` is varchar, not the int that a bare NULL's

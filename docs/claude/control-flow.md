@@ -10,9 +10,16 @@ The subquery's case once left it undeclared, so a batch compiled while another s
 Variable references resolve at runtime via a captured `VariableSlot` — required because mutations between statements have to be visible to subsequent reads.
 Assignment coercion routes through `Cast.ApplyCoercion` so the slot's declared type is honored: `SET @v(varchar(3)) = 'hello'` truncates to `'hel'`; `SET @v(int) = 'abc'` raises Msg 245.
 
+**A string variable grows in place.**
+An assignment of a `varchar(max)` / `nvarchar(max)` variable followed by more text — `@v + a`, `@v += a`, `COALESCE(@v + ',', '') + a` — appends to the variable's text without copying it (`StringAppend`), where real copies the whole string at each step, more cheaply than a copy costs here: over 32,000 rows `SELECT @v = @v + ',' + s` takes 86 ms on real, 0.9 s here copying the string and 14 ms appending to it (2026-10-25, Release).
+The text joins on when the variable is read, in the one copy a read costs, so a loop reading the variable at each step stays quadratic, as real's is.
+
 **SELECT-assign quirks**:
 - All-or-nothing: `SELECT @v = 1, 2` (mixing assign and projection) → Msg 141.
 - Only a statement's own query assigns, and not across a set operation's branches: everywhere else an assignment is refused as the batch compiles (`AssignmentPlacementTests`), a set operation pair by pair of its branches (`Selection.RefuseAssignmentInSetOperation`).
+- Divergence, plan-dependent and not chased: a `SELECT DISTINCT` that assigns.
+  Real computes every row's values first, reading the variables as the statement found them, then assigns the distinct rows in the order its distinct produces them, ascending under a sort, so `SELECT DISTINCT @v = @v + x` over 5, 3, 5, 1 is three rows ending at 5 there and four ending at 14 here, where each row assigns as it is projected and the distinct then compares the values assigned.
+  Real assigns row by row too once its optimizer proves the rows unique and drops the distinct, and it accepts an `ORDER BY` naming an assigned value, which is Msg 145 here (probed 2026-10-25 against SQL Server 2025).
 - Empty result-set keeps prior value (no rows iterate, slot unchanged); `SET @v = (SELECT no rows)` differs — assigns NULL.
 - Multi-row last-row-wins post-ORDER-BY (per-row evaluation, last write wins).
 - The dispatch drains rows for side-effects and yields a `SimulatedNonQuery` rather than a result set (matches SQL Server's no-result-set-envelope behavior for SELECT-assign).

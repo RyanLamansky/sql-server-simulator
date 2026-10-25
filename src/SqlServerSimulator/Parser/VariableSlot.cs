@@ -1,4 +1,5 @@
 using System.Data.Common;
+using System.Text;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser;
@@ -36,9 +37,77 @@ internal sealed class VariableSlot(SqlType declaredType, int? declaredMaxLength,
     /// </summary>
     public readonly int? DeclaredMaxLength = declaredMaxLength;
 
-    public SqlValue Value = declaredType is SystemNameSqlType systemName
+    private SqlValue value = declaredType is SystemNameSqlType systemName
         ? AsSysnameVariable(SystemNameSqlType.Get(systemName.Collation, Coercibility.CoercibleDefault), value)
         : value;
+
+    /// <summary>
+    /// The text <see cref="Append"/> added past <see cref="value"/>'s string,
+    /// which a read joins on; null when there is none.
+    /// </summary>
+    private StringBuilder? appended;
+
+    /// <summary>
+    /// The variable's value. A string appends grew is joined as it is read, in
+    /// one copy of the whole, the copy a step that read it as it grew made
+    /// before appends kept the text.
+    /// </summary>
+    public SqlValue Value
+    {
+        get
+        {
+            if (Volatile.Read(ref this.appended) is { } tail)
+                this.Join(tail);
+            return this.value;
+        }
+        set
+        {
+            this.value = value;
+            this.appended = null;
+        }
+    }
+
+    /// <summary>
+    /// Joins <paramref name="tail"/> onto the string value under its lock: a
+    /// parallel grouped accumulation reads a variable on several threads at
+    /// once (<see cref="Expressions.VariableReference"/> is
+    /// <see cref="Expression.ParallelSafe"/>), and the first to read it joins
+    /// while the rest wait and find it joined.
+    /// </summary>
+    private void Join(StringBuilder tail)
+    {
+        lock (tail)
+        {
+            if (this.appended != tail)
+                return;
+            var head = this.value.AsString;
+            this.value = SqlValue.FromString(this.value.Type, string.Create(head.Length + tail.Length, (head, tail), static (joined, parts) =>
+            {
+                parts.head.CopyTo(joined);
+                parts.tail.CopyTo(0, joined[parts.head.Length..], parts.tail.Length);
+            }));
+            Volatile.Write(ref this.appended, null);
+        }
+    }
+
+    /// <summary>
+    /// Whether the value is a non-NULL one of <paramref name="type"/>, answered
+    /// without joining the text appends added.
+    /// </summary>
+    public bool HoldsNonNull(SqlType type) => !this.value.IsNull && this.value.Type.Equals(type);
+
+    /// <summary>
+    /// Appends <paramref name="suffixes"/> to the value — a non-NULL string, as
+    /// <see cref="HoldsNonNull"/> establishes — without copying what it holds,
+    /// so a value built up a piece at a time grows in linear time where each
+    /// step copied it whole (see <c>StringAppend</c>).
+    /// </summary>
+    public void Append(List<string> suffixes)
+    {
+        var tail = this.appended ??= new StringBuilder();
+        foreach (var suffix in suffixes)
+            _ = tail.Append(suffix);
+    }
 
     public readonly DbParameter? Parameter = parameter;
 

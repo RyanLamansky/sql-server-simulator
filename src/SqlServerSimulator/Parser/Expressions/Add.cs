@@ -89,16 +89,11 @@ internal sealed class Add : TwoSidedExpression
         if (left.Type == SqlType.Text || left.Type == SqlType.NText || right.Type == SqlType.Text || right.Type == SqlType.NText)
             throw SimulatedSqlException.IncompatibleDataTypesInOperator(left.Type, right.Type, "add");
 
-        var resultType = ResolveResultType(left.Type, right.Type);
-
-        // Collation resolution for both-string pairs: pick the higher-rank
-        // operand's collation, and on same-rank conflict either carry the
-        // conflict outward or report it here — UnresolvedCollation.Settle holds
-        // the whole rule. The string + typed-NULL fall-through doesn't reach
-        // this branch because the NULL-side type is non-string per
-        // IsStringConcatPair.
-        if (left.Type.Category == SqlTypeCategory.String && right.Type.Category == SqlTypeCategory.String)
-            resultType = UnresolvedCollation.Settle(resultType, left.Type, right.Type, "add");
+        // The string + typed-NULL fall-through settles no collation, the
+        // NULL-side type being non-string per IsStringConcatPair.
+        var resultType = left.Type.Category == SqlTypeCategory.String && right.Type.Category == SqlTypeCategory.String
+            ? StringPairType(left.Type, right.Type)
+            : ResolveResultType(left.Type, right.Type);
 
         // Only one NULL reads as empty: two NULLs still concatenate to NULL.
         // A bounded result past the family maximum is clipped to it.
@@ -108,6 +103,15 @@ internal sealed class Add : TwoSidedExpression
             ? SqlValue.Null(resultType)
             : SqlValue.FromString(resultType, StringScalars.ClipToFamilyCap(left.AsString + right.AsString, resultType));
     }
+
+    /// <summary>
+    /// The type a <c>+</c> of two strings takes: <see cref="SqlType.PromoteForArithmetic"/>'s,
+    /// in the higher-rank operand's collation, a same-rank conflict carried
+    /// outward or reported here — <see cref="UnresolvedCollation.Settle"/>
+    /// holds the whole rule. <see cref="StringAppend"/> types its appends by it.
+    /// </summary>
+    internal static SqlType StringPairType(SqlType left, SqlType right) =>
+        UnresolvedCollation.Settle(SqlType.PromoteForArithmetic(left, right, '+'), left, right, "add");
 
     /// <summary>
     /// Settles on the result <see cref="SqlType"/> for a string-concat <c>+</c>.

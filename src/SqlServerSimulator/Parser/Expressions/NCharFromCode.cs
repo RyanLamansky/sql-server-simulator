@@ -20,6 +20,8 @@ internal sealed class NCharFromCode(ParserContext context) : Expression
 {
     private readonly Expression code = Parse(context);
 
+    internal override bool ParallelSafe => this.code.ParallelSafe;
+
     private static NCharSqlType NChar1For(BatchContext batch) =>
         NCharSqlType.Get(1, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
 

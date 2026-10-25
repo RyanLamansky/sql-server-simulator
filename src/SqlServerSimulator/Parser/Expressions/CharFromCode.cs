@@ -20,6 +20,8 @@ internal sealed class CharFromCode(ParserContext context) : Expression
 {
     private readonly Expression code = Parse(context);
 
+    internal override bool ParallelSafe => this.code.ParallelSafe;
+
     private static CharSqlType Char1For(BatchContext batch) =>
         CharSqlType.Get(1, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
 

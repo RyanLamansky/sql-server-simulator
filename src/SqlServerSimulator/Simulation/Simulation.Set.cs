@@ -1071,7 +1071,10 @@ partial class Simulation
         var assignedType = assignedExpr.GetSqlType(context.Batch, NoColumnTypeResolver);
         UnresolvedCollation.RequireAssignable(assignedType);
         AssignmentRules.RequireAssignable(assignedExpr, assignedType, slot.DeclaredType);
-        var rhsValue = assignedExpr.Run(new RuntimeContext(NoColumnResolver, context.Batch));
+        var runtime = new RuntimeContext(NoColumnResolver, context.Batch);
+        if (StringAppend.Of(variableToken.Value, slot, assignedExpr) is { } append && append.TryAppend(slot, runtime))
+            return true;
+        var rhsValue = assignedExpr.Run(runtime);
         Cast.RejectRoundingUnderRoundAbort(rhsValue, slot.DeclaredType, context.Batch);
         slot.Assign(DataMasking.ForAssignment(context.Batch, assignedExpr, rhsValue, SqlValue.NameVariantBase(rhsValue, Cast.ApplyCoercion(rhsValue, slot.DeclaredType, slot.DeclaredMaxLength), assignedExpr.ResultReportsNumeric), slot.DeclaredType));
         return true;

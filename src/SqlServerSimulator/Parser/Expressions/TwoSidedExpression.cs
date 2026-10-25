@@ -17,6 +17,24 @@ internal abstract class TwoSidedExpression : Expression
 
     internal sealed override int ChainDepth => this.chainDepth;
 
+    /// <summary>
+    /// The leftmost operand of the chain of <see cref="Add"/>s this one heads,
+    /// each one's right operand entered in <paramref name="appended"/> in the
+    /// order the chain evaluates them (see <see cref="StringAppend"/>).
+    /// </summary>
+    internal Expression UnchainAdds(List<Expression> appended)
+    {
+        var start = appended.Count;
+        Expression node = this;
+        while (node is Add add)
+        {
+            appended.Add(add.right);
+            node = add.left;
+        }
+        appended.Reverse(start, appended.Count - start);
+        return node;
+    }
+
     // Arithmetic result reports the numeric type name when ANY contributing
     // operand is numeric-named (integer / decimal-named-column operands
     // don't force it). Callers gate on the result being decimal, so a

@@ -32,6 +32,8 @@ internal sealed class Replicate : Expression
         this.constantCount = StringScalars.FoldCount(this.count, context.Batch);
     }
 
+    internal override bool ParallelSafe => this.input.ParallelSafe && this.count.ParallelSafe;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         // Non-string inputs implicit-coerce to varchar (probe-confirmed

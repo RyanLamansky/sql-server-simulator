@@ -33,6 +33,8 @@ internal sealed class QuoteName : Expression
             this.delimiter = Parse(context.MoveNextRequiredReturnSelf());
     }
 
+    internal override bool ParallelSafe => this.name.ParallelSafe && this.delimiter?.ParallelSafe != false;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var nameValue = this.name.Run(runtime);

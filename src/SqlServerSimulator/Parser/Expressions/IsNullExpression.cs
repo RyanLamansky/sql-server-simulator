@@ -18,13 +18,13 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </summary>
 internal sealed class IsNullExpression : Expression
 {
-    private readonly Expression check;
+    internal readonly Expression Check;
     private readonly Expression replacement;
     private SqlType? cachedResultType;
 
     public IsNullExpression(ParserContext context)
     {
-        this.check = Parse(context);
+        this.Check = Parse(context);
         if (context.Token is not Tokens.Operator { Character: ',' })
             throw SimulatedSqlException.FunctionRequiresNArguments("isnull", 2);
         this.replacement = Parse(context.MoveNextRequiredReturnSelf());
@@ -38,17 +38,17 @@ internal sealed class IsNullExpression : Expression
         throw SimulatedSqlException.FunctionRequiresNArguments("isnull", 2);
     }
 
-    internal override bool ParallelSafe => this.check.ParallelSafe && this.replacement.ParallelSafe;
+    internal override bool ParallelSafe => this.Check.ParallelSafe && this.replacement.ParallelSafe;
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var primary = this.check.Run(runtime);
+        var primary = this.Check.Run(runtime);
         if (!primary.IsNull)
             return primary;
         var fallback = this.replacement.Run(runtime);
         // A FROM-less SELECT runs its projection before typing it, so the
         // cached type may not be set yet; the check's own NULL carries it.
-        var target = this.cachedResultType ?? (IsUntypedNullLiteral(this.check) ? null : primary.Type);
+        var target = this.cachedResultType ?? (IsUntypedNullLiteral(this.Check) ? null : primary.Type);
         return target is not null && fallback.Type != target ? Cast.CoerceToDeclared(fallback, target) : fallback;
     }
 
@@ -59,31 +59,31 @@ internal sealed class IsNullExpression : Expression
     // (`ISNULL(1, 2.5)` stays int).
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        if (IsUntypedNullLiteral(this.check))
+        if (IsUntypedNullLiteral(this.Check))
             return this.cachedResultType = this.replacement.GetSqlType(batch, resolveColumnType);
-        var t = this.check.GetSqlType(batch, resolveColumnType);
+        var t = this.Check.GetSqlType(batch, resolveColumnType);
         // The replacement converts to the check's type the way an assignment
         // does, so it's the one-way assignment rule that refuses a pair rather
         // than the unification CASE and COALESCE apply (probed 2026-09-24:
         // ISNULL(<decimal>, <datetime>) is Msg 257 where COALESCE answers).
         var replacementType = this.replacement.GetSqlType(batch, resolveColumnType);
-        _ = UndeclaredParameterDeduction.NoteExact(this.check, replacementType);
-        AssignmentRules.RequireAssignable(this.replacement, replacementType, t, this.check);
-        this.namingArm = FirstDecimalArm([this.check, this.replacement], [t, replacementType]);
+        _ = UndeclaredParameterDeduction.NoteExact(this.Check, replacementType);
+        AssignmentRules.RequireAssignable(this.replacement, replacementType, t, this.Check);
+        this.namingArm = FirstDecimalArm([this.Check, this.replacement], [t, replacementType]);
         return this.cachedResultType = t;
     }
 
-    internal override string DebugDisplay() => $"ISNULL({this.check.DebugDisplay()}, {this.replacement.DebugDisplay()})";
+    internal override string DebugDisplay() => $"ISNULL({this.Check.DebugDisplay()}, {this.replacement.DebugDisplay()})";
 
-    internal override void Describe(NodeShape shape) => shape.Child(this.check).Child(this.replacement);
+    internal override void Describe(NodeShape shape) => shape.Child(this.Check).Child(this.replacement);
 
     // ISNULL(x, y) is non-null iff EITHER operand is non-null: a non-null x
     // short-circuits, otherwise the result is the (possibly-non-null) y. Over
     // an xml or json check real reports the result nullable whatever the
     // replacement (probed 2026-10-02 against SQL Server 2025).
     internal override bool ResultIsNullable(NullabilityContext context) =>
-        this.check.ResultIsNullable(context)
-        && (this.replacement.ResultIsNullable(context) || context.TypeOf(this.check) is XmlSqlType or JsonSqlType);
+        this.Check.ResultIsNullable(context)
+        && (this.replacement.ResultIsNullable(context) || context.TypeOf(this.Check) is XmlSqlType or JsonSqlType);
 
     private Expression? namingArm;
 
@@ -91,9 +91,9 @@ internal sealed class IsNullExpression : Expression
     internal override bool ResultReportsNumeric => this.namingArm?.ResultReportsNumeric ?? this.replacement.ResultReportsNumeric;
 
     // The result is the checked operand's type, alias and all.
-    internal override Schemas.AliasType? ResultAliasType => this.check.ResultAliasType;
+    internal override Schemas.AliasType? ResultAliasType => this.Check.ResultAliasType;
 
     // ISNULL takes its first argument's typing, an untyped one included
     // (probed 2026-10-15 against SQL Server 2025).
-    internal override XmlTyping ResultXmlTyping => this.check.ResultXmlTyping;
+    internal override XmlTyping ResultXmlTyping => this.Check.ResultXmlTyping;
 }

@@ -21,7 +21,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// — each row's <c>Run</c> overwrites the slot, so the final value is the
 /// last iterated row's RHS.
 /// </remarks>
-internal sealed class AssignmentExpression(string variableName, VariableSlot slot, Expression source) : Expression
+internal sealed class AssignmentExpression(string variableName, VariableSlot slot, Expression source, bool valueRead = false) : Expression
 {
     /// <summary>The variable's name as written, which the executing batch's <see cref="BatchContext.GetVariableSlot"/> finds it by.</summary>
     public readonly string VariableName = variableName;
@@ -39,8 +39,20 @@ internal sealed class AssignmentExpression(string variableName, VariableSlot slo
     /// </summary>
     internal DataMask? Mask;
 
+    /// <summary>
+    /// The value as an append to the variable's text in place, when it is one
+    /// and nothing reads what <see cref="Run"/> returns — which a
+    /// <c>SELECT DISTINCT</c> compares, its assignments built with
+    /// <c>valueRead</c>.
+    /// </summary>
+    private readonly StringAppend? append = valueRead ? null : StringAppend.Of(variableName, slot, source);
+
     public override SqlValue Run(RuntimeContext runtime)
     {
+        // An append returns a NULL in the value's stead rather than build the
+        // string it grew, which no reader of the rows asks for.
+        if (this.append is { } append && append.TryAppend(runtime.Batch.GetVariableSlot(this.VariableName), runtime))
+            return SqlValue.Null(this.DeclaredType);
         var value = this.Source.Run(runtime);
         Cast.RejectRoundingUnderRoundAbort(value, this.DeclaredType, runtime.Batch);
         var coerced = SqlValue.NameVariantBase(value, Cast.ApplyCoercion(value, this.DeclaredType, this.declaredMaxLength), this.Source.ResultReportsNumeric);

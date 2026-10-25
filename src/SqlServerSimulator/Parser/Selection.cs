@@ -2489,7 +2489,7 @@ internal sealed partial class Selection
                             // batch (probed 2026-10-04 against SQL Server 2025).
                             if (!context.Batch.IsSkipping && assignedSequences.Count != assignedSequences.Distinct().Count())
                                 throw SimulatedSqlException.NextValueForTwiceInAssignment();
-                            expressions.Add(new AssignmentExpression(atPrefixed.Value, slot, rhs));
+                            expressions.Add(new AssignmentExpression(atPrefixed.Value, slot, rhs, valueRead: distinct));
                         }
                         // The compound forms, `@v += expr` and its siblings, read
                         // the variable as each row assigns it, so a SELECT over a
@@ -2505,7 +2505,7 @@ internal sealed partial class Selection
                             if (slot is null)
                                 throw UndeclaredAssignmentTarget(context, atPrefixed.Value);
                             expressions.Add(new AssignmentExpression(atPrefixed.Value, slot,
-                                TwoSidedExpression.FromCompoundOp(compound.Character, new VariableReference(atPrefixed, context), rhs, context)));
+                                TwoSidedExpression.FromCompoundOp(compound.Character, new VariableReference(atPrefixed, context), rhs, context), valueRead: distinct));
                         }
                         else
                         {

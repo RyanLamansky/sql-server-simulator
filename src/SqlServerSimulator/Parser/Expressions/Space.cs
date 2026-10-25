@@ -26,6 +26,8 @@ internal sealed class Space : Expression
         this.constantCount = StringScalars.FoldCount(this.count, context.Batch);
     }
 
+    internal override bool ParallelSafe => this.count.ParallelSafe;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var resultType = ResolveResultType(runtime.Batch);
