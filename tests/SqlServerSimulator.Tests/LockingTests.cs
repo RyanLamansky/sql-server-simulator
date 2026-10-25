@@ -437,20 +437,45 @@ public sealed class LockingTests
         _ = await otherTask;
     }
 
+    /// <summary>
+    /// SELECT WITH (XLOCK) takes row-X tx-scoped, which a READ COMMITTED
+    /// reader of the row passes while the holder's transaction has written
+    /// nothing, and waits on once it has (probed 2026-10-25 against SQL
+    /// Server 2025).
+    /// </summary>
     [TestMethod]
-    public async Task XLockHint_RowX_BlocksConcurrentRead()
+    public async Task XLockHint_RowX_BlocksAReadOnceItsTransactionWrites()
     {
-        // XLOCK: SELECT WITH (XLOCK) takes row-X tx-scoped. A concurrent
-        // reader of the same row blocks (the X-X conflict via probe-and-
-        // wait under RC) until commit.
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create table t (id int); insert t values (1)");
+        _ = sim.ExecuteNonQuery("create table t (id int primary key, v int not null); insert t values (1, 1), (2, 2), (3, 3)");
         using var holder = sim.CreateOpenConnection();
         using var reader = sim.CreateOpenConnection();
 
-        _ = holder.CreateCommand("begin tran; select * from t with (xlock)").ExecuteScalar();
+        _ = holder.CreateCommand("begin tran; select id from t with (xlock) where id = 1").ExecuteScalar();
+        AreEqual(1, reader.CreateCommand("select v from t where id = 1").ExecuteScalar());
 
-        var readTask = await sim.StartBlocked(reader, "select count(*) from t", TestContext.CancellationToken);
+        _ = holder.CreateCommand("insert t values (5, 5)").ExecuteNonQuery();
+        var readTask = await sim.StartBlocked(reader, "select v from t where id = 1", TestContext.CancellationToken);
+
+        _ = holder.CreateCommand("commit tran").ExecuteNonQuery();
+        AreEqual(1, (await readTask).Single());
+    }
+
+    /// <summary>
+    /// A REPEATABLE READ reader takes its row S whatever the holder's
+    /// transaction has done, so it waits on a row locked WITH (XLOCK) and left
+    /// as it was (probed 2026-10-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public async Task XLockHint_RowX_BlocksARepeatableRead()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int primary key, v int not null); insert t values (1, 1), (2, 2), (3, 3)");
+        using var holder = sim.CreateOpenConnection();
+        using var reader = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; select id from t with (xlock) where id = 1").ExecuteScalar();
+        var readTask = await sim.StartBlocked(reader, "set transaction isolation level repeatable read; select v from t where id = 1", TestContext.CancellationToken);
 
         _ = holder.CreateCommand("commit tran").ExecuteNonQuery();
         AreEqual(1, (await readTask).Single());

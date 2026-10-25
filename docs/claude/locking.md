@@ -10,7 +10,7 @@ User-visible behaviors:
 - Writers on **different rows** of the same table don't block each other (table-IX + row-X per RID).
 - Readers under default READ COMMITTED only block on the **specific row** another connection's tx is mutating, not the whole table.
 - `WITH (UPDLOCK)` takes row-U tx-scoped — the classic "select-for-update" idiom — and a second connection's `UPDLOCK` on the same row blocks until the first commits.
-- `WITH (XLOCK)` takes row-X tx-scoped; a concurrent read of the same row blocks (the X-X conflict surfaces through the row-X probe) — a READ COMMITTED one too, which real's lets through on a page its holder hasn't changed (see [Isolation-level semantics](#isolation-level-semantics)).
+- `WITH (XLOCK)` takes row-X tx-scoped; a concurrent read of the same row blocks (the X-X conflict surfaces through the row-X probe), a READ COMMITTED one only once the holder's transaction has written (see [Isolation-level semantics](#isolation-level-semantics)).
 - `WITH (READPAST)` skips rows whose RID has a conflicting row-X holder instead of waiting.
 - `WITH (TABLOCK)` / `WITH (TABLOCKX)` skips row-level and takes table-S / table-X directly.
 - `SET TRANSACTION ISOLATION LEVEL SERIALIZABLE` / `WITH (SERIALIZABLE)` / `WITH (HOLDLOCK)` locks the index keys its predicate reaches plus the next key past them, each lock fencing the gap below its key, and leaves the rest of the table free — two SERIALIZABLE transactions over disjoint key ranges don't block each other.
@@ -537,19 +537,27 @@ Per-isolation reader behavior:
 | Level              | Reader behavior                                                |
 | ------------------ | -------------------------------------------------------------- |
 | `READ UNCOMMITTED` | Skip every conflict check (dirty read). Equivalent to NOLOCK on every read. |
-| `READ COMMITTED` (default) | Table-IS + per-row probe (wait on row-X holders, no row-S acquire); under `READ_COMMITTED_SNAPSHOT`, the statement's snapshot and no IS. |
+| `READ COMMITTED` (default) | Table-IS + per-row probe (wait on row-X holders whose transaction changed the table, no row-S acquire); under `READ_COMMITTED_SNAPSHOT`, the statement's snapshot and no IS. |
 | `REPEATABLE READ`  | Table-IS tx-scoped + row-S tx-scoped per row returned.         |
 | `SERIALIZABLE`     | Table-IS tx-scoped + key-range locks on the keys the predicate reaches, every key otherwise, table-S over a heap. `UPDLOCK` / `XLOCK` shift the table lock to IX and the range mode to `RangeS-U` / `RangeX-X`. |
 | `SNAPSHOT`         | Reads at the transaction's snapshot (see [Snapshot isolation + MVCC](#snapshot-isolation--mvcc)), holding the Sch-S its name took and no IS. |
 
 A `READCOMMITTED` or `READCOMMITTEDLOCK` hint reads its table at READ COMMITTED under a `REPEATABLE READ` or `SERIALIZABLE` session, keeping no row or range lock past the row (probed 2026-10-08 against SQL Server 2025).
 
-Not modeled yet: real's READ COMMITTED read takes no row lock on a page holding no uncommitted change, so it reads past a row another transaction locked `WITH (XLOCK)` without changing it, where the probe here waits on every row-X holder.
-Probed 2026-10-25 against SQL Server 2025, with one holder's `XLOCK` on row 1:
+Real's READ COMMITTED read takes no row lock on a page holding no uncommitted change, so it reads past a row another transaction locked `WITH (XLOCK)` without changing it.
+The probe here passes a row-X or `RangeX-X` holder whose transaction began after the table's last change (`ChangedWhileOpen`), and waits on any other.
+Probed 2026-10-25 against SQL Server 2025, with one holder's `XLOCK` on row 1, over a clustered table and a heap alike:
 
-- A read of rows 1–3 waited only once the holder had also updated row 10, which shared their page.
+- A read of rows 1–3 waited only once the holder had also updated row 10, which shared their page, or inserted a row.
 - An update on another page, an insert elsewhere, or nothing at all let the read through.
 - A `REPEATABLE READ` read and a `PAGLOCK` holder waited every time.
+
+Divergences:
+
+- **The rule is the table's, where real's is the page's.**
+  A write anywhere in the table since the holder's transaction began makes the read wait here, where real waits only when the row's own page holds the change, so a holder writing a row on another page lets real's read through.
+- **The clock starts at `BEGIN TRAN`.**
+  Real compares a page's last change with the oldest open transaction's first log record, so a holder that has written nothing yet doesn't stop the read over a page another session changed since.
 
 ## A reader suspended mid-result
 

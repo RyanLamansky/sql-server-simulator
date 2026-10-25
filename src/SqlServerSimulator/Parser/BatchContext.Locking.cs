@@ -3056,6 +3056,12 @@ internal sealed partial class BatchContext
         var manager = connection.Simulation.LockManager;
         if (!manager.HasIncompatibleHolderOtherThan(resource, LockMode.Shared, connection.LockOwner))
             return true;
+        // Real takes no S at all while no write has landed since the holder's
+        // transaction began, as for the key-range lock above, so the read
+        // passes a row locked WITH (XLOCK) and left as it was (probed
+        // 2026-10-25 against SQL Server 2025).
+        if (!manager.HasIncompatibleHolderOtherThan(resource, LockMode.Shared, connection.LockOwner, holder => ChangedWhileOpen(table, holder)))
+            return true;
         if (plan.SkipBlockedRows)
             return false;
         // Wait for the row's writers to drain. Transient acquire-release
