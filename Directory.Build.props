@@ -29,6 +29,15 @@
     <EnableTrimAnalyzer>false</EnableTrimAnalyzer>
   </PropertyGroup>
 
+  <!-- A test host runs its tests on every core at once, each allocating as it
+       goes; server GC collects on every core, where workstation GC stops all
+       of them while one thread collects. Matched by name, since IsTestProject
+       is set only after this file is read. See docs/claude/build-analyzers.md
+       for the measurements. -->
+  <PropertyGroup Condition="$(MSBuildProjectName.Contains('.Tests'))">
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+  </PropertyGroup>
+
   <ItemGroup>
     <None Include="$(MSBuildThisFileDirectory).editorconfig" Link=".editorconfig" />
   </ItemGroup>

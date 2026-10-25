@@ -61,3 +61,13 @@ Full-solution `dotnet build --no-incremental` with the compiler server off, meas
 
 Release keeps the trim analyzer, about 270 CPU seconds of what it has left.
 The IDE and CA rules see the same source in both configurations except `#if DEBUG` code, which Release lacks, so a Release build that also skipped them (`-p:EnforceCodeStyleInBuild=false -p:EnableNETAnalyzers=false`) measured 48 s wall and 324 s CPU, leaving each analyzer to run in exactly one CI leg; that arrangement is not adopted.
+
+## Test hosts
+
+The test projects run under server GC (the root `Directory.Build.props`).
+A test host runs its tests in parallel on every core, each one building a simulation and running its batches, and workstation GC stops every test thread while a single thread collects.
+Measured 2026-10-25 on the 16-core dev container, alternating runs of `SqlServerSimulator.Tests`' built DLL: 73–75 s wall under workstation GC, 49–51 s under server GC.
+
+A checkout on a slow mount — the dev container's view of a Windows drive, where listing a directory entry costs a round trip — makes walking the repository the expensive part of a test that reads it.
+`QualityTests` walked `.git`, `.vs`, every `bin` and `obj` and a root `TestResults` for Markdown and C# files it then discarded, and re-read a linked document for every anchor naming it, which on that mount made the suite about 20 s longer than in a worktree under `/tmp` (measured 2026-10-25).
+Its walks prune those directories (`RepositoryFiles`) and read each linked document once.

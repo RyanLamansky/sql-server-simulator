@@ -1,3 +1,4 @@
+using System.IO.Enumeration;
 using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
@@ -434,11 +435,7 @@ public partial class QualityTests
                 + $"{nameof(CitedButNotRaised)}. Remove it, and check the docs describing it as unbuilt.");
         }
 
-        var markdown = Directory
-            .EnumerateFiles(repoRoot, "*.md", SearchOption.AllDirectories)
-            .Where(path => !path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
-                && !path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
-                && !path.Contains($"{Path.DirectorySeparatorChar}.", StringComparison.Ordinal));
+        var markdown = RepositoryFiles(repoRoot, "*.md");
 
         List<string> unknown = [];
         foreach (var path in markdown)
@@ -474,13 +471,8 @@ public partial class QualityTests
         List<string> offenders = [];
         foreach (var directory in new[] { "src", "tests", "tools" })
         {
-            foreach (var path in Directory.EnumerateFiles(Path.Combine(repoRoot, directory), "*.cs", SearchOption.AllDirectories))
+            foreach (var path in RepositoryFiles(Path.Combine(repoRoot, directory), "*.cs"))
             {
-                if (path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
-                    || path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-                {
-                    continue;
-                }
                 if (File.ReadAllText(path).Any(c => char.IsControl(c) && c is not ('\t' or '\n' or '\r')))
                     offenders.Add(Path.GetRelativePath(repoRoot, path));
             }
@@ -528,15 +520,23 @@ public partial class QualityTests
     public void DocumentedReferencesResolve()
     {
         var repoRoot = FindRepoRoot();
-        var sourceNames = Directory
-            .EnumerateFiles(Path.Combine(repoRoot, "src"), "*.cs", SearchOption.AllDirectories)
-            .Concat(Directory.EnumerateFiles(Path.Combine(repoRoot, "tests"), "*.cs", SearchOption.AllDirectories))
-            .Where(path => !path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
-                && !path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+        var sourceNames = RepositoryFiles(Path.Combine(repoRoot, "src"), "*.cs")
+            .Concat(RepositoryFiles(Path.Combine(repoRoot, "tests"), "*.cs"))
             .Select(Path.GetFileName)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         Assert.IsGreaterThan(300, sourceNames.Count, "Source-file enumeration found implausibly few files.");
+
+        // Each linked document is read once however many links name it, null
+        // when there is none.
+        Dictionary<string, HashSet<string>?> documentHeadings = new(StringComparer.Ordinal);
+        HashSet<string>? HeadingsOf(string document)
+        {
+            document = Path.GetFullPath(document);
+            if (!documentHeadings.TryGetValue(document, out var headings))
+                documentHeadings[document] = headings = File.Exists(document) ? HeadingSlugs(File.ReadAllText(document)) : null;
+            return headings;
+        }
 
         var docsDirectory = Path.Combine(repoRoot, "docs", "claude");
         List<string> broken = [];
@@ -559,13 +559,13 @@ public partial class QualityTests
                     continue;
 
                 var targetPath = target.Length == 0 ? path : Path.Combine(Path.GetDirectoryName(path)!, target);
-                if (!File.Exists(targetPath))
+                if (HeadingsOf(targetPath) is not { } headings)
                 {
                     broken.Add($"{name}: no such document `{target}`");
                     continue;
                 }
 
-                if (anchor.Length != 0 && !HeadingSlugs(File.ReadAllText(targetPath)).Contains(anchor[1..]))
+                if (anchor.Length != 0 && !headings.Contains(anchor[1..]))
                     broken.Add($"{name}: no heading `{anchor}` in `{(target.Length == 0 ? name : target)}`");
             }
 
@@ -667,4 +667,19 @@ public partial class QualityTests
 
         throw new InvalidOperationException($"No solution file above {AppContext.BaseDirectory}.");
     }
+
+    /// <summary>
+    /// The files under <paramref name="directory"/> matching
+    /// <paramref name="pattern"/>, found without entering a build or test
+    /// output (<c>bin</c>, <c>obj</c>, <c>TestResults</c>) or a dot-directory
+    /// (<c>.git</c>, <c>.vs</c>): a checkout on a slow mount — a container's
+    /// view of a Windows drive — spent tens of seconds walking those for files
+    /// it then threw away.
+    /// </summary>
+    private static FileSystemEnumerable<string> RepositoryFiles(string directory, string pattern) =>
+        new(directory, static (ref entry) => entry.ToFullPath(), new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = 0 })
+        {
+            ShouldIncludePredicate = (ref entry) => FileSystemName.MatchesSimpleExpression(pattern, entry.FileName) && !entry.FileName.StartsWith('.') && !entry.IsDirectory,
+            ShouldRecursePredicate = static (ref entry) => entry.FileName is not ("bin" or "obj" or "TestResults") && !entry.FileName.StartsWith('.'),
+        };
 }
