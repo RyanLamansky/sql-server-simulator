@@ -68,6 +68,17 @@ public sealed class IndexUsageStatsTests
         IsFalse(sim.ExecuteScalar("select last_user_seek from sys.dm_db_index_usage_stats where database_id = db_id() and index_id = 1") is DBNull);
     }
 
+    /// <summary>A positioned update seeks the row its cursor sits on (probed 2026-10-25 against SQL Server 2025).</summary>
+    [TestMethod]
+    public void APositionedUpdate_SeeksItsRow() =>
+        AreEqual("2/3", new Simulation().ExecuteScalar("""
+            create table p (id int not null constraint pk_p primary key, x int); insert p values (1, 1), (2, 2), (3, 3);
+            declare @x int; declare c cursor local for select x from p; open c; fetch c into @x; fetch c into @x;
+            update p set x = x + 100 where current of c; update p set x = x + 100 where current of c;
+            close c; deallocate c;
+            select concat(user_seeks, '/', user_updates) from sys.dm_db_index_usage_stats where database_id = db_id() and object_id = object_id('p')
+            """));
+
     [TestMethod]
     public void EachStatementOfABatch_CountsItsUse_WhenThePlanCacheReplaysIt()
     {

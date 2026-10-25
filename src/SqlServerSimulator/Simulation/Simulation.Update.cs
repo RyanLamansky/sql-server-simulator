@@ -789,14 +789,16 @@ partial class Simulation
         // seek and the note left the key in neither.
         var keysPutBack = Volatile.Read(ref table.KeysPutBack);
 
-        // Seek the target when WHERE carries an indexable equality / range
-        // (positioned UPDATE leaves where null, so it keeps the full scan). The
-        // loop re-runs WHERE below, so the seek only narrows the rows considered.
+        // Seek the target when WHERE carries an indexable equality / range, or
+        // read the row a positioned UPDATE's cursor sits on. The loop re-runs
+        // WHERE below, so the seek only narrows the rows considered.
         // The compile walk holds no schema lock, so it doesn't read the
         // target's rows or seek cache at all: another session redefining the
         // table meanwhile left them in a layout the walk decoded wrongly.
         IEnumerable<(int Page, int Slot, byte[] Bytes)>? seek = null;
-        var rowSource = context.Batch.IsSkipping ? [] : MutationRowSource(table, where, context.Batch, out seek, sourceView);
+        var rowSource = context.Batch.IsSkipping ? []
+            : positionedCursor is { } positionedRow ? PositionedRow(table, positionedRow, context.Batch)
+            : MutationRowSource(table, where, context.Batch, out seek, sourceView);
         // Skip mode commits nothing (CommitUpdate returns early), so the walk
         // is pure cost — and running WHERE / SET against live rows can raise a
         // runtime error (a division by zero, a conversion failure) on behalf of
@@ -1446,6 +1448,22 @@ partial class Simulation
             }
             return null;
         }
+    }
+
+    /// <summary>
+    /// The row a positioned UPDATE or DELETE (<c>WHERE CURRENT OF</c>) writes:
+    /// the one at the address its cursor sits on, read where it stands rather
+    /// than found by walking every row, and counted a seek, as real's index
+    /// usage counts it (probed 2026-10-25 against SQL Server 2025); none when
+    /// the row is gone.
+    /// </summary>
+    private static IEnumerable<(int Page, int Slot, byte[] Bytes)> PositionedRow(HeapTable table, PositionedCursorTarget positioned, BatchContext batch)
+    {
+        IndexUsageAccounting.NoteRead(batch, table, null, seek: true, equality: true);
+        return positioned.Cursor.CurrentRids is { } rids && rids[positioned.Slot] is { } current
+            && table.Heap.ReadLiveRow(current.Page, current.Slot) is { } bytes
+            ? [(current.Page, current.Slot, bytes)]
+            : [];
     }
 
     /// <summary>

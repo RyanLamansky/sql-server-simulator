@@ -243,7 +243,9 @@ partial class Simulation
         // target's rows or seek cache at all: another session redefining the
         // table meanwhile left them in a layout the walk decoded wrongly.
         IEnumerable<(int Page, int Slot, byte[] Bytes)>? seek = null;
-        var rowSource = context.Batch.IsSkipping ? [] : MutationRowSource(table, where, context.Batch, out seek, sourceView);
+        var rowSource = context.Batch.IsSkipping ? []
+            : positionedCursor is { } positionedRow ? PositionedRow(table, positionedRow, context.Batch)
+            : MutationRowSource(table, where, context.Batch, out seek, sourceView);
         // Skip mode commits nothing (CommitDelete returns early) — same reason
         // the UPDATE path drops its row source, including the runtime errors a
         // never-run statement's WHERE would otherwise raise while a module body

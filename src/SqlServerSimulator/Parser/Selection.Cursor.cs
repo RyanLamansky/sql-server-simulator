@@ -861,6 +861,9 @@ internal sealed partial class Selection
             return before ? lo - 1 : lo;
         }
 
+        /// <summary>This order, read on at <paramref name="generation"/>, which writes keeping every row in its place reached.</summary>
+        public CursorOrder At(long generation) => new(plan, generation, rows);
+
         /// <summary>The first row from position <paramref name="from"/> on, stepping by <paramref name="step"/>, that passes the cursor's WHERE, evaluated as the walk would.</summary>
         public CursorRow? FirstPassing(BatchContext batch, int from, int step)
         {
@@ -876,11 +879,17 @@ internal sealed partial class Selection
 
     /// <summary>
     /// <paramref name="cached"/> while the table's heap hasn't changed since
-    /// it was read, else the live rows read again, for a DYNAMIC cursor over
-    /// one table with no ORDER BY, row limit or row-level security filter;
-    /// null for any other, and while a <c>STATISTICS IO</c> report counts the
-    /// walk's reads.
+    /// it was read, or has changed only by writes keeping every row in its
+    /// place (<see cref="KeepsCursorOrder"/>), else the live rows read again,
+    /// for a DYNAMIC cursor over one table with no ORDER BY, row limit or
+    /// row-level security filter; null for any other, and while a
+    /// <c>STATISTICS IO</c> report counts the walk's reads.
     /// </summary>
+    /// <remarks>
+    /// The writes are read off the heap's seek journal, which reading the
+    /// order turns on, so a <c>WHERE CURRENT OF</c> update loop reads the
+    /// order once rather than at every fetch after an update.
+    /// </remarks>
     internal static CursorOrder? DynamicOrder(CursorSourcePlan plan, BatchContext batch, CursorOrder? cached)
     {
         if (plan.Slots.Length != 1 || plan.Slots[0].Table is not { } table || plan.OrderBy.Count != 0 || plan.RowLimit is not null
@@ -888,11 +897,20 @@ internal sealed partial class Selection
         {
             return null;
         }
-        // Read before the scan, so a write landing during it leaves the order
-        // a generation behind and the next fetch reads it again.
-        var generation = Volatile.Read(ref table.Heap.MutationGeneration);
-        if (cached is not null && cached.Generation == generation)
-            return cached;
+        var heap = table.Heap;
+        if (cached is not null)
+        {
+            if (cached.Generation == Volatile.Read(ref heap.MutationGeneration))
+                return cached;
+            if (heap.SnapshotSeekJournalSince(cached.Generation, out var current) is { } writes
+                && Array.TrueForAll(writes, write => KeepsCursorOrder(write, table, plan.IdentityKeys[0])))
+            {
+                return cached.At(current);
+            }
+        }
+        // Read before the scan, so a write landing during it is journaled past
+        // the order's generation for the next fetch to judge.
+        var generation = heap.ActivateSeekJournal();
         var scan = new CursorSlotScan(identityWidth: 1);
         AppendCursorSlotRows(scan, plan, 0, batch, outerResolver: null, applyRowLimit: false);
         var rows = new CursorRow[scan.Bytes.Count];
@@ -900,6 +918,36 @@ internal sealed partial class Selection
             rows[i] = new CursorRow([], [], [scan.IdentityKeys[i]], [scan.Uniquifiers[i]], [scan.Rids[i]]);
         Array.Sort(rows, (a, b) => CompareCursorRows(plan, a, b));
         return new CursorOrder(plan, generation, rows);
+    }
+
+    /// <summary>
+    /// Whether a write leaves every row of a DYNAMIC cursor's order in its
+    /// place: a delete, whose row a fetch passes over as it reads the row's
+    /// address, and an update, unless it changes the clustered key a clustered
+    /// table's order follows — a heap's follows the address, which an update
+    /// keeps. An insert can take any place, an emptied address included.
+    /// </summary>
+    private static bool KeepsCursorOrder(Heap.SeekJournalEvent write, HeapTable table, CursorIdentityKey identity)
+    {
+        switch (write.Kind)
+        {
+            case Heap.SeekJournalKind.Delete:
+                return true;
+            case Heap.SeekJournalKind.Update when identity is { ClusteredDescending: not null, Ordinals: { } ordinals }:
+                foreach (var ordinal in ordinals)
+                {
+                    if (!RowDecoder.DecodeColumn(table.StoredColumns, write.OldImage!, ordinal, table.Heap)
+                        .IsIdenticalTo(RowDecoder.DecodeColumn(table.StoredColumns, write.NewImage!, ordinal, table.Heap)))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            case Heap.SeekJournalKind.Update:
+                return true;
+            default:
+                return false;
+        }
     }
 
     /// <summary>
