@@ -517,6 +517,7 @@ internal sealed class LockManager
             // every caller: a lock wait is the session's, so the session is
             // where the answer already lives.
             var cancellation = owner.TryResolveActing()?.ExecutionCancellationToken ?? CancellationToken.None;
+            var periodicDue = Environment.TickCount64 + CancellationPollMillis;
 
             try
             {
@@ -596,12 +597,17 @@ internal sealed class LockManager
                     var slice = remaining == Timeout.Infinite
                         ? CancellationPollMillis
                         : Math.Min(remaining, CancellationPollMillis);
-                    if (!Monitor.Wait(this.gate, slice))
+                    var quiet = !Monitor.Wait(this.gate, slice);
+                    // Every release anywhere wakes every wait, so a wait woken
+                    // more often than its slice still reads its cancellation
+                    // on each wake, and its periodic work runs on the clock.
+                    if (cancellation.IsCancellationRequested)
+                        return LockAcquireOutcome.Cancelled;
+                    if (quiet && timeoutMillis > 0 && Environment.TickCount64 >= deadline)
+                        return LockAcquireOutcome.TimedOut;
+                    if (quiet || Environment.TickCount64 >= periodicDue)
                     {
-                        if (cancellation.IsCancellationRequested)
-                            return LockAcquireOutcome.Cancelled;
-                        if (timeoutMillis > 0 && Environment.TickCount64 >= deadline)
-                            return LockAcquireOutcome.TimedOut;
+                        periodicDue = Environment.TickCount64 + CancellationPollMillis;
                         // A wait past each multiple of the blocked process
                         // threshold reports itself, as real's lock monitor
                         // does, outside the gate as the sweep runs.

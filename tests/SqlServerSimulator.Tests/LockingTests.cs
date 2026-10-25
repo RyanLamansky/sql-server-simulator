@@ -715,6 +715,43 @@ public sealed class LockingTests
         _ = await sleepTask;
     }
 
+    /// <summary>
+    /// A blocked statement notices its cancel at once even while another
+    /// session's lock traffic keeps waking its wait, as each release anywhere
+    /// wakes every waiting session.
+    /// </summary>
+    [TestMethod]
+    public async Task LockWait_NoticesItsCancel_ThroughOtherSessionsLockTraffic()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int); insert t values (1); create table churn (id int)");
+        using var holder = sim.CreateOpenConnection();
+        using var waiter = sim.CreateOpenConnection();
+        using var churner = sim.CreateOpenConnection();
+        _ = holder.CreateCommand("begin tran; update t set id = 2").ExecuteNonQuery();
+        var waiterSpid = (short)waiter.CreateCommand("select @@spid").ExecuteScalar()!;
+        var wait = waiter.CreateCommand("update t set id = 3");
+        var waitTask = Task.Run(() => ThrowsExactly<SimulatedSqlException>(() => wait.ExecuteNonQuery()), TestContext.CancellationToken);
+        await sim.AwaitRequest(waitTask, $"session_id = {waiterSpid} and wait_type like 'LCK[_]%'", TestContext.CancellationToken);
+
+        // Each insert's commit releases its locks, waking the wait far more
+        // often than its slice would.
+        var churning = System.Diagnostics.Stopwatch.StartNew();
+        var churn = Task.Run(() =>
+        {
+            using var insert = churner.CreateCommand("insert churn values (1)");
+            while (!waitTask.IsCompleted && churning.ElapsedMilliseconds < 10_000)
+                _ = insert.ExecuteNonQuery();
+        }, TestContext.CancellationToken);
+        var cancelled = System.Diagnostics.Stopwatch.StartNew();
+        wait.Cancel();
+        _ = await waitTask;
+        cancelled.Stop();
+        await churn;
+        IsLessThan(5_000, cancelled.ElapsedMilliseconds);
+        _ = holder.CreateCommand("rollback").ExecuteNonQuery();
+    }
+
     [TestMethod]
     public async Task DmTranLocks_DuringContention_ShowsWaitRow()
     {
