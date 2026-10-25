@@ -86,6 +86,12 @@ internal sealed class ParseFunction : Expression
     {
         if (!Format.IsCultureName(name))
             throw SimulatedSqlException.CultureNotSupported(name);
+        // A private-use tag (`x-…`, `i-…`) is one no runtime knows, and the
+        // runtime's lookup fails on one with a NullReferenceException rather
+        // than a CultureNotFoundException (.NET 10 over ICU, seen 2026-10-25),
+        // so it reads as Windows synthesizes it without asking.
+        if (name.Length > 1 && name[1] is '-' or '_')
+            return FormatCulture.Resolve(name).Culture;
         try
         {
             return CultureInfo.GetCultureInfo(name.Replace('_', '-'));

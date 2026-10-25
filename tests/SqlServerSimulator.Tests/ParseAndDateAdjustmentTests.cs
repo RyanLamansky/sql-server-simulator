@@ -68,6 +68,7 @@ public sealed class ParseAndDateAdjustmentTests
     [DataRow("parse('12.5' as decimal(10, 2) using 'EN-us')")]
     [DataRow("parse('12.5' as decimal(10, 2) using 'en_US')")]
     [DataRow("parse('12.5' as decimal(10, 2) using 'en-US-POSIX')")]
+    [DataRow("parse('12.5' as decimal(10, 2) using 'x-test')")]
     [DataRow("(select count(*) from (values (cast(null as varchar(5)))) v (s) where 1 = 0 and parse(s as int using '=n') = 1) + 12.5")]
     public void Parse_CultureCheckedOnlyAsTheCallRuns(string call)
         => AreEqual(12.5m, Convert.ToDecimal(new Simulation().ExecuteScalar($"if 1 = 0 select parse('1' as int using '=n'); select {call}"), System.Globalization.CultureInfo.InvariantCulture));
