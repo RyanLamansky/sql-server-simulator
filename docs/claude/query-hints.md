@@ -223,6 +223,7 @@ Beside it, `RECOMPILE` and `USE HINT('DISABLE_TSQL_SCALAR_UDF_INLINING')` set th
   Not chased: the order is the physical one of the index real's plan reads.
 - **Join-hint feasibility through `APPLY` and semi-joins** — real refuses `OPTION (HASH JOIN)` over a `CROSS APPLY` or an `EXISTS` whose correlation isn't an equality once decorrelated, and some `RIGHT LOOP JOIN`s, as its decorrelation and join reordering decide; those are left alone here.
   Not chased: the shapes follow real's rewrites, not the query as written.
+- **`FORCESEEK` over a comparison that converts the column** — real can't seek a `varbinary` or `varchar` column compared with an `int`, whose comparison converts the column, and refuses the hint with Msg 8622 (probed 2026-10-25 against SQL Server 2025); the simulator answers the query, seeking where it can.
 - **Msg 8625 from dynamic SQL run by `sp_executesql`** after `EXEC (…)` ran the same text: real's cached plan sends none, where the simulator's separate compile sends it once more.
 - **`INDEX = (value-list)` equals-form** — probe-confirmed that real SQL Server raises `Msg 102` on the equals-with-multiple-values form anyway (the docs notwithstanding), so the simulator's "= takes one literal" rule matches by parsing as well.
 

@@ -4125,12 +4125,26 @@ internal sealed partial class Selection
     // under = ) and an empty result drops the column; cross-collation string
     // compares or promotion failures also drop the individual probe. A single
     // unified promoted type is chosen by promoting pairwise across all surviving
-    // probes — pinning the bucket key to one type. The value side is
-    // row-invariant (IsStableValueSide), so this runs once per column per
-    // inner execution. Duplicates aren't deduplicated; the cache lookup is a
-    // hash hit and duplicate keys just probe the same bucket.
+    // probes — pinning the bucket key to one type. Each value of an IN list
+    // compares with the column under its own promotion, so values the column
+    // compares with as two kinds of type — a varbinary column's `0x01`
+    // padded byte for byte and its `2` converted to int (probed 2026-10-25
+    // against SQL Server 2025) — leave the column to the scan; numeric types
+    // compare by value whichever one wins, so those stay one probe type. The
+    // value side is row-invariant (IsStableValueSide), so this runs once per
+    // column per inner execution. Duplicates aren't deduplicated; the cache
+    // lookup is a hash hit and duplicate keys just probe the same bucket.
     // The resolver of a probe evaluated with no enclosing scope: a name reads NULL.
     private static readonly Func<MultiPartName, SqlValue> NullForEveryName = static _ => SqlValue.Null(SqlType.Int32);
+
+    // Whether a column compared as `a` and as `b` compares alike, so one probe
+    // type stands for both: numeric types compare by value, and any other two
+    // only when they're the same kind of type.
+    private static bool ComparesAlike(SqlType a, SqlType b) =>
+        a.Category == b.Category
+            ? a.Category != SqlTypeCategory.Other || a.GetType() == b.GetType()
+            : a.Category is SqlTypeCategory.Integer or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.Approximate
+                && b.Category is SqlTypeCategory.Integer or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.Approximate;
 
     private static (SqlType Common, SqlValue[] Probes)? EvaluateProbeComponent(
         FromSource source, int storageOrdinal, Expression[] valueSides, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
@@ -4175,6 +4189,8 @@ internal sealed partial class Selection
                 continue;
             }
 
+            if (common is not null && !ComparesAlike(common, promoted))
+                return null;
             try
             {
                 common = common is null ? promoted : SqlType.Promote(common, promoted);

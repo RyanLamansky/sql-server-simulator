@@ -149,6 +149,7 @@ A WHERE conjunct of the shape `col IN (v1, v2, …)` — or its equivalent OR-of
 Every candidate must be a stable value and they must all anchor on the same column; a single column's binding then becomes a **multi-value** equality.
 A mixed-column OR (`a = 1 OR b = 2`) is not a family one column can hold and takes the [union of seeks](#union-of-seeks-a-cross-column-or) instead.
 Surviving probes are unioned into one promoted type (pairwise `SqlType.Promote` across candidates), NULL candidates are silently dropped (never equal under `=`), and the seek expands across the **cartesian product** of per-column probe arrays — so `a IN (1, 2) AND b = 3` fires two composite-prefix probes against the (a, b) cache and `a IN (1, 2) AND b IN (3, 4)` fires four.
+One promoted type can stand for the list only because its values compare with the column alike: each value compares under its own promotion, so a `varbinary` column's `k IN (0x01, 2)` pads for `0x01` and converts the column to `int` for `2` (probed 2026-10-25 against SQL Server 2025), and a list whose values compare as two kinds of type leaves its column to the scan; numeric types compare by value whichever one wins, and stay one probe type.
 Each tuple is one hash lookup against the same per-Heap cache; a row can only sit in one bucket per probe column, so the unioned candidate stream contains no duplicates.
 `NOT IN` is an AND-of-inequalities (not a positive equality family) and declines.
 
