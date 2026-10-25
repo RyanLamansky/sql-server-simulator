@@ -3008,13 +3008,12 @@ partial class Simulation
         if (table.KeyConstraints.Count == 0)
             return;
 
-        var affectedAddrs = new HashSet<(int, int)>();
-        var storedSnapshots = new SqlValue[affected.Count][];
-        for (var i = 0; i < affected.Count; i++)
-        {
-            _ = affectedAddrs.Add((affected[i].PageIndex, affected[i].SlotIndex));
-            storedSnapshots[i] = ProjectStoredValues(table, affected[i].FullNew);
-        }
+        // A row checked alone needs only its own stored values, and the
+        // affected rows' addresses only once a seek meets a row of its key:
+        // building both for every affected row on each such check made a
+        // MERGE's rechecks quadratic in its rows.
+        var storedSnapshots = onlyRow < 0 ? StoredSnapshots(table, affected) : null;
+        HashSet<(int, int)>? affectedAddrs = null;
 
         var storedColumns = table.StoredColumns;
         var affectedKeys = new AffectedKeyIndex?[table.KeyConstraints.Count];
@@ -3022,7 +3021,7 @@ partial class Simulation
 
         for (var i = Math.Max(onlyRow, 0); i < (onlyRow < 0 ? affected.Count : onlyRow + 1); i++)
         {
-            var myStored = storedSnapshots[i];
+            var myStored = storedSnapshots?[i] ?? ProjectStoredValues(table, affected[i].FullNew);
 
             for (var c = 0; c < table.KeyConstraints.Count; c++)
             {
@@ -3037,7 +3036,7 @@ partial class Simulation
                     if (!ComputedKeyMoved(constraint.FullOrdinals, affected[i], table, batch))
                         continue;
                     if ((onlyRow < 0 && ComputedKeySharedByAnotherAffectedRow(affected, i, constraint.FullOrdinals, table, filter: null, batch))
-                        || (existingComputedKeys[c] ??= BuildComputedKeySet(table, constraint.FullOrdinals, filter: null, batch, affectedAddrs))
+                        || (existingComputedKeys[c] ??= BuildComputedKeySet(table, constraint.FullOrdinals, filter: null, batch, affectedAddrs ??= AffectedAddresses(affected)))
                             .Contains(new SqlValueKey(ReadKeyByFullOrdinals(constraint.FullOrdinals, affected[i].FullNew))))
                     {
                         UpdateKeyViolations.Note(ref violations, table, affected.Count, i, constraint, KeyConstraintViolationOnComputedKey(table, constraint, affected[i].FullNew));
@@ -3048,7 +3047,7 @@ partial class Simulation
                 if (!KeyTupleMoved(constraint.StorageOrdinals, myStored, affected[i], table))
                     continue;
 
-                if (onlyRow < 0 && (affectedKeys[c] ??= AffectedKeyIndex.Build(storedSnapshots, constraint.StorageOrdinals, participates: null)).SharedByAnotherRow(i))
+                if (storedSnapshots is not null && (affectedKeys[c] ??= AffectedKeyIndex.Build(storedSnapshots, constraint.StorageOrdinals, participates: null)).SharedByAnotherRow(i))
                 {
                     UpdateKeyViolations.Note(ref violations, table, affected.Count, i, constraint, KeyConstraintViolation(table, constraint, myStored));
                     continue;
@@ -3060,7 +3059,7 @@ partial class Simulation
                     foreach (var (p, s, _) in HeapSeekCache.For(table.Heap)
                         .MatchingRows(table.Heap, storedColumns, constraint.StorageOrdinals, commons, probe))
                     {
-                        if (!affectedAddrs.Contains((p, s)))
+                        if (!(affectedAddrs ??= AffectedAddresses(affected)).Contains((p, s)))
                         {
                             UpdateKeyViolations.Note(ref violations, table, affected.Count, i, constraint, KeyConstraintViolation(table, constraint, myStored));
                             break;
@@ -3069,7 +3068,7 @@ partial class Simulation
                     continue;
                 }
 
-                if (ScanFindsKey(table, constraint.StorageOrdinals, myStored, filter: null, affectedAddrs, batch))
+                if (ScanFindsKey(table, constraint.StorageOrdinals, myStored, filter: null, affectedAddrs ??= AffectedAddresses(affected), batch))
                     UpdateKeyViolations.Note(ref violations, table, affected.Count, i, constraint, KeyConstraintViolation(table, constraint, myStored));
             }
         }
@@ -3101,13 +3100,9 @@ partial class Simulation
         if (!hasUnique)
             return;
 
-        var affectedAddrs = new HashSet<(int, int)>();
-        var storedSnapshots = new SqlValue[affected.Count][];
-        for (var i = 0; i < affected.Count; i++)
-        {
-            _ = affectedAddrs.Add((affected[i].PageIndex, affected[i].SlotIndex));
-            storedSnapshots[i] = ProjectStoredValues(table, affected[i].FullNew);
-        }
+        // Built as the key-constraint half builds them (see there).
+        var storedSnapshots = onlyRow < 0 ? StoredSnapshots(table, affected) : null;
+        HashSet<(int, int)>? affectedAddrs = null;
 
         var storedColumns = table.StoredColumns;
         SqlValue[]? existingRowValues = null;
@@ -3117,7 +3112,7 @@ partial class Simulation
 
         for (var i = Math.Max(onlyRow, 0); i < (onlyRow < 0 ? affected.Count : onlyRow + 1); i++)
         {
-            var myStored = storedSnapshots[i];
+            var myStored = storedSnapshots?[i] ?? ProjectStoredValues(table, affected[i].FullNew);
             var myFull = affected[i].FullNew;
 
             for (var x = 0; x < table.Indexes.Count; x++)
@@ -3153,7 +3148,7 @@ partial class Simulation
                 if (!index.KeysAreStored)
                 {
                     if ((onlyRow < 0 && ComputedKeySharedByAnotherAffectedRow(affected, i, index.KeyFullOrdinals, table, index.Filter, batch))
-                        || (existingComputedKeys[x] ??= BuildComputedKeySet(table, index.KeyFullOrdinals, index.Filter, batch, affectedAddrs))
+                        || (existingComputedKeys[x] ??= BuildComputedKeySet(table, index.KeyFullOrdinals, index.Filter, batch, affectedAddrs ??= AffectedAddresses(affected)))
                             .Contains(new SqlValueKey(ReadKeyByFullOrdinals(index.KeyFullOrdinals, myFull))))
                     {
                         UpdateKeyViolations.Note(ref violations, table, affected.Count, i, index, UniqueIndexViolationOnComputedKey(index, qualifiedTableName, myFull));
@@ -3161,7 +3156,7 @@ partial class Simulation
                     continue;
                 }
 
-                if (onlyRow < 0
+                if (storedSnapshots is not null
                     && (affectedKeys[x] ??= AffectedKeyIndex.Build(
                         storedSnapshots,
                         index.KeyStorageOrdinals,
@@ -3179,7 +3174,7 @@ partial class Simulation
                     foreach (var (p, s, bytes) in HeapSeekCache.For(table.Heap)
                         .MatchingRows(table.Heap, storedColumns, index.KeyStorageOrdinals, commons, probe))
                     {
-                        if (affectedAddrs.Contains((p, s)))
+                        if ((affectedAddrs ??= AffectedAddresses(affected)).Contains((p, s)))
                             continue;
                         if (index.Filter is { } seekFilter
                             && Simulation.EvaluateIndexFilter(seekFilter, table, DecodeFullRow(table, bytes, ref existingRowValues), batch) != true)
@@ -3193,10 +3188,28 @@ partial class Simulation
                     continue;
                 }
 
-                if (ScanFindsKey(table, index.KeyStorageOrdinals, myStored, index.Filter, affectedAddrs, batch))
+                if (ScanFindsKey(table, index.KeyStorageOrdinals, myStored, index.Filter, affectedAddrs ??= AffectedAddresses(affected), batch))
                     UpdateKeyViolations.Note(ref violations, table, affected.Count, i, index, UniqueIndexViolation(index, qualifiedTableName, myStored));
             }
         }
+    }
+
+    /// <summary>The stored values of every affected row, by which a statement's checks compare its rows with each other.</summary>
+    private static SqlValue[][] StoredSnapshots(HeapTable table, List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected)
+    {
+        var stored = new SqlValue[affected.Count][];
+        for (var i = 0; i < stored.Length; i++)
+            stored[i] = ProjectStoredValues(table, affected[i].FullNew);
+        return stored;
+    }
+
+    /// <summary>The affected rows' addresses, which a key's seek or scan sets aside as the rows being rewritten.</summary>
+    private static HashSet<(int, int)> AffectedAddresses(List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected)
+    {
+        var addresses = new HashSet<(int, int)>(affected.Count);
+        foreach (var (page, slot, _, _) in affected)
+            _ = addresses.Add((page, slot));
+        return addresses;
     }
 
     /// <summary>

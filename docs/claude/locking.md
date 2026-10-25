@@ -710,6 +710,9 @@ Uncontended the look is a generation compare, since nothing but the guard's own 
 | the same into a heap with a UNIQUE constraint | 4.47–4.55 µs | 4.48–4.56 µs |
 | the same into an identity-keyed table with a unique index | 6.15–6.34 µs | 6.28–6.40 µs |
 | EF Core 10's identity-key `MERGE`, 10 / 100 rows (median) | 15.2–15.7 / 112.9–115.9 µs | 15.2–15.7 / 113.4–115.2 µs |
+
+A guard can refuse row after row: a `MERGE`'s own inserts and deletes don't pass through its update guard, and past the seek journal's capacity (`Heap.SeekJournalCapacity`) the guard can't account for the writes it missed, so it refuses every later update.
+Each refusal's second check covers the one row, so it builds the statement's other rows' stored values only where it compares the rows with each other, and their addresses only once a seek meets another row of the key: an 8,000-row `MERGE` that updates, inserts and deletes took 1.07 s and takes 16 ms (measured 2026-10-25, Release, the fastest of several runs).
 | key-moving `UPDATE` of 20,000 rows over two unique keys (median) | 51.4–54.9 ms | 52.7–54.0 ms |
 | bacpac import — AdventureWorks / WWI Standard / WWI Full / Insite (mean of 3) | 1.97 / 2.63 / 1.77 / 1.26 s | 1.92 / 2.58 / 1.89 / 1.19 s |
 
