@@ -119,6 +119,10 @@ Only the `%`-then-literal shape classifies the *whole* subject, because that is 
 
 Measured on the WWI battery: `UPPER(Description) LIKE 'USB%'` over 228k rows runs **36.7 ms** against the regex engine's 93 ms, and `StockItemName LIKE '%shark%'` 0.14 ms against ~1 ms.
 
+**Nested `%`s match in linear time.**
+Each `%` with something after it tries the rest of the pattern at every character boundary on, so k of them nested — `'%a%a%b'`, or one under `PATINDEX`'s search for a start — took n^k steps where real answers at once: `'%a%a%b'` against 2,000 characters took 187 s and `'%a%a%a%b'` against 250 took 23 s, both 0 ms on real (probed and measured 2026-10-25, Release).
+A match remembers where each `%`'s failed scans have been (`LikeMatcher.Tried`) and stops a rescan where it would retrace one, which changes no answer: the two take 6.7 ms and 1.2 ms, and a differential fuzz of 160,000 subject and pattern pairs, 42,000 of them nested, against the matcher without the memory — weightless characters, combining marks and surrogate pairs under six collations, through `LIKE` and `PATINDEX` — found no difference.
+
 ## The character-matching string scalars search under the collation too
 
 `CHARINDEX`, `REPLACE`, `TRANSLATE`, `STRING_SPLIT` (its separator) and the `TRIM` / `LTRIM` / `RTRIM` family (their character set) all match through one primitive, `Collation.IndexOf` in `Collation.Matching.cs`, so the collation decides them the way it decides `=` and `LIKE`.

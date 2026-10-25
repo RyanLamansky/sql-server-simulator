@@ -100,6 +100,14 @@ internal sealed class LikeMatcher
     /// <summary>False only for <c>PATINDEX</c> with a trailing <c>%</c>.</summary>
     private readonly bool anchorEnd;
 
+    /// <summary>
+    /// True when one match can scan the same <c>%</c> more than once: two
+    /// branch points, each a <c>%</c> with something after it or the start
+    /// position <c>PATINDEX</c> searches for, nest, and every candidate of the
+    /// outer one rescans the inner (see <see cref="Tried"/>).
+    /// </summary>
+    private readonly bool rescansAny;
+
     private LikeMatcher(Segment[] segments, Collation collation, bool asciiEligible, bool anchorStart, bool anchorEnd)
     {
         this.segments = segments;
@@ -117,6 +125,13 @@ internal sealed class LikeMatcher
 
         this.anchorStart = anchorStart;
         this.anchorEnd = anchorEnd;
+        var branchPoints = anchorStart ? 0 : 1;
+        for (var i = 0; i + 1 < segments.Length; i++)
+        {
+            if (segments[i].Kind == SegmentKind.Any)
+                branchPoints++;
+        }
+        this.rescansAny = branchPoints >= 2;
     }
 
     /// <summary>
@@ -139,13 +154,14 @@ internal sealed class LikeMatcher
         // Only the `%`-then-literal skip needs the whole subject classified;
         // every other shape asks per literal run, over that run's own window.
         var ascii = this.jumpsOverAny && IsPrintableAscii(s);
+        var tried = this.rescansAny ? new Tried(this.segments.Length) : null;
         if (this.anchorStart)
-            return this.MatchFrom(s, 0, 0, ascii, trailingSpaceSlack) ? 0 : -1;
+            return this.MatchFrom(s, 0, 0, ascii, trailingSpaceSlack, tried) ? 0 : -1;
 
         var pos = 0;
         while (true)
         {
-            if (this.MatchFrom(s, 0, pos, ascii, trailingSpaceSlack))
+            if (this.MatchFrom(s, 0, pos, ascii, trailingSpaceSlack, tried))
                 return pos;
             if (pos >= s.Length)
                 return -1;
@@ -159,7 +175,7 @@ internal sealed class LikeMatcher
     /// <c>%</c> recurses once per candidate resume point, which is the only
     /// place the match branches.
     /// </summary>
-    private bool MatchFrom(ReadOnlySpan<char> s, int segIndex, int pos, bool ascii, bool slack)
+    private bool MatchFrom(ReadOnlySpan<char> s, int segIndex, int pos, bool ascii, bool slack, Tried? tried)
     {
         while (segIndex < this.segments.Length)
         {
@@ -170,7 +186,7 @@ internal sealed class LikeMatcher
             if (segment.Kind == SegmentKind.Any)
             {
                 return segIndex == this.segments.Length - 1
-                    || this.MatchAfterAny(s, segIndex, pos, ascii, slack);
+                    || this.MatchAfterAny(s, segIndex, pos, ascii, slack, tried);
             }
 
             var consumed = segment.Kind switch
@@ -215,36 +231,89 @@ internal sealed class LikeMatcher
     /// boundary from <paramref name="pos"/> on. When the next segment is a
     /// literal and the ordinal path is in force, the candidate positions come
     /// from a vectorized <c>IndexOf</c> instead of a step-by-step walk — the
-    /// shape <c>LIKE '%needle%'</c> takes.
+    /// shape <c>LIKE '%needle%'</c> takes. A scan that fails is remembered in
+    /// <paramref name="tried"/>, so a rescan stops where it would retrace one.
     /// </summary>
-    private bool MatchAfterAny(ReadOnlySpan<char> s, int segIndex, int pos, bool ascii, bool slack)
+    private bool MatchAfterAny(ReadOnlySpan<char> s, int segIndex, int pos, bool ascii, bool slack, Tried? tried)
     {
         var next = this.segments[segIndex + 1];
         if (ascii && next.Kind == SegmentKind.Literal)
         {
+            if (tried is not null && pos >= tried.FailedFrom[segIndex])
+                return false;
             var comparison = this.caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
             for (var p = pos; p <= s.Length;)
             {
                 var found = s[p..].IndexOf(next.Text, comparison);
                 if (found < 0)
-                    return false;
+                    break;
                 p += found;
-                if (this.MatchFrom(s, segIndex + 1, p, ascii, slack))
+                if (this.MatchFrom(s, segIndex + 1, p, ascii, slack, tried))
                     return true;
                 p++;
             }
 
+            _ = tried?.FailedFrom[segIndex] = pos;
             return false;
         }
 
         var candidate = pos;
         while (true)
         {
-            if (this.MatchFrom(s, segIndex + 1, candidate, ascii, slack))
+            if (tried is not null && !tried.FirstTry(segIndex, candidate, s.Length))
+                return false;
+            if (this.MatchFrom(s, segIndex + 1, candidate, ascii, slack, tried))
                 return true;
             if (candidate >= s.Length)
                 return false;
             candidate += this.AdvanceLength(s, candidate, ascii);
+        }
+    }
+
+    /// <summary>
+    /// What the scans of one match have tried, for a pattern that
+    /// <see cref="rescansAny"/>: without it a pattern of k nested <c>%</c>s
+    /// rescans the subject's tail for every candidate of the one before, which
+    /// is n^k steps where real answers at once (probed 2026-10-25 against SQL
+    /// Server 2025: <c>REPLICATE('a', 2000) LIKE REPLICATE('%a', 64) + '%b'</c>).
+    /// </summary>
+    /// <remarks>
+    /// A scan for a <c>%</c> can't begin while another for the same one runs —
+    /// a candidate's match only reaches the <c>%</c>s after it — and a match
+    /// ends at its first success, so every scan before this one failed at each
+    /// candidate it tried and at each it stepped to after it. A scan reaching a
+    /// tried candidate would step through the same ones, since a step depends
+    /// only on where it starts.
+    /// </remarks>
+    private sealed class Tried(int segments)
+    {
+        /// <summary>
+        /// Per <c>%</c> scanned by an ordinal <c>IndexOf</c>: where a scan
+        /// failed, which fails every scan starting later too, since an
+        /// all-ASCII subject has a character boundary at every position.
+        /// </summary>
+        public readonly int[] FailedFrom = CreateFailedFrom(segments);
+
+        /// <summary>Per <c>%</c> scanned element by element: the candidates tried, one bit each.</summary>
+        private readonly ulong[]?[] stepped = new ulong[]?[segments];
+
+        private static int[] CreateFailedFrom(int segments)
+        {
+            var failedFrom = new int[segments];
+            Array.Fill(failedFrom, int.MaxValue);
+            return failedFrom;
+        }
+
+        /// <summary>Marks <paramref name="candidate"/> tried for the <c>%</c> at <paramref name="segIndex"/>; false when a scan already had.</summary>
+        public bool FirstTry(int segIndex, int candidate, int subjectLength)
+        {
+            var bits = this.stepped[segIndex] ??= new ulong[(subjectLength >> 6) + 1];
+            ref var word = ref bits[candidate >> 6];
+            var mask = 1UL << candidate;
+            if ((word & mask) != 0)
+                return false;
+            word |= mask;
+            return true;
         }
     }
 

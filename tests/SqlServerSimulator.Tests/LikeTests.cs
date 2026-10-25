@@ -332,5 +332,21 @@ public class LikeTests
     [DataRow("0x6125", 0)]
     public void ImageAgainstABinaryPattern_MatchesItsBytesWhole(string pattern, int expected)
         => Assert.AreEqual(expected, new Simulation().ExecuteScalar($"create table t (im image); insert t values (0x61), (0x6162); select count(*) from t where im like {pattern}"));
+
+    /// <summary>
+    /// Nested <c>%</c>s match in time linear in the subject, as real answers
+    /// them (probed 2026-10-25 against SQL Server 2025), where retrying each
+    /// <c>%</c> at every position cost the subject's length to the power of
+    /// their count.
+    /// </summary>
+    [TestMethod]
+    [Timeout(20000)]
+    [DataRow("case when replicate('a', 2000) like replicate('%a', 64) + '%b' then 1 else 0 end", 0)]
+    [DataRow("case when replicate('a', 2000) + 'b' like replicate('%a', 64) + '%b' then 1 else 0 end", 1)]
+    [DataRow("patindex('%a%a%a%b%', replicate('a', 2000))", 0)]
+    [DataRow("patindex('%a%a%a%b%', replicate('a', 2000) + 'b')", 1)]
+    [DataRow("case when replicate(N'a' + nchar(8203), 1000) collate Latin1_General_CI_AS like N'%a%a%a%b' then 1 else 0 end", 0)]
+    public void NestedWildcards_MatchInLinearTime(string expression, int expected)
+        => Assert.AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
 }
 
