@@ -81,7 +81,10 @@ internal static class SimpleParameterization
             }
         }
         var renderer = new Renderer(tokens);
-        return renderer.Statement() ? (renderer.Result(whereFirst: true), renderer.Result(whereFirst: false)) : null;
+        if (!renderer.Statement())
+            return null;
+        var prepared = renderer.Result(whereFirst: false);
+        return (renderer.ReordersWhereFirst() ? renderer.Result(whereFirst: true) : prepared, prepared);
     }
 
     /// <summary>Where a literal sits, which decides the type its parameter declares.</summary>
@@ -118,7 +121,7 @@ internal static class SimpleParameterization
         public string Result(bool whereFirst)
         {
             var whereGroupFirst = whereFirst && this.declareWhereFirst;
-            var prefix = new StringBuilder("(");
+            var prefix = new StringBuilder(2 + this.body.Length + (24 * this.parameters.Count)).Append('(');
             var first = true;
             for (var pass = whereGroupFirst ? 0 : 1; pass < 2; pass++)
             {
@@ -133,6 +136,26 @@ internal static class SimpleParameterization
                 }
             }
             return prefix.Append(')').Append(this.body).ToString();
+        }
+
+        /// <summary>
+        /// Whether Query Store's declaration order differs from number order:
+        /// an <c>UPDATE</c>'s <c>WHERE</c> clause holds a parameter numbered
+        /// after one of its <c>SET</c> clause's.
+        /// </summary>
+        public bool ReordersWhereFirst()
+        {
+            if (!this.declareWhereFirst)
+                return false;
+            var setClauseSeen = false;
+            foreach (var (_, _, inWhere) in this.parameters)
+            {
+                if (!inWhere)
+                    setClauseSeen = true;
+                else if (setClauseSeen)
+                    return true;
+            }
+            return false;
         }
 
         public bool Statement() => this.Current switch

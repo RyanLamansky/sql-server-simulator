@@ -185,7 +185,7 @@ partial class Simulation
         string? tableVariableScope = null;
         // A database parameterizing by force stores a statement's forced form
         // as type 3 (probed 2026-10-15 against SQL Server 2025).
-        if (shape.Forced is { } forced && !isModule && (database.Switches & DatabaseSwitches.ParameterizationForced) != 0)
+        if (!isModule && (database.Switches & DatabaseSwitches.ParameterizationForced) != 0 && shape.Forced is { } forced)
         {
             text = forced;
             parameterizationType = 3;
@@ -753,7 +753,8 @@ partial class Simulation
     {
         if (this.queryStoreShapes.TryGetValue(text, out var cached))
             return cached;
-        var shape = QueryStoreShape.Read(new string(text), tokensFrom is { } start && parser is not null ? parser.StatementTokens(start) : null, database);
+        var parsed = tokensFrom is { } start && parser is not null ? parser.StatementTokens(start) : null;
+        var shape = QueryStoreShape.Read(new string(text), parsed, parsed is null || parser!.QuotedIdentifiers, database);
         _ = this.queryStoreShapes.TryAdd(shape.Text, shape);
         return shape;
     }
@@ -799,10 +800,47 @@ internal sealed class QueryStoreShape
     /// forced parameterization leaves as written; see
     /// <see cref="ForcedParameterization"/>.
     /// </summary>
-    public readonly string? Forced;
+    public string? Forced => this.ForcedForm().Text;
 
     /// <summary>The length of <see cref="Forced"/>'s declaration.</summary>
-    public readonly int ForcedPrefixLength;
+    public int ForcedPrefixLength => this.ForcedForm().PrefixLength;
+
+    /// <summary>
+    /// The forced form, rendered the first time it is asked for: only a
+    /// database parameterizing by force asks, and rendering it for every
+    /// statement was a fifth of what a one-off <c>INSERT</c> allocated. The
+    /// text is tokenized again under the inputs the shape's own tokens were
+    /// read with, which gives the same tokens.
+    /// </summary>
+    private ForcedText ForcedForm()
+    {
+        if (Volatile.Read(ref this.forced) is { } rendered)
+            return rendered;
+        var form = ForcedText.None;
+        if (this.Captured
+            && ForcedParameterization.Parameterize(ReadTokens(this.Text, this.tokenCollation, this.tokenQuotedIdentifiers, this.tokenCompatibilityLevel), out _) is { } template)
+        {
+            var declaration = $"({template.StoredDeclaration})";
+            form = new ForcedText(declaration + template.Text, declaration.Length);
+        }
+        // Racing first reads render the same form.
+        Volatile.Write(ref this.forced, form);
+        return form;
+    }
+
+    private ForcedText? forced;
+
+    private readonly Collation tokenCollation;
+    private readonly CompatibilityLevel tokenCompatibilityLevel;
+    private readonly bool tokenQuotedIdentifiers;
+
+    private sealed class ForcedText(string? text, int prefixLength)
+    {
+        public static readonly ForcedText None = new(null, 0);
+
+        public readonly string? Text = text;
+        public readonly int PrefixLength = prefixLength;
+    }
 
     /// <summary>Every <c>@name</c> the statement reads, without its <c>@</c> (the <see cref="BatchContext.Variables"/> key form), in first-appearance order.</summary>
     public readonly string[] Variables;
@@ -839,8 +877,8 @@ internal sealed class QueryStoreShape
     public readonly byte[] QueryHash;
     public readonly byte[] QueryPlanHash;
 
-    private QueryStoreShape(string text, bool captured, bool capturedWhenCallingFunction, (string QueryStore, string Prepared)? parameterized, ForcedParameterization.Template? forced, string[] variables,
-        bool isConditionOrReturn, bool usesDefaultSchema, bool isTrivial, string statementType, byte[] hash)
+    private QueryStoreShape(string text, bool captured, bool capturedWhenCallingFunction, (string QueryStore, string Prepared)? parameterized, string[] variables,
+        bool isConditionOrReturn, bool usesDefaultSchema, bool isTrivial, string statementType, byte[] hash, Collation tokenCollation, CompatibilityLevel tokenCompatibilityLevel, bool tokenQuotedIdentifiers)
     {
         this.Text = text;
         this.Captured = captured;
@@ -848,12 +886,9 @@ internal sealed class QueryStoreShape
         this.Parameterized = parameterized?.QueryStore;
         this.PreparedText = parameterized?.Prepared;
         this.ParameterizedPrefixLength = parameterized is { QueryStore: var declared } ? DeclarationLength(declared) : 0;
-        if (forced is not null)
-        {
-            var declaration = $"({forced.StoredDeclaration})";
-            this.Forced = declaration + forced.Text;
-            this.ForcedPrefixLength = declaration.Length;
-        }
+        this.tokenCollation = tokenCollation;
+        this.tokenCompatibilityLevel = tokenCompatibilityLevel;
+        this.tokenQuotedIdentifiers = tokenQuotedIdentifiers;
         this.Variables = variables;
         this.IsConditionOrReturn = isConditionOrReturn;
         this.UsesDefaultSchema = usesDefaultSchema;
@@ -878,27 +913,13 @@ internal sealed class QueryStoreShape
 
     /// <summary>
     /// Reads <paramref name="text"/>'s shape from its tokens — the parser's
-    /// own when it still holds them, else the text tokenized again.
+    /// own when it still holds them, which <paramref name="quotedIdentifiers"/>
+    /// and <paramref name="database"/>'s collation and compatibility level
+    /// tokenized, else the text tokenized again under them.
     /// </summary>
-    public static QueryStoreShape Read(string text, List<Token>? parsed, Database database)
+    public static QueryStoreShape Read(string text, List<Token>? parsed, bool quotedIdentifiers, Database database)
     {
-        var tokens = parsed ?? [];
-        var index = 0;
-        try
-        {
-            while (parsed is null && Tokenizer.NextToken(text, ref index, database.Collation, quotedIdentifiers: true, database.CompatibilityLevel) is Token token)
-            {
-                if (token is not (Whitespace or Comment))
-                    tokens.Add(token);
-            }
-        }
-        catch (SimulatedSqlException)
-        {
-            tokens.Clear();
-        }
-        while (tokens.Count > 0 && tokens[^1] is Operator { Character: ';' } && tokens[0] is not ReservedKeyword { Keyword: Keyword.Merge })
-            tokens.RemoveAt(tokens.Count - 1);
-
+        var tokens = parsed is null ? ReadTokens(text, database.Collation, quotedIdentifiers, database.CompatibilityLevel) : WithoutTrailingSeparators(parsed);
         var lead = tokens.Count > 0 ? tokens[0] : null;
         var hasFrom = false;
         var writes = false;
@@ -984,13 +1005,46 @@ internal sealed class QueryStoreShape
             captured,
             capturedWhenCallingFunction: !captured && lead is ReservedKeyword { Keyword: Keyword.Select },
             parameterized,
-            captured ? ForcedParameterization.Parameterize(tokens, out _) : null,
             VariablesInBinderOrder(tokens),
             isCondition,
             usesDefaultSchema,
             isTrivial: (captured && !joinsOrGroups && selects <= 1 && !writes) || parameterized is not null,
             statementType,
-            hash.ToBytes());
+            hash.ToBytes(),
+            database.Collation,
+            database.CompatibilityLevel,
+            quotedIdentifiers);
+    }
+
+    /// <summary>
+    /// <paramref name="text"/>'s tokens under the given inputs, its blanks and
+    /// comments left out — none at all when the tokenizer refuses the text.
+    /// </summary>
+    private static List<Token> ReadTokens(string text, Collation collation, bool quotedIdentifiers, CompatibilityLevel compatibilityLevel)
+    {
+        var tokens = new List<Token>();
+        var index = 0;
+        try
+        {
+            while (Tokenizer.NextToken(text, ref index, collation, quotedIdentifiers, compatibilityLevel) is Token token)
+            {
+                if (token is not (Whitespace or Comment))
+                    tokens.Add(token);
+            }
+        }
+        catch (SimulatedSqlException)
+        {
+            tokens.Clear();
+        }
+        return WithoutTrailingSeparators(tokens);
+    }
+
+    /// <summary><paramref name="tokens"/> without the separators that end them, but a <c>MERGE</c>'s, which is part of its text.</summary>
+    private static List<Token> WithoutTrailingSeparators(List<Token> tokens)
+    {
+        while (tokens.Count > 0 && tokens[^1] is Operator { Character: ';' } && tokens[0] is not ReservedKeyword { Keyword: Keyword.Merge })
+            tokens.RemoveAt(tokens.Count - 1);
+        return tokens;
     }
 
     /// <summary>
@@ -1010,6 +1064,8 @@ internal sealed class QueryStoreShape
         const int From = 0, Where = 1, GroupBy = 2, Having = 3, SelectList = 4, OrderBy = 5, Top = 6, Offset = 7, Assigned = 8;
         // An UPDATE's or DELETE's TOP binds after its WHERE, its SET list next.
         const int WriteTop = 2, SetList = 3, Output = 4;
+        if (!tokens.Exists(static token => token is AtPrefixedString))
+            return [];
         var lead = tokens.Count > 0 ? tokens[0] : null;
         var isWrite = lead is ReservedKeyword { Keyword: Keyword.Update or Keyword.Delete };
         var isAssignment = lead is ReservedKeyword { Keyword: Keyword.Set or Keyword.Declare };

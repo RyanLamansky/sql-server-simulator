@@ -199,6 +199,8 @@ Probed 2026-09-29 against SQL Server 2025, with `sp_query_store_flush_db` and a 
 
 **Cost.** A database whose store is OFF records nothing, but the same capture still times each candidate statement of a batch the plan-cache DMVs record, reading its shape as AUTO does ([`plan-cache.md`](plan-cache.md#the-plan-cache-dmvs)).
 A store in AUTO — every user database's default — times each candidate statement, counts its reads, and reads each distinct text's shape once (from the parser's own tokens when it still holds them), which measured about 3% on the index sqllogictest replay (60.9 / 59.7 / 61.3 s against 58.0 / 59.8 / 58.6 s with the change absent, measured 2026-09-29); a text's shape analysis is the bulk of it, which is why the tokens the parser collected — kept even once the token memo is full — are read back rather than the text tokenized again.
+A text run once pays for its shape every time, and on one-off writes that was most of the capture: switching the capture off took a 10-column `INSERT … VALUES` from 25.5 to 16.4 µs and a two-column `UPDATE` by key from 18.9 to 12.4 µs (Release, the one-off harness of [`plan-cache.md`](plan-cache.md#one-off-texts-a-cpu-profile-of-the-parse), measured 2026-10-25).
+Two of the shape's three renderings were waste: the forced-parameterized form is rendered only when a database parameterizing by force asks for it, and the simple-parameterized text once where Query Store's and the prepared plan's declaration orders agree, which took the `INSERT` to 22.7 µs (35.9 → 29.4 KB) and the `UPDATE` to 16.8 µs.
 
 ### Procedures
 
