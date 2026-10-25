@@ -896,8 +896,9 @@ partial class Simulation
                 // does a linked server's provider refusing an object's
                 // metadata — Msg 7314, 7325, 7357, 9514 (probed 2026-10-05).
                 // An XQuery argument's compile error ends it too (probed
-                // 2026-10-20).
-                if (ex.Number is 529 or 1090 or 7314 or 7325 or 7357 or 8622 or 9514 or 13544 || ex.BindsWithBatch || ex.XQueryOffset is not null || ex.Errors.Any(static entry => entry.Number == 5324))
+                // 2026-10-20), as does a refusal of a format file's contents
+                // (probed 2026-10-25).
+                if (ex.Number is 529 or 1090 or 7314 or 7325 or 7357 or 8622 or 9514 or 13544 || ex.BindsWithBatch || ex.EndsBindReport || ex.XQueryOffset is not null || ex.Errors.Any(static entry => entry.Number == 5324))
                     batch.BatchAborted = true;
             }
             else if (CaughtByTryFrame(batch, ex))

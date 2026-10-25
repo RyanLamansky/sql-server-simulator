@@ -427,6 +427,12 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool RefusedRecompilingDeferred;
 
     /// <summary>
+    /// Set on a refusal that, met while a batch or module body binds, joins
+    /// the binder report and ends it, so no error past it is reported.
+    /// </summary>
+    internal bool EndsBindReport { get; private init; }
+
+    /// <summary>
     /// Set on a conversion error raised while <c>ALTER TABLE … ALTER COLUMN</c>
     /// rewrites the column's values, which real follows with Msg 3621 though
     /// the error ends the batch, where the same error from an INSERT or UPDATE

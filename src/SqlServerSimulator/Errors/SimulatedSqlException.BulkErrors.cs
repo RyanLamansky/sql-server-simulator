@@ -24,6 +24,116 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException BulkErrorFileNotOpened(string path, bool exists) =>
         new($"Cannot bulk load because the file \"{path}\" could not be opened. Operating system error code {(exists ? "80(The file exists.)" : "5(Access is denied.)")}.", 4861, 16, 1);
 
+    /// <summary>
+    /// A refusal of a format file's contents, which real reads compiling the
+    /// statement that names it: it closes the batch's binder report, ends the
+    /// batch uncaught by a <c>TRY</c> in its scope, and rolls the transaction
+    /// back as under <c>XACT_ABORT</c> (probed 2026-10-25 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static SimulatedSqlException FormatFileRefusal(string message, int number, byte state = 1) =>
+        new(message, number, 16, state) { AbortsAsUnderXactAbort = true, RefusedRecompilingDeferred = true, EndsBindReport = true };
+
+    /// <summary>Msg 4820: a non-XML format file whose first token is a number that names no version.</summary>
+    internal static SimulatedSqlException BulkFormatFileUnknownVersion(string path) =>
+        FormatFileRefusal($"Cannot bulk load. Unknown version of format file \"{path}\".", 4820);
+
+    /// <summary>Msg 4822: a format file declaring no field, or no column for one to load.</summary>
+    internal static SimulatedSqlException BulkFormatFileColumnCount(string path) =>
+        FormatFileRefusal($"Cannot bulk load. Invalid number of columns in the format file \"{path}\".", 4822);
+
+    /// <summary>Msg 4823: a non-XML field whose order isn't its place in the file.</summary>
+    internal static SimulatedSqlException BulkFormatFileColumnNumber(string path) =>
+        FormatFileRefusal($"Cannot bulk load. Invalid column number in the format file \"{path}\".", 4823);
+
+    /// <summary>Msg 4824: a non-XML field whose host type is no bcp type name, which is case-sensitive.</summary>
+    internal static SimulatedSqlException BulkFormatFileDataType(int field, string path) =>
+        FormatFileRefusal($"Cannot bulk load. Invalid data type for column number {field} in the format file \"{path}\".", 4824);
+
+    /// <summary>Msg 4825: a non-XML field whose prefix length isn't 0, 1, 2, 4 or 8.</summary>
+    internal static SimulatedSqlException BulkFormatFilePrefix(int field, string path) =>
+        FormatFileRefusal($"Cannot bulk load. Invalid prefix for column number {field} in the format file \"{path}\".", 4825);
+
+    /// <summary>Msg 4826: a non-XML field whose length isn't an <c>int</c> of at least 0.</summary>
+    internal static SimulatedSqlException BulkFormatFileColumnLength(int field, string path) =>
+        FormatFileRefusal($"Cannot bulk load. Invalid column length for column number {field} in the format file \"{path}\".", 4826);
+
+    /// <summary>
+    /// Msg 4828: a non-XML field whose server column order isn't an
+    /// <c>int</c> of at least 0, or the first of two fields loading one column.
+    /// </summary>
+    internal static SimulatedSqlException BulkFormatFileDestinationColumn(int field, string path) =>
+        FormatFileRefusal($"Cannot bulk load. Invalid destination table column number for source column {field} in the format file \"{path}\".", 4828);
+
+    /// <summary>
+    /// Msg 4839: a field's collation that isn't one, followed by Msg 4822 when
+    /// the field is the file's first.
+    /// </summary>
+    internal static SimulatedSqlException BulkFormatFileCollation(int field, string path)
+    {
+        var refusal = FormatFileRefusal($"Cannot perform the bulk load. Invalid collation name for source column {field} in the format file \"{path}\".", 4839);
+        if (field != 1)
+            return refusal;
+        List<SimulatedError> entries = [.. refusal.Errors, .. BulkFormatFileColumnCount(path).Errors];
+        return new(string.Join(Environment.NewLine, entries.Select(entry => entry.Message)), System.Runtime.InteropServices.CollectionsMarshal.AsSpan(entries))
+        {
+            AbortsAsUnderXactAbort = true,
+            RefusedRecompilingDeferred = true,
+            EndsBindReport = true,
+        };
+    }
+
+    /// <summary>Msg 4855: an XML format file's element where a different one belongs, at its line.</summary>
+    internal static SimulatedSqlException BulkFormatFileUnexpectedElement(int line, string path, string element) =>
+        FormatFileRefusal($"Line {line} in format file \"{path}\": unexpected element \"{element}\".", 4855);
+
+    /// <summary>Msg 4856: an XML format file's element or end tag where neither belongs, at its line.</summary>
+    internal static SimulatedSqlException BulkFormatFileUnexpectedInfoItem(int line, string path) =>
+        FormatFileRefusal($"Line {line} in format file \"{path}\": unexpected info item.", 4856);
+
+    /// <summary>
+    /// Msg 4857: an XML format file's attribute its element doesn't take, or
+    /// doesn't take for its type, at the element's line; a namespace
+    /// declaration is named as the empty string.
+    /// </summary>
+    internal static SimulatedSqlException BulkFormatFileAttributeNotAllowed(int line, string path, string attribute) =>
+        FormatFileRefusal($"Line {line} in format file \"{path}\": Attribute \"{attribute}\" could not be specified for this type.", 4857);
+
+    /// <summary>Msg 4858: an XML format file's attribute whose value doesn't read, at its element's line.</summary>
+    internal static SimulatedSqlException BulkFormatFileBadAttribute(int line, string path, string value, string attribute) =>
+        FormatFileRefusal($"Line {line} in format file \"{path}\": bad value {value} for attribute \"{attribute}\".", 4858);
+
+    /// <summary>Msg 4859: an XML format file's element missing an attribute it requires, at its line.</summary>
+    internal static SimulatedSqlException BulkFormatFileMissingAttribute(int line, string path, string attribute) =>
+        FormatFileRefusal($"Line {line} in format file \"{path}\": required attribute \"{attribute}\" is missing.", 4859);
+
+    /// <summary>Msg 4872: an XML <c>FIELD</c> whose <c>ID</c> an earlier one took.</summary>
+    internal static SimulatedSqlException BulkFormatFileDuplicateId(int line, string path, string id) =>
+        FormatFileRefusal($"Line {line} in format file \"{path}\": duplicate element id \"{id}\".", 4872);
+
+    /// <summary>Msg 4873: an XML <c>COLUMN</c> whose <c>SOURCE</c> names no <c>FIELD</c>.</summary>
+    internal static SimulatedSqlException BulkFormatFileUnknownIdReference(int line, string path, string id) =>
+        FormatFileRefusal($"Line {line} in format file \"{path}\": referencing non-existing element id \"{id}\".", 4873);
+
+    /// <summary>Msg 4874: an XML <c>COLUMN</c> whose <c>SOURCE</c> an earlier one named.</summary>
+    internal static SimulatedSqlException BulkFormatFileDuplicateIdReference(int line, string path, string id) =>
+        FormatFileRefusal($"Line {line} in format file \"{path}\": duplicate element id reference \"{id}\".", 4874);
+
+    /// <summary>
+    /// Msg 4862: a format file that is empty — operating system error 38 — or
+    /// a non-XML one ending among the tokens its field count promises.
+    /// </summary>
+    internal static SimulatedSqlException BulkFormatFileIncomplete(string path, bool empty) =>
+        FormatFileRefusal($"Cannot bulk load because the file \"{path}\" is incomplete or could not be read. Operating system error code {(empty ? "38(Reached the end of the file.)" : "(null)")}.", 4862);
+
+    /// <summary>
+    /// The 9400 family as real's format-file reader raises it, at state 48:
+    /// Msg 9422 for text ahead of the root element and Msg 9435 for a document
+    /// with none, at the line and character after the last one it read.
+    /// </summary>
+    internal static SimulatedSqlException BulkFormatFileXmlParsing(bool rootMissing, int line, int character) =>
+        FormatFileRefusal($"XML parsing: line {line}, character {character}, {(rootMissing ? "one root element" : "incorrect document syntax")}", rootMissing ? 9435 : 9422, 48);
+
     /// <summary>Msg 4832: the data file ends inside a row.</summary>
     internal static SimulatedSqlException BulkUnexpectedEndOfFile() =>
         new("Bulk load: An unexpected end of file was encountered in the data file.", 4832, 16, 1);
@@ -174,7 +284,7 @@ partial class SimulatedSqlException
 
     /// <summary>Msg 4838: an <c>OPENROWSET(BULK …)</c> format file with a <c>SQLDECIMAL</c> / <c>SQLNUMERIC</c> field.</summary>
     internal static SimulatedSqlException BulkRowsetDecimalNotSupported() =>
-        new("The bulk data source does not support the SQLNUMERIC or SQLDECIMAL data types.", 4838, 16, 1);
+        FormatFileRefusal("The bulk data source does not support the SQLNUMERIC or SQLDECIMAL data types.", 4838);
 
     /// <summary>
     /// Msg 15281: <c>OPENROWSET</c> / <c>OPENDATASOURCE</c> over a provider

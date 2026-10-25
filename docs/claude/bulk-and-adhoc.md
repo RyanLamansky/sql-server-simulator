@@ -29,7 +29,7 @@ A partitioned view, or a view over one, is **Msg 4437** — see [`programmable.m
 Options parse as [`BulkOptions`](../../src/SqlServerSimulator/Parser/BulkOptions.cs) documents: each at most once (**Msg 4130**), numbers as unsigned integer literals and text as string literals, else Msg 102; `CODEPAGE` is **Msg 16202** (class 15, at compile).
 `TABLOCK`, `ORDER`, `ROWS_PER_BATCH` and `KILOBYTES_PER_BATCH` carry no effect; an `ORDER` column the table lacks is Msg 4817, class 0, and the hint is ignored.
 
-At run time: `ADMINISTER BULK OPERATIONS` (**Msg 4834** at state 4, ending the batch uncaught), `DATA_SOURCE`, the file access above, the format file, the error file, then `FIRSTROW` past `LASTROW` (**Msg 4880**), `FORMAT = 'CSV'` with a native type (**Msg 5339**) and a `FIELDQUOTE` longer than one character (**Msg 4878**).
+At run time: `ADMINISTER BULK OPERATIONS` (**Msg 4834** at state 4, ending the batch uncaught), `DATA_SOURCE`, the file access above, the format file (unless the batch's compile read it — see [Format files](#format-files)), the error file, then `FIRSTROW` past `LASTROW` (**Msg 4880**), `FORMAT = 'CSV'` with a native type (**Msg 5339**) and a `FIELDQUOTE` longer than one character (**Msg 4878**).
 No `INSERT` permission is asked: real's Linux server never gets that far for a login without `CONTROL SERVER`.
 
 ### Reading the file
@@ -46,7 +46,7 @@ An empty field is NULL, and a lone NUL character (what bcp writes for an empty s
 `FORMAT = 'CSV'` reads records: a field is quoted (`FIELDQUOTE`, default `"`, a doubled quote inside standing for one, terminators and line breaks inside kept) or has no quote at all, and it must end at the terminator its position expects.
 A stray quote, text after a closing quote, or a record with the wrong number of fields is **Msg 4879** naming the row and field; a quote never closed is Msg 4832; a malformed record `FIRSTROW` skips is **Msg 7301** instead.
 
-`native` and `widenative` read bcp's native layout for the target's columns ([`BulkField.ForNativeColumn`](../../src/SqlServerSimulator/Storage/Bulk/BulkField.cs)); a format file — non-XML or XML — lays out fields of its own, maps them to columns by server column order (0 skips a field) or `ROW` order, and decodes each by host type ([`BulkFormatFile`](../../src/SqlServerSimulator/Storage/Bulk/BulkFormatFile.cs)).
+`native` and `widenative` read bcp's native layout for the target's columns ([`BulkField.ForNativeColumn`](../../src/SqlServerSimulator/Storage/Bulk/BulkField.cs)); a [format file](#format-files) — non-XML or XML — lays out fields of its own, maps them to columns by server column order (0 skips a field) or `ROW` order, and decodes each by host type.
 
 ### Fields to columns
 
@@ -79,8 +79,33 @@ Triggers fire only under `FIRE_TRIGGERS`, which also hands the rows to an `INSTE
 `OPENJSON` over `SINGLE_CLOB` and `CAST(BulkColumn AS xml)` over `SINGLE_BLOB` are the common load shapes.
 
 A `FORMATFILE` lays the file out as rows, with the bulk options above: a non-XML file's `SQLCHAR` field of length `n` is `varchar(n)`, `SQLNCHAR` `nvarchar(n / 2)`, a native host type itself, and **Msg 4838** for `SQLDECIMAL`; an XML file's `COLUMN` types it, a string one without `LENGTH` taking its field's maximum.
+An XML file's `COLUMN` without an `xsi:type` takes its field's type: `varchar`, `nvarchar` of half the field's bytes, or `varbinary` for a native field, 8,000 bytes long when the field gives no length.
 No format at all is **Msg 15808**, `FORMAT = 'CSV'` without one **Msg 472**, and a `WITH` column list over CSV **Msg 5374**; as a DML target the `BULK` form is Msg 156.
 The file is opened when the statement runs, and read again each time its rows are; `ADMINISTER BULK OPERATIONS` is not asked, only file access.
+
+## Format files
+
+Real reads a format file while it compiles the statement naming it, once the statement's data file and the format file both exist, so a refusal of the format file's contents fails the batch before any of it runs — an untaken `IF` branch's included — and fails a `CREATE PROCEDURE` whose body names it (probed 2026-10-25 against SQL Server 2025).
+A file missing then leaves the statement to run, where its Msg 4860 goes first, the data file's ahead of the format file's.
+A statement the compile deferred reads the format file as it runs.
+Wherever it is raised, a refusal joins the binder report and ends it, ends the batch uncaught by a `TRY` in its scope, and rolls the transaction back — what Msg 4860 leaves standing; raised by a procedure's first run, it ends the caller's batch too unless the caller's `TRY` catches it.
+[`BulkFormatFile.Parse`](../../src/SqlServerSimulator/Storage/Bulk/BulkFormatFile.cs) carries the order of every check, which is real's.
+
+An empty file is Msg 4862.
+A file whose first token leads with a number above zero is the non-XML form — `14.0x` and `1e1` are unknown versions, Msg 4820 — and any other is XML to real, a word or `0` or `-5` included.
+
+The non-XML form reads as a stream of tokens, so a field's tokens may span lines.
+Versions `8.0` to `16.0` lay a field out in eight tokens, the last its collation; `6.0`, `7.0` and `17.0` in seven, without one.
+Each token is refused as it's read: a field order that isn't the field's place, a host type outside bcp's list (case-sensitive: `sqlchar` is refused), a prefix length other than 0, 1, 2, 4 or 8, a negative length or server column order; a file ending among a field's tokens is Msg 4862.
+Once every field has read, two fields loading one column refuse the first of them, then a collation that isn't `RAW`, empty, or a collation's name refuses its field, followed by Msg 4822 when that field is the first.
+
+The XML form is read as a stream too, refused in document order, and reading stops at the root element's end, so anything after it is never looked at.
+Text ahead of the root element is Msg 9422 and a document without one Msg 9435, both at state 48 and at the line and character after the last one read.
+Element names, attribute names and their enumerated values are case-sensitive.
+A `FIELD`'s or `COLUMN`'s attributes go through in written order — an attribute the element never takes is Msg 4857, a value that doesn't read Msg 4858, an `ID` taken twice Msg 4872, a `SOURCE` naming no field Msg 4873 and one named twice Msg 4874 — and then the element as a whole: what its type requires (Msg 4859, the type and `ID` first), then the attributes its type doesn't take, in a fixed order whatever the written one.
+A namespace declaration on either is an attribute named the empty string.
+After the walk a collation that isn't one is refused, then a file with no field or no column (Msg 4822).
+A `COLUMN`'s `SCALE` sets a time type's fractional digits, up to 7; a decimal column with a zero `PRECISION` is Msg 4838 in a rowset, though `BULK INSERT` loads through it.
 
 ## Ad hoc provider rowsets
 
@@ -105,6 +130,7 @@ The `Msg 7222` / `Msg 15281` refusals come first.
 - UTF-8 with an invalid sequence right before a terminator: real's decoder can swallow the terminator into the field (`e4 80 0a` loaded as `U+FFFD` plus a line feed), where the simulator decodes with a replacement character and still finds it.
 - Inside a `TRY`, real loads the rows of an `xml` column that don't parse; here Msg 9400 ends the load wherever it runs.
 - An XML format file's `SQLDECIMAL` column types as `decimal` where real's `type_name` reads `numeric`.
+- An `OPENROWSET(BULK …)` over an XML format file whose `COLUMN` has no `NAME` fails an assertion on real (Msg 3624, ending the session); here the column's name is empty.
 - A format-file rowset's field that doesn't convert ends the statement with its row error; `MAXERRORS` isn't applied to a rowset.
 - Ad hoc: the provider string's keywords aren't checked and nothing authenticates, so an OLE DB spelling real's driver refuses (`User ID=` / `Password=` → Msg 7399, 7303) connects here, as does the three-part form real's loopback refused on encryption.
   An unreachable server's Msg 2 arrives without the two Msg 7412 provider messages real sends ahead of it.
@@ -113,6 +139,9 @@ The `Msg 7222` / `Msg 15281` refusals come first.
 
 - External data sources (`CREATE EXTERNAL DATA SOURCE`), so `DATA_SOURCE` is always Msg 12703, and the SQL Server 2022+ `OPENROWSET(BULK …)` forms over one (`FORMAT = 'PARQUET'` / `'DELTA'`, a `WITH` schema).
 - What an `ERRORFILE` would hold — the failed rows' bytes and a `Row N File Offset …` line per row in `.Error.Txt` on real.
-- `sql_variant` and CLR-typed fields in a native file or format file (`NotSupportedException`).
+- `sql_variant` and CLR-typed fields in a native file or format file (`NotSupportedException`), and the `SQLDATETIM8` and `SQLVECTOR` host types.
+- An XML format file whose markup doesn't parse: real raises the XML parsing error at state 48 (`NotSupportedException` here).
+- A format file's collation is checked but not applied: real reads a character field in its code page (`Cyrillic_General_CI_AS` reads `C0 E9` as `Ай`), where every character field here reads as UTF-8.
+- An XML `COLUMN`'s type converting its field on the way into `BULK INSERT`'s target: real refuses a field its type can't read (a `2` for `SQLBIT`) with Msg 4864, where the field reaches the target column as text here.
 - `EXEC … AT DATA_SOURCE`.
 - An ad hoc rowset's object form over a `sys` or `INFORMATION_SCHEMA` view, which a four-part name reads ([`linked-servers.md`](linked-servers.md#reads)); here it is Msg 7314.

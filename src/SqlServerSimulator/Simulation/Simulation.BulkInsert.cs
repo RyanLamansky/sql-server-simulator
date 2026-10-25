@@ -173,10 +173,23 @@ partial class Simulation
                 : SimulatedSqlException.InvalidObjectName(name.WithoutOmittedLeading(), 160);
         }
         batch.HasSessionScopedReference = true;
-        if (batch.IsSkipping)
-            yield break;
-
         var simulation = batch.Connection.Simulation;
+        if (batch.IsSkipping)
+        {
+            // Real reads a format file compiling the statement, once the data
+            // file and the format file are both there to read, so a refusal of
+            // its contents fails the batch before any of it runs (probed
+            // 2026-10-25 against SQL Server 2025).
+            if (options.FormatFile is { } compiledFormatPath
+                && simulation.SessionHoldsServerPermission(batch.Connection, Permission.ControlServer)
+                && simulation.ReadBulkFile(path) is not null
+                && simulation.ReadBulkFile(compiledFormatPath) is { } compiledFormat)
+            {
+                _ = BulkFormatFile.Parse(compiledFormat, compiledFormatPath, batch.CurrentDatabase.Collation, out _);
+            }
+            yield break;
+        }
+
         if (!simulation.SessionHoldsServerPermission(batch.Connection, Permission.AdministerBulkOperations))
             throw SimulatedSqlException.BulkLoadPermissionDenied();
         if (options.DataSource is { } dataSource)
@@ -186,8 +199,7 @@ partial class Simulation
         if (options.FormatFile is { } formatPath)
         {
             var formatBytes = ReadBulkFileFor(batch, formatPath, missingState: 3);
-            format = BulkFormatFile.Parse(formatBytes, batch.CurrentDatabase.Collation, out _)
-                ?? throw new NotSupportedException($"The format file '{formatPath}' is in a form the simulator doesn't read.");
+            format = BulkFormatFile.Parse(formatBytes, formatPath, batch.CurrentDatabase.Collation, out _);
         }
         if (options.ErrorFile is { } errorFile)
         {

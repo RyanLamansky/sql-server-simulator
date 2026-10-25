@@ -323,17 +323,20 @@ partial class Selection
             byte[] formatBytes;
             try
             {
+                // Real reads the data file ahead of the format file, so a
+                // missing one is what the statement reports however its format
+                // file reads (probed 2026-10-25 against SQL Server 2025).
+                _ = Simulation.ReadBulkFileFor(batch, path, missingState: 4);
                 formatBytes = Simulation.ReadBulkFileFor(batch, formatPath, missingState: 3);
             }
             catch (SimulatedSqlException) when (batch.IsSkipping)
             {
-                // The batch compiles past a rowset whose format file it can't
-                // read; the statement reports that when it runs.
+                // The batch compiles past a rowset whose files it can't read;
+                // the statement reports that when it runs.
                 batch.CurrentStatement.BindsDeferredSource = true;
                 throw;
             }
-            format = BulkFormatFile.Parse(formatBytes, context.CurrentDatabase.Collation, out var hasDecimal)
-                ?? throw new NotSupportedException($"The format file '{formatPath}' is in a form the simulator doesn't read.");
+            format = BulkFormatFile.Parse(formatBytes, formatPath, context.CurrentDatabase.Collation, out var hasDecimal);
             if (hasDecimal)
                 throw SimulatedSqlException.BulkRowsetDecimalNotSupported();
             names = format.ColumnNames;
@@ -348,9 +351,9 @@ partial class Selection
                 BulkSingleKind.Clob => VarcharSqlType.Get(SqlType.MaxLengthSentinel, context.CurrentDatabase.Collation.ForVarcharStorage(), Coercibility.CoercibleDefault),
                 _ => NVarcharSqlType.Get(SqlType.MaxLengthSentinel, context.CurrentDatabase.Collation, Coercibility.CoercibleDefault),
             }];
+            if (!batch.IsSkipping)
+                _ = Simulation.ReadBulkFileFor(batch, path, missingState: 4);
         }
-        if (!batch.IsSkipping)
-            _ = Simulation.ReadBulkFileFor(batch, path, missingState: 4);
 
         var alias = ConsumeOptionalAliasAtCurrent(context) ?? throw SimulatedSqlException.BulkRowsetNeedsCorrelationName();
         if (context.Token is Operator { Character: '(' })
