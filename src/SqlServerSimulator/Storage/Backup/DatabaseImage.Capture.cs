@@ -795,7 +795,9 @@ partial class DatabaseImage
     private static void AppendColumn(StringBuilder sql, HeapColumn column, Database database)
     {
         _ = sql.Append(Quote(column.Name)).Append(' ');
-        if (column.Computed is not null)
+        // A column set computes from the sparse columns but is declared by its
+        // type alone, below.
+        if (column.Computed is not null && !column.IsColumnSet)
         {
             _ = sql.Append("AS ").Append(column.ComputedDefinition ?? throw new NotSupportedException(
                 $"BACKUP DATABASE of the computed column '{column.Name}', which has no captured definition, isn't modeled by the simulator."));

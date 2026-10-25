@@ -578,6 +578,31 @@ public sealed class EncryptionKeyTests
             """));
     }
 
+    /// <summary>
+    /// A key pair no operation has used yet goes into the backup as the one the
+    /// database goes on using, so what the source encrypts afterwards the
+    /// copy decrypts.
+    /// </summary>
+    [TestMethod]
+    public void Backup_BeforeAKeyPairsFirstUse_SharesItWithTheCopy()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(MasterKey + """
+            create certificate c1 with subject = 'x';
+            create asymmetric key a1 with algorithm = rsa_2048;
+            backup database simulated to disk = 'k.bak';
+            create table t (e varbinary(500), a varbinary(500));
+            insert t values (encryptbycert(cert_id('c1'), 'by cert'), encryptbyasymkey(asymkey_id('a1'), 'by asym'));
+            """);
+        AreEqual("by cert|by asym", simulation.ExecuteBatchesScalar(
+            "restore database copy from disk = 'k.bak' with move 'simulated' to 'copy.mdf', move 'simulated_log' to 'copy.ldf'",
+            """
+            use copy;
+            select concat_ws('|', cast(decryptbycert(cert_id('c1'), e) as varchar(10)), cast(decryptbyasymkey(asymkey_id('a1'), a) as varchar(10)))
+            from simulated.dbo.t
+            """));
+    }
+
     [TestMethod]
     [DataRow("create certificate c from file = 'c.cer'")]
     [DataRow("create asymmetric key a from file = 'a.snk'")]

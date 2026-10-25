@@ -135,9 +135,6 @@ internal abstract class KeyPair(int id, string name, int principalId, int keyLen
 
     public bool IsCertificate => this is Certificate;
 
-    /// <summary>The key pair if an operation has made it, for a backup to carry; null while none has.</summary>
-    public RSA? MadeKey => Volatile.Read(ref this.Rsa.Value);
-
     /// <summary>The class name real's messages use: <c>certificate</c> or <c>asymmetric key</c>.</summary>
     public string ClassName => this.IsCertificate ? "certificate" : "asymmetric key";
 

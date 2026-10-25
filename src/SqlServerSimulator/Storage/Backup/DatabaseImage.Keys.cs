@@ -149,7 +149,10 @@ partial class DatabaseImage
         WriteBytes(w, keyPair.Thumbprint);
         BackupBinary.WriteNullable(w, keyPair.Password);
         w.Write(keyPair.HasPrivateKey);
-        WriteBytes(w, keyPair.MadeKey?.ExportRSAPrivateKey() ?? []);
+        // The key pair is made now if no operation has made it yet, the
+        // database keeping it too, so what the database encrypts after the
+        // backup a copy of it decrypts.
+        WriteBytes(w, keyPair.Key.ExportRSAPrivateKey());
     }
 
     private static (int Id, string Name, int PrincipalId, int KeyLength, byte[] Thumbprint, string? Password, bool HasPrivateKey, StrongBox<RSA?> Rsa) ReadKeyPair(BinaryReader r)

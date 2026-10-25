@@ -19,7 +19,9 @@ partial class DatabaseImage
     private void CaptureBroker(Database database, BrokerRuntime? conversations)
     {
         this.ServiceBrokerGuid = database.ServiceBrokerGuid;
-        if (database.ServiceBrokerIfUsed is not { } objects)
+        // A queue is a schema object CREATE QUEUE makes without the database's
+        // broker objects, so a database holding only queues captures them too.
+        if ((database.ServiceBrokerIfUsed ?? (HoldsQueues(database) ? database.ServiceBroker : null)) is not { } objects)
             return;
         using var buffer = new MemoryStream();
         using (var w = new BinaryWriter(buffer, System.Text.Encoding.UTF8, leaveOpen: true))
@@ -42,6 +44,16 @@ partial class DatabaseImage
             }
         }
         this.BrokerState = buffer.ToArray();
+    }
+
+    private static bool HoldsQueues(Database database)
+    {
+        foreach (var (_, schema) in database.Schemas)
+        {
+            if (!schema.Queues.IsEmptyLockFree())
+                return true;
+        }
+        return false;
     }
 
     private static void WriteBrokerObjects(BinaryWriter w, Database database, DatabaseBroker objects)

@@ -90,6 +90,22 @@ public sealed class ServiceBrokerBackupTests
         AreEqual(1, simulation.ExecuteScalar("use b1; select count(*) from q"));
     }
 
+    /// <summary>
+    /// A queue is a schema object, created without the database-scoped broker
+    /// objects, so a backup holding nothing else of the broker carries it too.
+    /// </summary>
+    [TestMethod]
+    public void Restore_AQueueTheDatabaseHoldsAlone_ComesBack()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create database b1",
+            "use b1; create queue q with retention = on",
+            "backup database b1 to disk = N'b1.bak' with init",
+            CopyB2);
+        AreEqual("q|True", Rows(simulation, "use b2; select name, is_retention_enabled from sys.service_queues where is_ms_shipped = 0"));
+    }
+
     [TestMethod]
     public void Restore_AsCopy_SharesTheBrokerId_AndCanNotEnableBesideTheOriginal()
     {

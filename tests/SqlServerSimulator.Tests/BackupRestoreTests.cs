@@ -648,6 +648,22 @@ public sealed class BackupRestoreTests
         AreEqual(3.5m, simulation.ExecuteScalar("select sum(amount) from dst.app.parent"));
     }
 
+    /// <summary>A sparse column set restores declared as one, over the values its sparse columns hold.</summary>
+    [TestMethod]
+    public void ColumnSet_RoundTrips()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create database src",
+            "use src; create table t (id int primary key, a int sparse null, b varchar(10) sparse null, cs xml column_set for all_sparse_columns); insert t (id, a, b) values (1, 5, 'x'), (2, null, 'y')");
+        _ = simulation.ExecuteNonQuery("""
+            backup database src to disk = N'src.bak';
+            restore database dst from disk = N'src.bak' with move N'src' to N'/dst.mdf', move N'src_log' to N'/dst_log.ldf';
+            """);
+        AreEqual("1:5:x:<a>5</a><b>x</b>,2::y:<b>y</b>", simulation.ExecuteScalar("select string_agg(concat(id, ':', a, ':', b, ':', cast(cs as nvarchar(max))), ',') within group (order by id) from dst.dbo.t"));
+        AreEqual("id:0:0,a:1:0,b:1:0,cs:0:1", simulation.ExecuteScalar("use dst; select string_agg(concat(name, ':', cast(is_sparse as int), ':', cast(is_column_set as int)), ',') within group (order by column_id) from sys.columns where object_id = object_id('t')"));
+    }
+
     /// <summary>The rows of the catalog views a restore must reproduce, for <paramref name="database"/>.</summary>
     private static string Catalog(Simulation simulation, string database)
     {

@@ -13,7 +13,7 @@ Nothing outside the simulator reads the encrypted form, and that is what lets th
 The store's entries are immutable, and `ALTER` replaces one under the same id, GUID and material.
 A statement's undo is a copy of the master key and the three dictionaries (`EncryptionKeyStore.Snapshot`), so key DDL rolls back with its transaction as real's does.
 A session's open keys live on the connection by id (`SimulatedDbConnection.OpenSymmetricKeys`), and those survive a rollback: `OPEN` and `CLOSE` aren't transactional on real.
-A backup carries the whole store (`DatabaseImage.Keys.cs`), each key pair with the RSA key it has made, so data encrypted before a backup decrypts in the restored database.
+A backup carries the whole store (`DatabaseImage.Keys.cs`), each key pair with its RSA key — made then, the database keeping it, if no operation has made it yet — so data either side encrypts, before the backup or after it, decrypts on the other.
 
 ## Symmetric keys and real's cipher text
 
