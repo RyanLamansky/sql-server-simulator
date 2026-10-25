@@ -590,6 +590,20 @@ public sealed class MergeTests
             """));
     }
 
+    /// <summary>A table variable may lead a joined <c>USING</c> side (probed 2026-10-25 against SQL Server 2025).</summary>
+    [TestMethod]
+    public void UsingJoin_LedByATableVariable_Works()
+        => Assert.AreEqual(100, new Simulation().ExecuteScalar<int>("""
+            create table tgt (id int primary key, v int);
+            insert tgt values (1, 10);
+            declare @tv table (id int, v int);
+            insert @tv values (1, 100);
+            merge into tgt as t
+            using @tv s join tgt t2 on t2.id = s.id on s.id = t.id
+            when matched then update set v = s.v;
+            select v from tgt where id = 1;
+            """));
+
     [TestMethod]
     public void UsingBareTable_View_Works()
     {

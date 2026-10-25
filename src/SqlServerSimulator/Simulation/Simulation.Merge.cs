@@ -746,6 +746,12 @@ partial class Simulation
                         break;
                 }
             }
+            else if (context.Token is AtPrefixedString)
+            {
+                // A table variable, which a join may follow too (probed
+                // 2026-10-25 against SQL Server 2025).
+                _ = context.MoveNext();
+            }
             else
             {
                 while (context.Token is Name && context.GetNextOptional() is Operator { Character: '.' })
