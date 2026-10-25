@@ -200,7 +200,9 @@ partial class Simulation
     /// cache stays out of as <see cref="MayCacheStatementPlan"/> judges them,
     /// with nothing the walk's own parse settles beside binding — no binder
     /// error gathered yet, which fails the batch anyway, no <c>FIPS_FLAGGER</c>
-    /// and no security policy, whose predicates the walk binds with the batch.
+    /// and no security policy, whose predicates the walk binds with the batch —
+    /// and no <c>CREATE</c>, <c>ALTER</c> or <c>DROP</c> walked ahead, whose run
+    /// leaves any plan parsed past it stale by the time the run reaches it.
     /// </summary>
     private static bool ParsesForRunUnder(BatchContext walk, PlanCacheKey key)
     {
@@ -208,6 +210,7 @@ partial class Simulation
         var context = walk.Parser;
         return walk.CreateTimeBindErrors is not { Count: > 0 }
             && !walk.BatchAborted
+            && !walk.WalkMetDdl
             && walk.BindErrors is null
             && walk.FunctionBodyShape is null
             && walk.DependencySink is null

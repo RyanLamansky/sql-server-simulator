@@ -748,6 +748,8 @@ The parse is filed on the running batch (`BatchContext.WalkPlans`), and the stat
 The walk still takes a name's Sch-S as it binds, as it always has, so a batch still waits at compile on another session's redefinition.
 
 What the walk's own parse settles beyond binding is why some statements decline, parsed by the walk its way and by the run again: a hint (a join hint's warning, an optimizer refusal), a user or CLR function call (its inlining, settled compiling), a temporary table or table variable, a sequence, a FROM-less query (evaluated as it parses), `SELECT … INTO`, three- and four-part names, `FIPS_FLAGGER`, a security policy (bound with the batch), and a session under the settings a cached plan stays out of.
+Nor is a statement past a `CREATE`, `ALTER` or `DROP` in its batch attempted (`BatchContext.WalkMetDdl`): the run's DDL leaves any plan parsed past it stale by the time the run reaches it, and over a table the batch creates the attempt only throws.
+That spared the commonest one-batch test — create a table, fill it, read it, on a new simulation — an attempt costing about a seventh of the batch (measured 2026-10-25).
 A token pre-scan (`ReadsAsPlainQuery`) turns most of those away before the parse begins, since an attempt abandoned partway costs its parse; what it can't see — a view's body bound as the query parses, an error — abandons by throwing (`RunParseDeclinedException`), and the parser's statement state is put back (`ParserContext.StatementState`) for the walk's own parse to begin as if the attempt never ran, which `RunParseAudit` checks field by field in a Debug build.
 
 **Writes run on it too.**
