@@ -54,7 +54,7 @@ User principals start at 5 via `Database.AllocatePrincipalId`.
 It carries the original login name, a base `SecurityPrincipalFrame` (database-principal id + name + login), and an impersonation stack.
 `Effective` is the top frame (or the base); `EffectiveIsDbo` (principal id == 1) is the bypass every same-database enforcement gate short-circuits on.
 Each frame also records whether its identity is `IsDatabaseScoped`, which is what makes a reference *across* a boundary ask `PermissionEnforcement.Bypasses` instead — see [Cross-database references](#cross-database-references).
-An unauthenticated in-process connection uses `CreateDefault()` — dbo as login, database user, and original login everywhere — so existing consumers see byte-identical identity output.
+An unauthenticated in-process connection uses `CreateDefault()`: the `sa` login as `dbo`, as the overview above describes.
 
 **Identity scalars read the effective frame**: `CURRENT_USER` / `SESSION_USER` / `USER` / `USER_NAME()` / `USER_ID()` / `DATABASE_PRINCIPAL_ID()` → the effective database user; `SYSTEM_USER` / `SUSER_SNAME()` / `SUSER_NAME()` → the effective login (or the WITHOUT-LOGIN SID string), and with an argument the `sys.server_principals` row carrying that id or sid; `ORIGINAL_LOGIN()` → the session's original login.
 

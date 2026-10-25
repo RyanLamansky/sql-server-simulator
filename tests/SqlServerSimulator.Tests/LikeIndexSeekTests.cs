@@ -89,6 +89,20 @@ public sealed class LikeIndexSeekTests
         AreEqual(506, refused.Number);
     }
 
+    /// <summary>
+    /// An empty escape is Msg 506 over a seekable LIKE too, on its own or on a
+    /// joined source's (probed 2026-10-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select count(*) from t where s like 'a%' escape ''")]
+    [DataRow("select count(*) from t a join t b on a.id = b.id where a.s like 'a%' escape ''")]
+    [DataRow("declare @e varchar(1) = ''; select count(*) from t a join t b on a.id = b.id where a.s like 'a%' escape @e")]
+    public void AnEmptyEscape_IsRefused(string query)
+        => new Simulation().AssertSqlError(
+            $"create table t (id int primary key, s varchar(20)); create index ix on t (s); insert t values (1, 'ab'), (2, 'ac'); {query}",
+            506,
+            "The invalid escape character \"\" was specified in a LIKE predicate.");
+
     private static List<int> Ids(DbConnection connection, string sql, (string Name, object Value)[] parameters)
     {
         using var command = connection.CreateCommand(sql, parameters);
