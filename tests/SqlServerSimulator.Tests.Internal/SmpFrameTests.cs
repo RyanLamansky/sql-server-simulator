@@ -245,4 +245,86 @@ public sealed class SmpFrameTests
         await muxTask.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
         IsTrue(host.Ended);
     }
+
+    /// <summary>A session loop sending more than the client's window lets through, as a long result does.</summary>
+    private sealed class SendingHost : ISmpHost
+    {
+        public readonly TaskCompletionSource FirstSent = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Exception? Failure;
+
+        public async Task RunMarsSessionAsync(SmpSession session, CancellationToken cancellationToken)
+        {
+            byte[] packet = [Tds.PacketTabularResult, 0, 0, 8, 0, 0, 1, 0];
+            try
+            {
+                await session.SendOutboundAsync(packet, cancellationToken).ConfigureAwait(false);
+                this.FirstSent.SetResult();
+                await session.SendOutboundAsync(packet, cancellationToken).ConfigureAwait(false);
+            }
+            catch (IOException failure)
+            {
+                this.Failure = failure;
+            }
+        }
+
+        public void CancelConnectionExecution(SmpSession session)
+        {
+        }
+    }
+
+    /// <summary>
+    /// The client dropping the connection fails a send its window holds back,
+    /// so the session's loop ends and the connection under it is torn down,
+    /// where the send waited for a window that never opened, its statement's
+    /// locks held until the listener closed.
+    /// </summary>
+    [TestMethod]
+    public async Task ClientGone_FailsASendItsWindowHeldBack()
+    {
+        var cancellationToken = TestContext.CancellationToken;
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var clientSocket = new TcpClient();
+        var acceptTask = listener.AcceptTcpClientAsync(cancellationToken).AsTask();
+        await clientSocket.ConnectAsync(IPAddress.Loopback, ((IPEndPoint)listener.LocalEndpoint).Port, cancellationToken);
+        using var serverTcp = await acceptTask;
+        await using var serverStream = serverTcp.GetStream();
+
+        var host = new SendingHost();
+        using var mux = new SmpMultiplexer(serverStream, host);
+        var muxTask = mux.RunAsync(cancellationToken);
+        await clientSocket.GetStream().WriteAsync(BuildFrame(Syn, sid: 1, seq: 0, window: 1), cancellationToken);
+        await host.FirstSent.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
+        clientSocket.Dispose();
+
+        await muxTask.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
+        _ = IsInstanceOfType<IOException>(host.Failure);
+    }
+
+    /// <summary>
+    /// A frame declaring more than one TDS packet can hold ends the connection
+    /// as malformed, where the declared length was allocated and then waited
+    /// for.
+    /// </summary>
+    [TestMethod]
+    public async Task OversizedFrame_EndsTheConnection()
+    {
+        var cancellationToken = TestContext.CancellationToken;
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        using var clientSocket = new TcpClient();
+        var acceptTask = listener.AcceptTcpClientAsync(cancellationToken).AsTask();
+        await clientSocket.ConnectAsync(IPAddress.Loopback, ((IPEndPoint)listener.LocalEndpoint).Port, cancellationToken);
+        using var serverTcp = await acceptTask;
+        await using var serverStream = serverTcp.GetStream();
+
+        using var mux = new SmpMultiplexer(serverStream, new RunningHost());
+        var muxTask = mux.RunAsync(cancellationToken);
+        var frame = BuildFrame(Data, sid: 1, seq: 1, window: 4);
+        BinaryPrimitives.WriteUInt32LittleEndian(frame.AsSpan(4), 1u << 30);
+        await clientSocket.GetStream().WriteAsync(frame, cancellationToken);
+
+        await muxTask.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
+    }
 }

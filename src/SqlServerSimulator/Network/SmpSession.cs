@@ -19,6 +19,9 @@ internal sealed class SmpSession(ushort sid, SmpMultiplexer multiplexer, uint pe
     private uint peerWindow = peerWindow;
     private TaskCompletionSource windowSignal = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+    // Set once the client is gone: no window will open again.
+    private bool abandoned;
+
     /// <summary>The SMP session id (SID) this logical session carries.</summary>
     public readonly ushort Sid = sid;
 
@@ -84,6 +87,21 @@ internal sealed class SmpSession(ushort sid, SmpMultiplexer multiplexer, uint pe
         }
     }
 
+    /// <summary>
+    /// Ends the wait of a send the client's window holds back, and refuses
+    /// every later one, the client having gone: the request sending fails as
+    /// its connection's other writes do, so its session's loop ends and the
+    /// connection under it is torn down, its transaction's locks with it.
+    /// </summary>
+    public void Abandon()
+    {
+        lock (this.windowGate)
+        {
+            this.abandoned = true;
+            _ = this.windowSignal.TrySetResult();
+        }
+    }
+
     /// <summary>Blocks until the client's window permits the next DATA sequence number.</summary>
     public async ValueTask WaitForSendWindowAsync(CancellationToken cancellationToken)
     {
@@ -92,6 +110,8 @@ internal sealed class SmpSession(ushort sid, SmpMultiplexer multiplexer, uint pe
             Task wait;
             lock (this.windowGate)
             {
+                if (this.abandoned)
+                    throw new IOException("The client closed the MARS connection.");
                 if (this.SendSequence + 1 <= this.peerWindow)
                     return;
                 wait = this.windowSignal.Task;

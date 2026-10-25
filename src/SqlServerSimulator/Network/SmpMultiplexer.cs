@@ -64,7 +64,12 @@ internal sealed class SmpMultiplexer(Stream stream, ISmpHost owner) : IDisposabl
                 var sid = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(2));
                 var length = BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(4));
                 var window = BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(12));
-                var payloadLength = checked((int)length - Tds.SmpHeaderSize);
+                // A frame carries at most one TDS packet, whose own length field
+                // stops at 65,535 bytes, so a longer one is malformed rather
+                // than a buffer to allocate.
+                if (length is < Tds.SmpHeaderSize or > Tds.SmpHeaderSize + ushort.MaxValue)
+                    throw new InvalidDataException($"SMP frame length {length} is out of range.");
+                var payloadLength = (int)length - Tds.SmpHeaderSize;
                 byte[] payload = [];
                 if (payloadLength > 0)
                 {
@@ -104,11 +109,13 @@ internal sealed class SmpMultiplexer(Stream stream, ISmpHost owner) : IDisposabl
             }
 
             // A client gone, a request still running is cancelled, as real ends
-            // the requests of a dropped connection, and every session's loop
-            // ends before the connection under them goes.
+            // the requests of a dropped connection, a send its window held
+            // back fails, and every session's loop ends before the connection
+            // under them goes.
             foreach (var session in live)
             {
                 await session.InboundWriter.CompleteAsync().ConfigureAwait(false);
+                session.Abandon();
                 owner.CancelConnectionExecution(session);
             }
             Task[] loops;
@@ -211,7 +218,9 @@ internal sealed class SmpMultiplexer(Stream stream, ISmpHost owner) : IDisposabl
                 return;
         }
 
+        // A closed session's window never opens again.
         await session.InboundWriter.CompleteAsync().ConfigureAwait(false);
+        session.Abandon();
     }
 
     /// <summary>

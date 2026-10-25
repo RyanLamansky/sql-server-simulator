@@ -745,7 +745,7 @@ Probed frame flow:
   WNDW advertises the sender's receive window — *the highest SEQNUM the peer may send*.
   Advancing rules, both directions:
   - *Client → us:* the client piggybacks its window on the **WNDW field of every frame** (DATA carried wnd 4, 5, 6, 7, 8) and sends **no standalone ACKs**, so a session's send window must advance from **every inbound frame's WNDW**, not just ACK frames — updating only on ACK stalls the send window at the SYN's 4.
-    `WaitForSendWindowAsync` blocks a DATA send until the window permits.
+    `WaitForSendWindowAsync` blocks a DATA send until the window permits, or fails it once the client has closed the session or the connection (`SmpSession.Abandon`), so the request ends and the connection's teardown releases its transaction's locks rather than holding them for a window that never opens.
   - *Us → client:* the server advertises `received + 4` and, matching the real cadence, sends **no standalone ACK for a complete (EOM) request** — the DATA response the batch loop produces piggybacks the advanced window.
     A **standalone ACK is emitted only when consuming client data with no immediate DATA to answer it**: a mid-message (EOM-clear) packet of a multi-packet client request (else the client's send window stalls at its initial size), and an attention taken in while a command runs.
     The ACK's SEQNUM is the session's last-sent DATA sequence; its WNDW is `received + 4`.
