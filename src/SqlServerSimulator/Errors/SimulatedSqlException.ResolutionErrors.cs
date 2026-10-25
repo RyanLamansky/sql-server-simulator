@@ -191,10 +191,57 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server's Msg 141 — fired when a <c>SELECT</c> mixes
     /// variable assignment (<c>@v = expr</c>) with non-assignment
-    /// projection elements in the same projection list.
+    /// projection elements in the same projection list, reported at its
+    /// <c>SELECT</c> keyword's <paramref name="line"/> — or, at line 0, for a
+    /// pair of a set operation's branches one of which assigns where the other
+    /// retrieves (probed 2026-10-25 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException SelectAssignmentMixedWithRetrieval() =>
-        new("A SELECT statement that assigns a value to a variable must not be combined with data-retrieval operations.", 141, 15, 1);
+    internal static SimulatedSqlException SelectAssignmentMixedWithRetrieval(int line) =>
+        AtLineOrZero(new("A SELECT statement that assigns a value to a variable must not be combined with data-retrieval operations.", 141, 15, 1), line);
+
+    /// <summary>
+    /// <see cref="WithLine"/> for an error real reports at line 0 in some
+    /// shapes, which is pinned there rather than left for the enclosing frame
+    /// to fill.
+    /// </summary>
+    private static SimulatedSqlException AtLineOrZero(SimulatedSqlException exception, int line) =>
+        line == 0 ? exception.PinLine(0) : WithLine(exception, line);
+
+    /// <summary>
+    /// Mimics SQL Server error 10734: a statement-level set operation a branch
+    /// of which assigns variables, reported at the set operator between the
+    /// pair of branches that raises it, in state 2 for <c>INTERSECT</c> and 1
+    /// otherwise (probed 2026-10-25 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AssignmentInSetOperation(bool intersect, int line) =>
+        WithLine(new("Variable assignment is not allowed in a statement containing a top level UNION, INTERSECT or EXCEPT operator.", 10734, 15, intersect ? (byte)2 : (byte)1), line);
+
+    /// <summary>
+    /// Mimics SQL Server error 196: an <c>INTO</c> on a set operation's branch
+    /// other than its first, reported at the statement's first line (probed
+    /// 2026-10-25 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SelectIntoNotFirstQuery(int line) =>
+        WithLine(new("SELECT INTO must be the first query in a statement containing a UNION, INTERSECT or EXCEPT operator.", 196, 15, 1), line);
+
+    /// <summary>
+    /// Mimics SQL Server error 199: an <c>INSERT</c> whose source query assigns
+    /// variables, raised at line 0 as the batch compiles, ahead of a target
+    /// that doesn't exist (probed 2026-10-25 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AssignmentInInsert() =>
+        new SimulatedSqlException("An INSERT statement cannot contain a SELECT statement that assigns values to a variable.", 199, 15, 1).PinLine(0);
+
+    /// <summary>
+    /// Mimics SQL Server error 194: a <c>SELECT … INTO</c> whose select list
+    /// assigns variables, reported at its <c>SELECT</c> keyword's
+    /// <paramref name="line"/> and ahead of a list mixing assignment and
+    /// retrieval — or at line 0 for an <c>INTO</c> on a later branch of a set
+    /// operation an earlier branch of which assigns (probed 2026-10-25 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AssignmentInSelectInto(int line) =>
+        AtLineOrZero(new("A SELECT INTO statement cannot contain a SELECT statement that assigns values to a variable.", 194, 15, 1), line);
 
     /// <summary>
     /// Mimics SQL Server's Msg 326 — a dotted name that reads both ways at

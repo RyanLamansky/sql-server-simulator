@@ -76,6 +76,16 @@ partial class SimulatedSqlException
         new("an INTO clause is not allowed in a cursor declaration.", 154, 15, 3);
 
     /// <summary>
+    /// Msg 154 state 3: a cursor's query assigning variables, reported at its
+    /// <c>SELECT</c> keyword's <paramref name="line"/> and ahead of a list
+    /// mixing assignment and retrieval, or at line 0 — <paramref name="line"/>
+    /// 0 — when the query is a set operation (probed 2026-10-25 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AssignmentInCursorDeclaration(int line) =>
+        AtLineOrZero(new("variable assignment is not allowed in a cursor declaration.", 154, 15, 3), line);
+
+    /// <summary>
     /// Mimics SQL Server error 154 for a <c>USE</c> inside a procedure,
     /// function or trigger body, raised as the body parses (probed 2026-10-04
     /// against SQL Server 2025).

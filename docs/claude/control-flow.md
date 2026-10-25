@@ -12,6 +12,7 @@ Assignment coercion routes through `Cast.ApplyCoercion` so the slot's declared t
 
 **SELECT-assign quirks**:
 - All-or-nothing: `SELECT @v = 1, 2` (mixing assign and projection) → Msg 141.
+- Only a statement's own query assigns, and not across a set operation's branches: everywhere else an assignment is refused as the batch compiles (`AssignmentPlacementTests`), a set operation pair by pair of its branches (`Selection.RefuseAssignmentInSetOperation`).
 - Empty result-set keeps prior value (no rows iterate, slot unchanged); `SET @v = (SELECT no rows)` differs — assigns NULL.
 - Multi-row last-row-wins post-ORDER-BY (per-row evaluation, last write wins).
 - The dispatch drains rows for side-effects and yields a `SimulatedNonQuery` rather than a result set (matches SQL Server's no-result-set-envelope behavior for SELECT-assign).

@@ -316,6 +316,14 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool CursorStatement;
 
     /// <summary>
+    /// The query specifications of the statement's own query as it parses,
+    /// which a set operation some branch of which assigns variables is refused
+    /// from (<c>Selection.RefuseAssignmentInSetOperation</c>); null in a query
+    /// nested in it, whose select list can't assign (Msg 102 at the <c>=</c>).
+    /// </summary>
+    public StatementBranches? StatementBranches;
+
+    /// <summary>
     /// Set while a SELECT statement parses when it meets something real's
     /// simple parameterization declines the statement for — a local variable,
     /// an <c>IN</c> list, an <c>OR</c>, a <c>LIKE</c>, a comparison of two

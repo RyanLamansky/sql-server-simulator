@@ -850,7 +850,13 @@ internal sealed partial class Selection
         // window's ORDER BY — describes it alone, so the flag the enclosing
         // query spec cleared is put back as this expression ends.
         using var enclosingBareProjection = ParserScope.Save(ref context.LastQuerySpecIsBareProjection);
+        using var statementBranches = ParserScope.Enter(ref context.StatementBranches,
+            scope.Position is QueryPosition.Statement or QueryPosition.ParenthesizedModuleBody or QueryPosition.InsertSource or QueryPosition.ParenthesizedInsertSource
+                ? new StatementBranches()
+                : null);
         var combined = ParseUnionExceptChain(context, scope);
+        if (context.StatementBranches is { Assigns: true } branches)
+            RefuseAssignmentInSetOperation(context, branches);
 
         // Msg 422 is settled against the shape of the whole statement, so the
         // bare-projection flag is read before the clauses below can consume
@@ -1033,6 +1039,58 @@ internal sealed partial class Selection
         return ParseUnionExceptChainCore(context, scope, sequenceDrawsBefore);
     }
 
+    /// <summary>
+    /// Raises real's refusal of a statement-level set operation a branch of
+    /// which assigns variables, read across each pair of adjacent branches in
+    /// written order: a pair either of which assigns is Msg 10734 at the
+    /// operator between them, after a Msg 141 at line 0 when one of them
+    /// assigns where the other retrieves, and a pair that raises hides the
+    /// pair after it — probed 2026-10-25 against SQL Server 2025 over chains of
+    /// up to five branches, where assigning A and retrieving R branches give
+    /// two refusals for <c>A R A R</c> and one, without Msg 141, for
+    /// <c>A A R</c>. A first branch whose own select list mixes the two leads
+    /// with its own Msg 141, and a cursor's query is a lone Msg 154 at line 0
+    /// instead. Grouped branches — in parentheses, or an <c>INTERSECT</c>'s
+    /// beside a <c>UNION</c> or <c>EXCEPT</c> — are read in written order as
+    /// well, where real can raise one more Msg 141 and give Msg 10734 the
+    /// <c>INTERSECT</c>'s state: <c>A UNION R INTERSECT R</c> is two Msg 141s
+    /// and state 2 there, one and state 1 here.
+    /// </summary>
+    private static void RefuseAssignmentInSetOperation(ParserContext context, StatementBranches statement)
+    {
+        var branches = statement.Branches;
+        if (branches.Count < 2)
+            return;
+        if (context.CursorStatement)
+            throw SimulatedSqlException.AssignmentInCursorDeclaration(0);
+        List<SimulatedSqlException> errors = statement.MixedFirstBranch is { } mixed ? [mixed] : [];
+        var hidden = false;
+        for (var i = 1; i < branches.Count; i++)
+        {
+            if (hidden)
+            {
+                hidden = false;
+                continue;
+            }
+            var (before, after) = (branches[i - 1], branches[i]);
+            if (!before.Assigns && !after.Assigns)
+                continue;
+            if ((before.Assigns && after.Retrieves) || (before.Retrieves && after.Assigns))
+                errors.Add(SimulatedSqlException.SelectAssignmentMixedWithRetrieval(0));
+            errors.Add(SimulatedSqlException.AssignmentInSetOperation(after.Operator!.Keyword == Keyword.Intersect, BatchLine(context, after.Operator)));
+            hidden = true;
+        }
+        throw SimulatedSqlException.Aggregate(errors).PinLine(0, keepStamped: true);
+    }
+
+    /// <summary>
+    /// <paramref name="token"/>'s line as its batch counts it, a module body's
+    /// offset within its <c>CREATE</c> included — what an entry of the pinned
+    /// <see cref="RefuseAssignmentInSetOperation"/> carries, since no enclosing
+    /// frame adds the offset to it.
+    /// </summary>
+    private static int BatchLine(ParserContext context, Token token) => context.LineOf(token) + context.Batch.LineOffset;
+
     private static Selection ParseUnionExceptChainCore(ParserContext context, QueryScope scope, int sequenceDrawsBefore)
     {
         var left = ParseIntersectChain(context, scope, isFirstBranch: true);
@@ -1065,12 +1123,17 @@ internal sealed partial class Selection
             // against SQL Server 2025: `… UNION ALL 1 + 1 FROM t` is Msg 102
             // near '1').
             RejectBranchWithoutSelect(context);
+            context.StatementBranches?.FollowWith(op);
             Selection right;
             using (ParserScope.Enter(ref context.LaterSetOperationBranch, true))
                 right = ParseIntersectChain(context, scope, isFirstBranch: false);
             SettleBranchOrdering(context, scope, right, setOperator: null);
             RecordSetOperationShape(context);
-            left = CombineSetOps(left, right, kind, scope.NamesOutputCollation);
+            // A branch that assigns fails the statement once its chain has
+            // parsed (RefuseAssignmentInSetOperation), ahead of anything
+            // combining the branches would refuse.
+            if (context.StatementBranches is not { Assigns: true })
+                left = CombineSetOps(left, right, kind, scope.NamesOutputCollation);
         }
         return KeyConstantBranches(left);
     }
@@ -1179,12 +1242,14 @@ internal sealed partial class Selection
             if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.All })
                 throw SimulatedSqlException.SetOperatorAllNotSupported("INTERSECT", 1);
             RejectBranchWithoutSelect(context);
+            context.StatementBranches?.FollowWith(intersect);
             Selection right;
             using (ParserScope.Enter(ref context.LaterSetOperationBranch, true))
                 right = ParseSetOpBranch(context, scope, allowOrderBy: ordersBranches);
             SettleBranchOrdering(context, scope, right, setOperator: null);
             RecordSetOperationShape(context);
-            left = CombineSetOps(left, right, SetOpKind.Intersect, scope.NamesOutputCollation);
+            if (context.StatementBranches is not { Assigns: true })
+                left = CombineSetOps(left, right, SetOpKind.Intersect, scope.NamesOutputCollation);
         }
         return left;
     }
@@ -1202,7 +1267,11 @@ internal sealed partial class Selection
     private static Selection ParseSetOpBranch(ParserContext context, QueryScope scope, bool allowOrderBy)
     {
         if (context.Token is not Operator { Character: '(' })
-            return ParseSingleSelectStatement(context, scope, allowOrderBy);
+        {
+            var single = ParseSingleSelectStatement(context, scope, allowOrderBy);
+            context.StatementBranches?.Add(single.IsAssignmentOnly);
+            return single;
+        }
 
         // Each parenthesis recurses, so a deep stack of them meets the probe
         // deep expressions do (Msg 8631) rather than the process's limit.
@@ -2030,6 +2099,7 @@ internal sealed partial class Selection
         // every other shape this method builds leaves it cleared.
         context.LastQuerySpecIsBareProjection = false;
 
+        var selectKeyword = context.Token!;
         var firstToken = context.GetNextRequired();
 
         // DISTINCT/ALL appear before TOP. SQL Server rejects `TOP n DISTINCT`
@@ -2405,6 +2475,7 @@ internal sealed partial class Selection
                             && !context.Batch.HasCursorVariable(atPrefixed.Value);
                         if (context.Token is Operator { Character: '=' })
                         {
+                            RefuseNestedAssignment(context, scope);
                             var slot = undeclaredTarget ? null : context.Batch.GetVariableSlot(atPrefixed.Value);
                             context.MoveNextRequired();
                             Expression rhs;
@@ -2427,6 +2498,7 @@ internal sealed partial class Selection
                             && context.GetNextOptional() is Operator { Character: '=' } equals
                             && equals.StartIndex == compound.EndIndex)
                         {
+                            RefuseNestedAssignment(context, scope);
                             var slot = undeclaredTarget ? null : context.Batch.GetVariableSlot(atPrefixed.Value);
                             context.MoveNextRequired();
                             var rhs = Expression.Parse(context);
@@ -2541,7 +2613,7 @@ internal sealed partial class Selection
                 // ORDER BY after it — never an alias, even where one could
                 // stand (probed 2026-09-29 against SQL Server 2025).
                 case Name when IsWindowClauseAhead(context):
-                    ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope, [], expressions);
+                    ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope, [], expressions, selectKeyword);
                     goto ExitWhileTokenLoop;
 
                 // `name:` is a GOTO label ending the statement, never an alias.
@@ -2650,7 +2722,7 @@ internal sealed partial class Selection
                     ExpandStars(context.Batch.CurrentDatabase.Collation, expressions, fromClause.Match?.StarOrder(sources) ?? sources);
                     NameKeyPseudoColumns(expressions, sources);
                     JoinSpec[] joinArray = [.. joins];
-                    var plan = BuildSqlProjection(context.Batch, [.. sources], joinArray, expressions, fromClause, distinct, topExpression, topPercent, topWithTies, aggregates, windows, scope, ResolveAssignmentMode(expressions), intoTarget, context.ReadColumnSink);
+                    var plan = BuildSqlProjection(context.Batch, [.. sources], joinArray, expressions, fromClause, distinct, topExpression, topPercent, topWithTies, aggregates, windows, scope, ResolveAssignmentMode(context, scope, selectKeyword, expressions), intoTarget, context.ReadColumnSink);
                     // The decorrelated key plan an enclosing EXISTS / IN can
                     // answer itself from; null for every body that isn't
                     // equi-correlated, which is every top-level query.
@@ -2682,6 +2754,14 @@ internal sealed partial class Selection
                 case ReservedKeyword { Keyword: Keyword.Into }:
                     if (intoTarget is not null || DefinesModuleQuery(context, scope))
                         throw SimulatedSqlException.SyntaxErrorNear(context);
+                    if (expressions.Exists(static expression => expression is AssignmentExpression))
+                        throw SimulatedSqlException.AssignmentInSelectInto(context.LineOf(selectKeyword));
+                    if (context.LaterSetOperationBranch && context.StatementBranches is { } statement)
+                    {
+                        throw statement.Assigns
+                            ? SimulatedSqlException.AssignmentInSelectInto(0)
+                            : SimulatedSqlException.SelectIntoNotFirstQuery(context.Batch.CurrentStatement.StartLine);
+                    }
                     context.MoveNextRequired();
                     intoTarget = BatchContext.TableDefinitionName(context, BatchContext.ParseObjectName(context));
                     intoDataSpace = ParseOptionalIntoDataSpace(context);
@@ -2694,12 +2774,12 @@ internal sealed partial class Selection
                 // ConsumeWhereAndOrderBy already reads them in grammar order
                 // from whichever of the three the cursor sits on.
                 case ReservedKeyword { Keyword: Keyword.Where or Keyword.Group or Keyword.Having }:
-                    ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope, [], expressions);
+                    ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope, [], expressions, selectKeyword);
                     goto ExitWhileTokenLoop;
 
                 case ReservedKeyword { Keyword: Keyword.Order }:
                     if (allowOrderBy || scope.RefusesTrailingClauses)
-                        ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope, [], expressions);
+                        ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope, [], expressions, selectKeyword);
                     // When this branch is part of a set-op chain, leave
                     // the cursor on ORDER for the top-level driver to
                     // consume (or for the outer caller to error on, per
@@ -2773,7 +2853,7 @@ internal sealed partial class Selection
         // SET to real, whose operands inline nothing.
         context.Batch.InlinedCalls?.SettleBlock(
             context.InliningBlock,
-            (distinct && fromClause.OrderBy.Count > 0) || (fromClause.Excluders.Count == 0 && ResolveAssignmentMode(expressions)));
+            (distinct && fromClause.OrderBy.Count > 0) || (fromClause.Excluders.Count == 0 && ResolveAssignmentMode(context, scope, selectKeyword, expressions)));
 
         // A source-less SELECT that aggregates, groups, filters groups or
         // windows takes the ordinary projection builder over an empty source
@@ -2791,7 +2871,7 @@ internal sealed partial class Selection
         {
             return Placed(intoDataSpace, BuildSqlProjection(context.Batch, [], [], expressions, fromClause, distinct,
                 topExpression, topPercent, topWithTies, aggregates, windows,
-                scope.WithOuter(context.OuterTypeResolver ?? scope.OuterTypeResolver), ResolveAssignmentMode(expressions),
+                scope.WithOuter(context.OuterTypeResolver ?? scope.OuterTypeResolver), ResolveAssignmentMode(context, scope, selectKeyword, expressions),
                 intoTarget, context.ReadColumnSink));
         }
 
@@ -2827,7 +2907,7 @@ internal sealed partial class Selection
                 : ResolveRowCountLimit(topExpression, RowLimitKind.Top, context.Batch),
             ResolveRowCountLimit(fromClause.OffsetExpression, RowLimitKind.Offset, context.Batch),
             ResolveRowCountLimit(fromClause.FetchExpression, RowLimitKind.Fetch, context.Batch),
-            ResolveAssignmentMode(expressions), intoTarget, scope.WithOuter(context.OuterTypeResolver ?? scope.OuterTypeResolver),
+            ResolveAssignmentMode(context, scope, selectKeyword, expressions), intoTarget, scope.WithOuter(context.OuterTypeResolver ?? scope.OuterTypeResolver),
             containsSubquery));
     }
 
@@ -3055,13 +3135,33 @@ internal sealed partial class Selection
     };
 
     /// <summary>
+    /// Raises Msg 102 at the <c>=</c> of an assignment in a nested query's
+    /// select list — a subquery's, an <c>EXISTS</c> or <c>IN</c> test's, a
+    /// derived table's, a CTE's, an <c>APPLY</c> body's or a <c>MERGE</c>
+    /// source's — which real's grammar takes only in a statement's own query,
+    /// naming a compound operator whole (probed 2026-10-25 against SQL Server
+    /// 2025: near '+=').
+    /// </summary>
+    private static void RefuseNestedAssignment(ParserContext context, QueryScope scope)
+    {
+        if (scope.Position is QueryPosition.Derived or QueryPosition.Subquery or QueryPosition.Exists)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    /// <summary>
     /// Walks the parsed projection list to detect <c>SELECT @v = expr</c>
     /// mode. Returns true when every projection element is an
     /// <see cref="AssignmentExpression"/>; false when none are; raises Msg
     /// 141 when the projection mixes assignment and retrieval elements
-    /// (probe-confirmed real SQL Server behavior).
+    /// (probe-confirmed real SQL Server behavior), at the
+    /// <paramref name="selectKeyword"/>. A cursor's query and an
+    /// <c>INSERT</c>'s source assign nothing, refused ahead of that (Msg 154,
+    /// Msg 199) unless the query specification is a branch of a set operation,
+    /// which <see cref="RefuseAssignmentInSetOperation"/> refuses whole — a
+    /// branch mixing the two included, as a branch that both assigns and
+    /// retrieves.
     /// </summary>
-    private static bool ResolveAssignmentMode(List<Expression> expressions)
+    private static bool ResolveAssignmentMode(ParserContext context, QueryScope scope, Token selectKeyword, List<Expression> expressions)
     {
         if (expressions.Count == 0) return false;
         var assignCount = 0;
@@ -3070,11 +3170,28 @@ internal sealed partial class Selection
             if (expressions[i] is AssignmentExpression)
                 assignCount++;
         }
+        if (assignCount > 0 && context.StatementBranches is { } statement)
+        {
+            if (!context.LaterSetOperationBranch && context.Token is not ReservedKeyword { Keyword: Keyword.Union or Keyword.Except or Keyword.Intersect })
+            {
+                if (context.CursorStatement)
+                    throw SimulatedSqlException.AssignmentInCursorDeclaration(context.LineOf(selectKeyword));
+                if (scope.FeedsInsert)
+                    throw SimulatedSqlException.AssignmentInInsert();
+            }
+            else if (assignCount < expressions.Count)
+            {
+                if (!context.LaterSetOperationBranch)
+                    statement.MixedFirstBranch ??= SimulatedSqlException.SelectAssignmentMixedWithRetrieval(BatchLine(context, selectKeyword));
+                statement.NoteMixed();
+                return false;
+            }
+        }
         return assignCount switch
         {
             0 => false,
             var n when n == expressions.Count => true,
-            _ => throw SimulatedSqlException.SelectAssignmentMixedWithRetrieval(),
+            _ => throw SimulatedSqlException.SelectAssignmentMixedWithRetrieval(context.LineOf(selectKeyword)),
         };
     }
 
@@ -3146,7 +3263,7 @@ internal sealed partial class Selection
     /// the lookahead contract, and an extra advance here would silently swallow
     /// the next clause's opening keyword.
     /// </remarks>
-    private static void ConsumeWhereAndOrderBy(ParserContext context, FromClause fromClause, bool allowOrderBy, QueryScope scope, FromSource[] localSources, List<Expression>? fromlessProjection = null)
+    private static void ConsumeWhereAndOrderBy(ParserContext context, FromClause fromClause, bool allowOrderBy, QueryScope scope, FromSource[] localSources, List<Expression>? fromlessProjection = null, Token? selectKeyword = null)
     {
         using var clause = ParserScope.Enter(ref context.InliningClause, InliningClause.Other);
         // A parenthesized INSERT source's own query may not carry an ORDER BY
@@ -3240,7 +3357,7 @@ internal sealed partial class Selection
             {
                 throw fromlessProjection.TrueForAll(static item => item is AssignmentExpression)
                     ? SimulatedSqlException.SyntaxErrorNearKeyword(order)
-                    : SimulatedSqlException.Aggregate([SimulatedSqlException.SelectAssignmentMixedWithRetrieval(), SimulatedSqlException.SyntaxErrorNearKeyword(order)]);
+                    : SimulatedSqlException.Aggregate([SimulatedSqlException.SelectAssignmentMixedWithRetrieval(context.LineOf(selectKeyword!)), SimulatedSqlException.SyntaxErrorNearKeyword(order)]);
             }
             context.Batch.BindErrors?.EnterClause(context.Token, BindClause.OrderBy);
             if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
