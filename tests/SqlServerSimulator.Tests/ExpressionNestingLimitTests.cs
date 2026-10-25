@@ -309,6 +309,26 @@ public sealed class ExpressionNestingLimitTests
         AreEqual(1, new Simulation().ExecuteScalar($"select {expression}"));
     }
 
+    // A built-in types each argument once, so one nested through its own
+    // argument compiles in time linear in the depth, where typing an argument
+    // again for a slot or result rule doubled the work at every level.
+    [TestMethod]
+    [Timeout(20000)]
+    [DataRow("trim({0})", "' a '", "a")]
+    [DataRow("json_modify({0}, '$.a', 1)", "'{}'", """{"a":1}""")]
+    [DataRow("json_query({0})", """'{"a":1}'""", """{"a":1}""")]
+    [DataRow("""json_value(concat('{"a":', {0}, '}'), '$.a')""", "'1'", "1")]
+    [DataRow("""json_value('{"a":"$.a"}', {0})""", "'$.a'", "$.a")]
+    [DataRow("stuff('ab', len({0}), 1, '')", "'a'", "b")]
+    [DataRow("datediff(day, 0, dateadd(day, {0}, 0))", "1", 1)]
+    public void BuiltIn_NestedThroughItsOwnArgument_CompilesInLinearTime(string form, string seed, object expected)
+    {
+        var expression = seed;
+        for (var level = 0; level < 60; level++)
+            expression = form.Replace("{0}", expression, StringComparison.Ordinal);
+        AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
+    }
+
     // A speculative read of a query's FROM ahead of its select list, retried in
     // order when it failed, read every nested level's FROM twice — an error at
     // the bottom of 30 nested derived tables raised 2^31 times.

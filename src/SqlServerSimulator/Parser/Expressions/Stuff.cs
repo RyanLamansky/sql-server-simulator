@@ -86,15 +86,15 @@ internal sealed class Stuff : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var inputType = StringScalars.ResolveResultType(StringScalars.BindSource(this.input, batch, resolveColumnType, "stuff", coerced: true), batch);
-        _ = this.start.GetSqlType(batch, resolveColumnType);
-        _ = this.length.GetSqlType(batch, resolveColumnType);
+        var startType = this.start.GetSqlType(batch, resolveColumnType);
+        var lengthType = this.length.GetSqlType(batch, resolveColumnType);
         var replacementType = StringScalars.ResolveResultType(StringScalars.BindCoercedArgument(this.replacement, batch, resolveColumnType, "stuff", argumentIndex: 4), batch);
         // A bare NULL replacement inserts nothing but is typed as one
         // character (probed 2026-10-01 against SQL Server 2025).
         if (IsUntypedNullLiteral(this.replacement))
             replacementType = VarcharSqlType.Get(1, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
-        ScalarArguments.RequireNumericSlot(this.start, batch, resolveColumnType, "stuff", 2, NumericSlot.IntegerOrDecimal);
-        ScalarArguments.RequireNumericSlot(this.length, batch, resolveColumnType, "stuff", 3, NumericSlot.IntegerOrDecimal);
+        ScalarArguments.RequireNumericSlot(this.start, startType, "stuff", 2, NumericSlot.IntegerOrDecimal);
+        ScalarArguments.RequireNumericSlot(this.length, lengthType, "stuff", 3, NumericSlot.IntegerOrDecimal);
         StringScalars.RequireResolvableCollations("stuff", inputType, replacementType);
         return ResolveResultType(inputType, replacementType, batch);
     }

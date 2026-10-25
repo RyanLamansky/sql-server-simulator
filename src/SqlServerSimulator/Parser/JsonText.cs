@@ -31,20 +31,24 @@ internal static class JsonText
     /// too, JSON_QUERY and JSON_PATH_EXISTS naming themselves in capitals at
     /// state 8 where JSON_VALUE and JSON_MODIFY use state 1 (probed 2026-09-25
     /// against SQL Server 2025).
+    /// Returns the two types, so a caller deriving its result from them types
+    /// each argument once rather than doubling the work at every level of a
+    /// nested chain.
     /// </summary>
-    internal static void RequireDocumentAndPath(Expression json, Expression? path, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string functionName)
+    internal static (SqlType Document, SqlType? Path) RequireDocumentAndPath(Expression json, Expression? path, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string functionName)
     {
-        if (json.GetSqlType(batch, resolveColumnType) is not JsonSqlType and var documentType)
+        var documentType = json.GetSqlType(batch, resolveColumnType);
+        if (documentType is not JsonSqlType)
             _ = StringScalars.RequireStringArgument(json, documentType, functionName, 1, acceptsLegacyLob: false);
         if (path is null)
-            return;
+            return (documentType, null);
         if (Expression.IsUntypedNullLiteral(path))
         {
             throw functionName is "json_query" or "json_path_exists"
                 ? SimulatedSqlException.InvalidArgumentDataType("NULL", 2, functionName.ToUpperInvariant(), state: 8)
                 : SimulatedSqlException.InvalidArgumentDataType("NULL", 2, functionName);
         }
-        _ = StringScalars.RequireStringArgument(path, path.GetSqlType(batch, resolveColumnType), functionName, 2, acceptsLegacyLob: false);
+        return (documentType, StringScalars.RequireStringArgument(path, path.GetSqlType(batch, resolveColumnType), functionName, 2, acceptsLegacyLob: false));
     }
 
     /// <summary>

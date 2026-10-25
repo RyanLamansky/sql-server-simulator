@@ -54,13 +54,13 @@ internal sealed class DateAdd : Expression
         // Every argument binds before the number's slot rule applies, so an
         // error inside the date argument is the one reported (probed
         // 2026-09-25 against SQL Server 2025).
-        _ = this.number.GetSqlType(batch, resolveColumnType);
+        var numberType = this.number.GetSqlType(batch, resolveColumnType);
         var sourceType = AssignmentRules.ArgumentType(this.source, SqlType.DateTime, batch, resolveColumnType);
         // A bare NULL has no type to add (probed 2026-09-25 against SQL Server
         // 2025: DATEADD(day, NULL, x) is Msg 8116 naming NULL).
         if (IsUntypedNullLiteral(this.number))
             throw SimulatedSqlException.InvalidArgumentDataType("NULL", 2, "dateadd");
-        ScalarArguments.RequireNumericSlot(this.number, batch, resolveColumnType, "dateadd", 2, NumericSlot.AnyNumber);
+        ScalarArguments.RequireNumericSlot(this.number, numberType, "dateadd", 2, NumericSlot.AnyNumber);
         return SqlType.IsStringCategory(sourceType) ? SqlType.DateTime : DatePartKinds.ResolveImplicitDateType(sourceType);
     }
 

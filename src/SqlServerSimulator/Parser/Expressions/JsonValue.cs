@@ -287,15 +287,14 @@ internal sealed class JsonValue : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        JsonText.RequireDocumentAndPath(this.jsonInput, this.pathInput, batch, resolveColumnType, "json_value");
+        var (documentType, pathType) = JsonText.RequireDocumentAndPath(this.jsonInput, this.pathInput, batch, resolveColumnType, "json_value");
         if (this.returningType is null)
         {
             // A path whose collation disagrees with the document's leaves the
             // result's unresolved (probed 2026-10-02 against SQL Server 2025:
             // Msg 457 naming json_value for a varchar document).
-            var documentType = this.jsonInput.GetSqlType(batch, resolveColumnType);
             var text = TextResult(documentType, batch);
-            return this.pathInput.GetSqlType(batch, resolveColumnType) is { Category: SqlTypeCategory.String } pathType && documentType.Category == SqlTypeCategory.String
+            return pathType is { Category: SqlTypeCategory.String } && documentType.Category == SqlTypeCategory.String
                 && UnresolvedCollation.On(UnresolvedCollation.Settle(documentType, documentType, pathType, "json_value")) is { } unresolved
                 ? unresolved.Mark(text)
                 : text;
@@ -303,7 +302,7 @@ internal sealed class JsonValue : Expression
 
         // RETURNING is json-only: over a text document real reports the
         // clause itself as a syntax error.
-        return this.jsonInput.GetSqlType(batch, resolveColumnType) is JsonSqlType || IsUntypedNullLiteral(this.jsonInput)
+        return documentType is JsonSqlType || IsUntypedNullLiteral(this.jsonInput)
             ? this.ResultType(batch)
             : throw SimulatedSqlException.SyntaxErrorNearText("RETURNING");
     }

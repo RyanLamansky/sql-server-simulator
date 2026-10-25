@@ -385,20 +385,21 @@ internal sealed class JsonModify : Expression
     /// </summary>
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
+        SqlType documentType;
         if (this.methodReceiver is null)
         {
-            JsonText.RequireDocumentAndPath(this.jsonInput, this.pathInput, batch, resolveColumnType, "json_modify");
+            (documentType, _) = JsonText.RequireDocumentAndPath(this.jsonInput, this.pathInput, batch, resolveColumnType, "json_modify");
         }
         else
         {
-            if (this.jsonInput.GetSqlType(batch, resolveColumnType) is not JsonSqlType and var receiverType)
-                throw SimulatedSqlException.CannotCallMethodsOn(SimulatedSqlException.FamilyRootName(receiverType));
+            documentType = this.jsonInput.GetSqlType(batch, resolveColumnType);
+            if (documentType is not JsonSqlType)
+                throw SimulatedSqlException.CannotCallMethodsOn(SimulatedSqlException.FamilyRootName(documentType));
             if (IsUntypedNullLiteral(this.pathInput))
                 throw SimulatedSqlException.InvalidArgumentDataType("NULL", 2, "modify");
             _ = StringScalars.RequireStringArgument(this.pathInput, this.pathInput.GetSqlType(batch, resolveColumnType), "modify", 2, acceptsLegacyLob: false);
         }
         var newValueType = this.newValueInput.GetSqlType(batch, resolveColumnType);
-        var documentType = this.jsonInput.GetSqlType(batch, resolveColumnType);
         this.RequireWritableValueType(newValueType, documentType);
         this.newValueIsJson |= SqlType.IsJsonText(newValueType);
         return documentType is JsonSqlType ? SqlType.Json : SqlType.JsonTextMax;

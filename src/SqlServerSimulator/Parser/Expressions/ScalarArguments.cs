@@ -34,9 +34,20 @@ internal static class ScalarArguments
     /// </summary>
     public static void RequireNumericSlot(Expression argument, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string functionName, int argumentIndex, NumericSlot accepts)
     {
+        if (!Expression.IsUntypedNullLiteral(argument))
+            RequireNumericSlot(argument, argument.GetSqlType(batch, resolveColumnType), functionName, argumentIndex, accepts);
+    }
+
+    /// <summary>
+    /// <see cref="RequireNumericSlot(Expression, BatchContext, Func{MultiPartName, SqlType}, string, int, NumericSlot)"/>
+    /// over the argument's type, for a built-in that binds every argument
+    /// before applying a slot rule: typing an argument twice doubles the work
+    /// at every level of a nested chain.
+    /// </summary>
+    public static void RequireNumericSlot(Expression argument, SqlType type, string functionName, int argumentIndex, NumericSlot accepts)
+    {
         if (Expression.IsUntypedNullLiteral(argument))
             return;
-        var type = argument.GetSqlType(batch, resolveColumnType);
         var accepted = type.Category switch
         {
             SqlTypeCategory.Integer => type != SqlType.Bit,
@@ -149,7 +160,7 @@ internal static class ScalarArguments
     }
 }
 
-/// <summary>Which numbers besides the integers a slot checked by <see cref="ScalarArguments.RequireNumericSlot"/> accepts.</summary>
+/// <summary>Which numbers besides the integers a slot checked by <see cref="ScalarArguments.RequireNumericSlot(Expression, SqlType, string, int, NumericSlot)"/> accepts.</summary>
 internal enum NumericSlot
 {
     /// <summary>The integer types alone, <c>bit</c> excepted.</summary>

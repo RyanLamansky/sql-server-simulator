@@ -206,8 +206,8 @@ internal sealed class JsonQuery : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        JsonText.RequireDocumentAndPath(this.jsonInput, this.pathInput, batch, resolveColumnType, "json_query");
-        return this.resultType = ResultType(this.jsonInput.GetSqlType(batch, resolveColumnType), batch);
+        var (documentType, _) = JsonText.RequireDocumentAndPath(this.jsonInput, this.pathInput, batch, resolveColumnType, "json_query");
+        return this.resultType = ResultType(documentType, batch);
     }
 
     /// <summary>
