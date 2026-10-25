@@ -52,7 +52,7 @@ internal sealed class VarcharSqlType : SqlType
 
     public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromVarchar(this, this.collation.StorageEncoding.GetString(source));
 
-    public override SqlValue ConvertParameter(object raw) => SqlValue.FromVarchar((string)raw);
+    public override SqlValue ConvertParameter(object raw) => SqlValue.FromVarchar(ParameterText(raw));
 
     public override string ToString() => this.length switch
     {
@@ -125,7 +125,7 @@ internal sealed class NVarcharSqlType : SqlType
 
     public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromNVarchar(this, SystemNameSqlType.Utf16LeDecode(source));
 
-    public override SqlValue ConvertParameter(object raw) => SqlValue.FromNVarchar((string)raw);
+    public override SqlValue ConvertParameter(object raw) => SqlValue.FromNVarchar(ParameterText(raw));
 
     public override string ToString() => this.length switch
     {
@@ -213,7 +213,7 @@ internal sealed class SystemNameSqlType : SqlType
 
     public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromSystemName(this, Utf16LeDecode(source));
 
-    public override SqlValue ConvertParameter(object raw) => SqlValue.FromNVarchar((string)raw).CoerceTo(this);
+    public override SqlValue ConvertParameter(object raw) => SqlValue.FromNVarchar(ParameterText(raw)).CoerceTo(this);
 
     public override string ToString() => "sysname";
 
@@ -327,7 +327,7 @@ internal sealed class TextSqlType() : SqlType(SqlTypeCategory.String, TypePairCl
 
     public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromText(CharSqlType.Cp1252Encoder.GetString(source));
 
-    public override SqlValue ConvertParameter(object raw) => SqlValue.FromVarchar((string)raw).CoerceTo(this);
+    public override SqlValue ConvertParameter(object raw) => SqlValue.FromVarchar(ParameterText(raw)).CoerceTo(this);
 
     public override string ToString() => "text";
 }
@@ -357,7 +357,7 @@ internal sealed class NTextSqlType() : SqlType(SqlTypeCategory.String, TypePairC
 
     public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromNText(SystemNameSqlType.Utf16LeDecode(source));
 
-    public override SqlValue ConvertParameter(object raw) => SqlValue.FromNVarchar((string)raw).CoerceTo(this);
+    public override SqlValue ConvertParameter(object raw) => SqlValue.FromNVarchar(ParameterText(raw)).CoerceTo(this);
 
     public override string ToString() => "ntext";
 }
@@ -469,7 +469,7 @@ internal sealed class CharSqlType : SqlType
 
     public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromChar(this, this.collation.StorageEncoding.GetString(source));
 
-    public override SqlValue ConvertParameter(object raw) => SqlValue.FromVarchar((string)raw).CoerceTo(this);
+    public override SqlValue ConvertParameter(object raw) => SqlValue.FromVarchar(ParameterText(raw)).CoerceTo(this);
 
     public override string ToString() => $"char({this.length})";
 
@@ -538,7 +538,7 @@ internal sealed class NCharSqlType : SqlType
 
     public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromNChar(this, SystemNameSqlType.Utf16LeDecode(source));
 
-    public override SqlValue ConvertParameter(object raw) => SqlValue.FromNVarchar((string)raw).CoerceTo(this);
+    public override SqlValue ConvertParameter(object raw) => SqlValue.FromNVarchar(ParameterText(raw)).CoerceTo(this);
 
     public override string ToString() => $"nchar({this.length})";
 

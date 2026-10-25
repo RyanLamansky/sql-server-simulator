@@ -293,6 +293,8 @@ public class InsertTests
         var dt = new DateTime(2026, 5, 4, 13, 45, 30).AddTicks(1234567);
         using var insert = connection.CreateCommand(
             "create table t ( d datetime2(7) );insert t values ( @p )", ("p", dt));
+        // SqlClient infers datetime for a DateTime, which keeps 1/300 s.
+        insert.Parameters[0].DbType = DbType.DateTime2;
         AreEqual(1, insert.ExecuteNonQuery());
 
         AreEqual(dt, connection.CreateCommand("select d from t").ExecuteScalar());
@@ -306,6 +308,8 @@ public class InsertTests
         var dt = new DateTime(2026, 5, 4, 13, 45, 30, 100).AddTicks(5_000);
         using var insert = connection.CreateCommand(
             "create table t ( d datetime2(3) );insert t values ( @p )", ("p", dt));
+        // SqlClient infers datetime for a DateTime, which keeps 1/300 s.
+        insert.Parameters[0].DbType = DbType.DateTime2;
         AreEqual(1, insert.ExecuteNonQuery());
 
         AreEqual(new DateTime(2026, 5, 4, 13, 45, 30, 101), connection.CreateCommand("select d from t").ExecuteScalar());
@@ -319,6 +323,8 @@ public class InsertTests
         var dt = new DateTime(2026, 5, 4, 13, 45, 30).AddTicks(1234567);
         using var insert = connection.CreateCommand(
             "create table t ( d datetime2 );insert t values ( @p )", ("p", dt));
+        // SqlClient infers datetime for a DateTime, which keeps 1/300 s.
+        insert.Parameters[0].DbType = DbType.DateTime2;
         AreEqual(1, insert.ExecuteNonQuery());
 
         AreEqual(dt, connection.CreateCommand("select d from t").ExecuteScalar());

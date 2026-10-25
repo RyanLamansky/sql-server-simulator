@@ -53,6 +53,15 @@ public sealed class SimulatedDbParameter : DbParameter
     internal bool SpelledNumeric;
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// Unset, it is inferred from <see cref="Value"/> as SqlClient infers a
+    /// parameter's type: a <see cref="DateTime"/> is
+    /// <see cref="DbType.DateTime"/> — <c>datetime</c>, not
+    /// <c>datetime2</c> — a <see cref="DBNull"/>, a <see cref="string"/>, a
+    /// <see cref="char"/> or a character array is <see cref="DbType.String"/>,
+    /// and an <see cref="sbyte"/> or an unsigned integer has no type at all,
+    /// raising <see cref="ArgumentException"/>.
+    /// </remarks>
     public override DbType DbType
     {
         get
@@ -63,10 +72,14 @@ public sealed class SimulatedDbParameter : DbParameter
                 : this.Value switch
                 {
                     int => DbType.Int32,
-                    string => DbType.String,
+                    long => DbType.Int64,
+                    short => DbType.Int16,
+                    byte => DbType.Byte,
+                    bool => DbType.Boolean,
+                    string or char or char[] or DBNull => DbType.String,
                     byte[] => DbType.Binary,
                     DateOnly => DbType.Date,
-                    DateTime => DbType.DateTime2,
+                    DateTime => DbType.DateTime,
                     DateTimeOffset => DbType.DateTimeOffset,
                     TimeOnly or TimeSpan => DbType.Time,
                     Guid => DbType.Guid,
@@ -74,6 +87,7 @@ public sealed class SimulatedDbParameter : DbParameter
                     double => DbType.Double,
                     float => DbType.Single,
                     null => DbType.String,
+                    sbyte or ushort or uint or ulong => throw new ArgumentException($"The parameter data type of {this.Value.GetType().Name} is invalid."),
                     _ => throw new ArgumentException($"No mapping exists from object type {this.Value.GetType().FullName} to a known managed provider native type."),
                 };
         }

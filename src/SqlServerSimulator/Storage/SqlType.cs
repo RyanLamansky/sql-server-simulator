@@ -184,6 +184,17 @@ internal abstract partial class SqlType
         throw new NotSupportedException($"{this} isn't reachable as a parameter type via DbParameter.DbType; ConvertParameter is unreachable in normal binding.");
 
     /// <summary>
+    /// A string type's parameter value as its text: a <see cref="string"/>, or
+    /// a <see cref="char"/> or character array, which SqlClient sends as one.
+    /// </summary>
+    private protected static string ParameterText(object raw) => raw switch
+    {
+        string text => text,
+        char single => single.ToString(),
+        _ => new string((char[])raw),
+    };
+
+    /// <summary>
     /// SQL Server data-type precedence for implicit conversion: the partner
     /// with the higher value is the one the other converts to when a
     /// unification (CASE / COALESCE / set operation) or an operator needs a

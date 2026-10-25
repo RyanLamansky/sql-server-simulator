@@ -178,6 +178,58 @@ public class ParameterTests
         _ = Throws<ArgumentException>(() => _ = p.DbType);
     }
 
+    // Unset, a parameter's type is inferred from its value as SqlClient's
+    // own SqlParameter infers it (Microsoft.Data.SqlClient 7.0.2, checked
+    // 2026-10-25): a DateTime is datetime, not datetime2, and DBNull, a char
+    // and a character array are nvarchar.
+    [TestMethod]
+    public void DbType_InferredFromValue_MatchesSqlClient()
+    {
+        using var cmd = new Simulation().CreateOpenConnection().CreateCommand();
+        (object Value, DbType Inferred)[] cases =
+        [
+            (4294967298L, DbType.Int64), ((short)7, DbType.Int16), ((byte)7, DbType.Byte), (true, DbType.Boolean),
+            (new DateTime(2020, 1, 2), DbType.DateTime), (DBNull.Value, DbType.String), ('c', DbType.String), (new[] { 'a', 'b' }, DbType.String),
+        ];
+        foreach (var (value, inferred) in cases)
+        {
+            var p = cmd.CreateParameter();
+            p.Value = value;
+            AreEqual(inferred, p.DbType, value.GetType().Name);
+        }
+    }
+
+    [TestMethod]
+    public void InferredParameters_BindAsSqlClientSendsThem()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        using var command = connection.CreateCommand("""
+            select cast(sql_variant_property(@long, 'BaseType') as nvarchar(30)), cast(sql_variant_property(@when, 'BaseType') as nvarchar(30)),
+                @when, @chars, @null
+            """, ("long", 4294967298L), ("when", new DateTime(2020, 1, 2, 3, 4, 5).AddTicks(1234567)), ("chars", new[] { 'a', 'b' }), ("null", DBNull.Value));
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual("bigint", reader.GetString(0));
+        AreEqual("datetime", reader.GetString(1));
+        // datetime keeps 1/300 s, so the ticks round to .123.
+        AreEqual(new DateTime(2020, 1, 2, 3, 4, 5, 123), reader.GetDateTime(2));
+        AreEqual("ab", reader.GetString(3));
+        IsTrue(reader.IsDBNull(4));
+    }
+
+    [TestMethod]
+    [DataRow((sbyte)1, "SByte")]
+    [DataRow((ushort)1, "UInt16")]
+    [DataRow(1u, "UInt32")]
+    [DataRow(1ul, "UInt64")]
+    public void DbType_SignedByteOrUnsignedValue_IsInvalidAsSqlClientRefusesIt(object value, string typeName)
+    {
+        using var cmd = new Simulation().CreateOpenConnection().CreateCommand();
+        var p = cmd.CreateParameter();
+        p.Value = value;
+        AreEqual($"The parameter data type of {typeName} is invalid.", Throws<ArgumentException>(() => _ = p.DbType).Message);
+    }
+
     [TestMethod]
     public void SourceColumn_DefaultsToEmptyAndRoundTrips()
     {
