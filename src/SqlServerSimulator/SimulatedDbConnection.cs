@@ -319,6 +319,17 @@ public sealed class SimulatedDbConnection : DbConnection
     internal long WaitedTicks;
 
     /// <summary>
+    /// <see cref="WaitedTicks"/> and the time the runtime has paused every
+    /// thread to collect garbage, in ticks: what a statement's elapsed time
+    /// counts that ran none of its work, taken out of its CPU time as the
+    /// difference across the statement. A collection is the simulator's own
+    /// cost and no part of the server's, and a parallel test run's frequent
+    /// ones would otherwise reach Query Store's capture budget in place of
+    /// the statement's own work.
+    /// </summary>
+    internal long IdleTicks => this.WaitedTicks + GC.GetTotalPauseDuration().Ticks;
+
+    /// <summary>
     /// Whether this connection serves a TDS session, whose response gives
     /// every statement a DONE token of its own, each naming the statement's
     /// kind (see <see cref="StatementDoneKind"/>). While set, the engine sends

@@ -78,7 +78,7 @@ partial class Simulation
         if (!recordsStore && !recordsPlan)
             return null;
         var connection = batch.Connection;
-        return new QueryStoreCapture(database, recordsStore, recordsPlan, Stopwatch.GetTimestamp(), connection.WaitedTicks, connection.Session.LockWaitedMilliseconds, io?.TotalLogicalReads() ?? 0);
+        return new QueryStoreCapture(database, recordsStore, recordsPlan, Stopwatch.GetTimestamp(), connection.IdleTicks, connection.Session.LockWaitedMilliseconds, io?.TotalLogicalReads() ?? 0);
     }
 
     /// <summary>
@@ -100,7 +100,7 @@ partial class Simulation
         var connection = batch.Connection;
         var elapsed = Stopwatch.GetElapsedTime(capture.StartedAt).Ticks;
         var lockWaitMilliseconds = connection.Session.LockWaitedMilliseconds - capture.LockWaitedBefore;
-        var cpu = Math.Max(0, elapsed - (connection.WaitedTicks - capture.WaitedBefore) - (lockWaitMilliseconds * TimeSpan.TicksPerMillisecond));
+        var cpu = Math.Max(0, elapsed - (connection.IdleTicks - capture.WaitedBefore) - (lockWaitMilliseconds * TimeSpan.TicksPerMillisecond));
         var reads = Math.Max(0, (io?.TotalLogicalReads() ?? 0) - capture.ReadsBefore);
 
         var now = DateTime.UtcNow;

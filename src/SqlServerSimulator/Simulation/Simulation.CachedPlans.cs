@@ -460,7 +460,7 @@ partial class Simulation
         }
         body.CachedPlanOrigin = CachedPlanOrigin.Module;
         body.CachedPlan = plan;
-        return new CachedModuleCall(plan, Stopwatch.GetTimestamp(), connection.WaitedTicks, connection.Session.LockWaitedMilliseconds);
+        return new CachedModuleCall(plan, Stopwatch.GetTimestamp(), connection.IdleTicks, connection.Session.LockWaitedMilliseconds);
     }
 
     /// <summary>Ends a module call <see cref="BeginCachedModuleCall"/> began, adding what it measured to its plan's call statistics.</summary>
@@ -471,7 +471,7 @@ partial class Simulation
         var connection = body.Connection;
         var elapsed = Stopwatch.GetElapsedTime(begun.StartedAt).Ticks;
         var lockWaitMilliseconds = connection.Session.LockWaitedMilliseconds - begun.LockWaitedBefore;
-        var cpu = Math.Max(0, elapsed - (connection.WaitedTicks - begun.WaitedBefore) - (lockWaitMilliseconds * TimeSpan.TicksPerMillisecond));
+        var cpu = Math.Max(0, elapsed - (connection.IdleTicks - begun.WaitedBefore) - (lockWaitMilliseconds * TimeSpan.TicksPerMillisecond));
         var plan = begun.Plan;
         lock (plan)
         {

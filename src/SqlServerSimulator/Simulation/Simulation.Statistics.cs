@@ -11,25 +11,26 @@ partial class Simulation
 {
     /// <summary>
     /// Where a statement's <c>STATISTICS TIME</c> clock started: the
-    /// <see cref="Stopwatch"/> timestamp and the session's time spent waiting
-    /// by then (<see cref="SimulatedDbConnection.WaitedTicks"/>).
+    /// <see cref="Stopwatch"/> timestamp and the time by then that ran no
+    /// statement's work (<see cref="SimulatedDbConnection.IdleTicks"/>).
     /// </summary>
     private readonly struct StatementClock(long startedAt, long waitedBefore)
     {
         public readonly long StartedAt = startedAt;
         public readonly long WaitedBefore = waitedBefore;
 
-        public static StatementClock Start(SimulatedDbConnection connection) => new(Stopwatch.GetTimestamp(), connection.WaitedTicks);
+        public static StatementClock Start(SimulatedDbConnection connection) => new(Stopwatch.GetTimestamp(), connection.IdleTicks);
 
         /// <summary>
         /// The CPU and elapsed milliseconds since the start, each truncated as
         /// real's are. The simulator runs a statement on one thread, so its
-        /// CPU time is its elapsed time less what it spent in <c>WAITFOR</c>.
+        /// CPU time is its elapsed time less what it spent in <c>WAITFOR</c>
+        /// or paused for a garbage collection.
         /// </summary>
         public (long Cpu, long Elapsed) Milliseconds(SimulatedDbConnection connection)
         {
             var elapsed = Stopwatch.GetElapsedTime(this.StartedAt).Ticks;
-            var cpu = Math.Max(0, elapsed - (connection.WaitedTicks - this.WaitedBefore));
+            var cpu = Math.Max(0, elapsed - (connection.IdleTicks - this.WaitedBefore));
             return (cpu / TimeSpan.TicksPerMillisecond, elapsed / TimeSpan.TicksPerMillisecond);
         }
     }
