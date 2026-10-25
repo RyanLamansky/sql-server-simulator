@@ -626,8 +626,19 @@ internal abstract partial class Collation
                                     (this.spelling, this.spellingPos, this.spelledStart) = (spelling, 0, start);
                                 continue;
                             }
+                            // A combining mark with no letter before it matches
+                            // only the same marks where accents count, as the
+                            // accent the comparison weighs it as, and nothing
+                            // where they don't.
                             if (outsider.Mark != 0)
-                                continue;
+                            {
+                                if (!this.owner.accentSensitive)
+                                    continue;
+                                var leadAccents = outsider.Mark + this.owner.AccentsAfter(this.s, ref this.index);
+                                (this.Minimal, this.Primary, this.Secondary, this.Tertiary, this.Case) = (true, 0, LeadMarkAccent + Math.Min(leadAccents, MarkSpan - 1), 0, 0);
+                                (this.CharStart, this.CharEnd) = (start, this.index);
+                                return true;
+                            }
                             this.index = this.owner.PastMarks(this.s, this.index);
                             (this.Minimal, this.Primary, this.Secondary, this.Tertiary, this.Case) = (false, outsider.Anchor, 0, 0, 0);
                             (this.foreignStart, this.foreignLength) = (start, this.index - start);
@@ -728,7 +739,7 @@ internal abstract partial class Collation
             hash.Add(-1);
             if (this.accentSensitive)
             {
-                var secondary = new WeightCursor(s, this);
+                var secondary = new WeightCursor(s, this, leadMarks: true);
                 for (var i = 0; i < kept; i++)
                 {
                     hash.Add(secondary.MoveNext() == Element.Foreign
@@ -1016,6 +1027,10 @@ internal abstract partial class Collation
         // Above every rank the secondary tables hold.
         private const int LigatureAccent = int.MaxValue;
 
+        // The accent weight of a run of combining marks with no letter before
+        // them, above every letter's own and below a legacy ligature's.
+        private const int LeadMarkAccent = LigatureAccent - MarkSpan;
+
         // A Thai tone mark's accent weight rides on the letter before it, so a
         // letter's accent weight leaves room for one mark below it.
         private const int MarkSpan = 1024;
@@ -1051,8 +1066,8 @@ internal abstract partial class Collation
         // allocation-free.
         private int CompareLevel(string x, string y, Level level)
         {
-            var cx = new WeightCursor(x, this);
-            var cy = new WeightCursor(y, this);
+            var cx = new WeightCursor(x, this, leadMarks: level == Level.Secondary);
+            var cy = new WeightCursor(y, this, leadMarks: level == Level.Secondary);
             while (true)
             {
                 var ex = cx.MoveNext();
@@ -1110,8 +1125,12 @@ internal abstract partial class Collation
         // table weighs as its Outsider — its spelling's elements, an accent on
         // the letter before it, or a foreign element of its own. One element
         // per MoveNext.
-        private ref struct WeightCursor(string s, Latin1GeneralTableCollation owner)
+        private ref struct WeightCursor(string s, Latin1GeneralTableCollation owner, bool leadMarks = false)
         {
+            // Whether a run of combining marks with no letter to ride on is an
+            // element of its own, as it is at the accent level alone.
+            private readonly bool leadMarks = leadMarks;
+
             // The string being read: the cursor's own, or the table text a
             // character past the table weighs as while that is read.
             private string s = s;
@@ -1209,9 +1228,22 @@ internal abstract partial class Collation
                                 continue;
                             }
                             // A combining mark with no table letter to ride on
-                            // weighs nothing at these levels.
+                            // weighs only as an accent, above every letter's —
+                            // real sorts N'◌́a' after 'à' and before N'◌̀a', and
+                            // as 'a' where accents don't count (probed
+                            // 2026-10-25 against SQL Server 2025) — with the
+                            // marks after it in one element.
                             if (outsider.Mark != 0)
-                                continue;
+                            {
+                                if (!this.leadMarks)
+                                {
+                                    this.index = this.owner.PastMarks(this.s, this.index);
+                                    continue;
+                                }
+                                var leadAccents = outsider.Mark + this.owner.AccentsAfter(this.s, ref this.index);
+                                (this.Primary, this.Secondary, this.Tertiary, this.Case) = (0, LeadMarkAccent + Math.Min(leadAccents, MarkSpan - 1), 0, 0);
+                                return Element.Table;
+                            }
                             this.index = this.owner.PastMarks(this.s, this.index);
                             (this.Primary, this.Secondary, this.Tertiary, this.Case) = (outsider.Anchor, 0, 0, 0);
                             (this.foreignStart, this.foreignLength) = (start, this.index - start);

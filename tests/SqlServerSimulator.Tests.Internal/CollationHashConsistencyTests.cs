@@ -198,6 +198,7 @@ public sealed class CollationHashConsistencyTests
             ["µ", "μ"],
             ["Ł", "ł", "ő", "Ő", "ǆ", "Ǆ", "ǅ", "dž", "ȸ", "ɓ", "Ɓ"],
             ["\u2010", "\u202F", "\u200D", "\u0E49"],
+            ["\u0301", "\u0300\u0301", "\u0301\u0300", "\u0301a", "a"],
         ];
 
         var random = new Random(20260713);

@@ -274,6 +274,25 @@ public sealed class CollationBehaviorTests
     public void DefaultCollation_MinimalMarks_StayDistinct(string condition, int expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"select case when {condition} then 1 else 0 end"));
 
+    // A combining mark with no letter before it weighs as an accent above
+    // every letter's own — kept apart from the string without it where
+    // accents count, by = and LIKE alike, and ignored where they don't
+    // (probed 2026-10-25 against SQL Server 2025).
+    [TestMethod]
+    [DataRow("nchar(0x301) + N'a' = N'a' collate Latin1_General_CI_AS", 0)]
+    [DataRow("nchar(0x301) + N'a' = N'a' collate Latin1_General_100_CS_AS", 0)]
+    [DataRow("nchar(0x301) + N'a' = N'a' collate SQL_Latin1_General_CP1_CI_AS", 0)]
+    [DataRow("nchar(0x301) + N'a' = N'a' collate Latin1_General_CI_AI", 1)]
+    [DataRow("nchar(0x301) = N'' collate Latin1_General_CI_AS", 0)]
+    [DataRow("nchar(0x301) + N'a' > N'à' collate Latin1_General_CI_AS", 1)]
+    [DataRow("nchar(0x301) + N'ab' > N'a' + nchar(0x301) + N'b' collate Latin1_General_CI_AS", 1)]
+    [DataRow("nchar(0x301) + N'a' < N'ab' collate Latin1_General_CI_AS", 1)]
+    [DataRow("nchar(0x301) + N'a' like N'a%' collate Latin1_General_CI_AS", 0)]
+    [DataRow("nchar(0x301) + N'a' like N'_a' collate Latin1_General_CI_AS", 1)]
+    [DataRow("nchar(0x301) + N'a' like N'a' collate Latin1_General_CI_AI", 1)]
+    public void LeadingCombiningMark_WeighsAsAnAccentAboveTheLetters(string condition, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select case when {condition} then 1 else 0 end"));
+
     [TestMethod]
     public void DefaultCollation_MinimalMarks_GroupSeparately()
         => AreEqual(2, new Simulation().ExecuteScalar("""
