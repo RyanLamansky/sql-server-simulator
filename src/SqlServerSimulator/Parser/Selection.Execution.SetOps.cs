@@ -431,7 +431,6 @@ internal sealed partial class Selection
             ColumnWireFlags = DerivedColumns(combinedSchema.Length),
             ColumnDerivedWireFlags = DerivedColumns(combinedSchema.Length),
         };
-        combined.OutputKeys = ConstantBranchKeys(combined.UnionAllBranches, combinedSchema.Length);
         // A predicate on a set operation's column reaches both branches, and a
         // FORCESEEK carried into one reaches both (probed 2026-10-16 against
         // SQL Server 2025 for INTERSECT and EXCEPT).
@@ -460,7 +459,7 @@ internal sealed partial class Selection
     {
         var rows = kind switch
         {
-            SetOpKind.UnionAll => ConcatBranchRows(left, right, combinedSchema, batch, outerResolver),
+            SetOpKind.UnionAll => ConcatBranchRows(combined, left, right, combinedSchema, batch, outerResolver),
             SetOpKind.Union => DedupeUnionRows(left, right, combinedSchema, batch, outerResolver),
             SetOpKind.Intersect => IntersectRows(CoerceBranchRows(left, combinedSchema, batch, outerResolver), right, combinedSchema, batch, outerResolver),
             SetOpKind.Except => ExceptRows(CoerceBranchRows(left, combinedSchema, batch, outerResolver), right, combinedSchema, batch, outerResolver),
@@ -520,6 +519,20 @@ internal sealed partial class Selection
             ReadsStorage = combined.ReadsStorage,
             IsSetOperationResult = true,
         };
+    }
+
+    /// <summary>
+    /// Settles <paramref name="combined"/>'s <see cref="OutputKeys"/> once
+    /// its chain of set operations is whole: a <c>UNION ALL</c> of one-row
+    /// constant selects is keyed as the <c>VALUES</c> list it amounts to. Once
+    /// per chain rather than per operator, since every operator weighing every
+    /// branch to its left again makes a chain of thousands quadratic.
+    /// </summary>
+    internal static Selection KeyConstantBranches(Selection combined)
+    {
+        if (combined.UnionAllBranches is { } branches)
+            combined.OutputKeys = ConstantBranchKeys(branches, combined.Schema.Length);
+        return combined;
     }
 
     /// <summary>
@@ -676,10 +689,30 @@ internal sealed partial class Selection
         }
     }
 
-    private static IEnumerable<byte[]> ConcatBranchRows(Selection left, Selection right, SqlType[] schema, BatchContext batch, Func<MultiPartName, SqlValue>? outer)
+    /// <summary>
+    /// A <c>UNION ALL</c>'s rows: its branches', in order. A chain of them is a
+    /// tree as deep as it is long, so the branches are read off its left spine
+    /// in a loop rather than through each node's own concatenation — real runs
+    /// a chain of 10,000 (probed 2026-10-24 against SQL Server 2025). A spine
+    /// node is read through only where its rows would be this one's: never a
+    /// constant one under a node that reads storage, whose own rows are all
+    /// computed before the first goes out.
+    /// </summary>
+    private static IEnumerable<byte[]> ConcatBranchRows(Selection combined, Selection left, Selection right, SqlType[] schema, BatchContext batch, Func<MultiPartName, SqlValue>? outer)
     {
-        foreach (var r in CoerceBranchRows(left, schema, batch, outer)) yield return r;
-        foreach (var r in CoerceBranchRows(right, schema, batch, outer)) yield return r;
+        List<Selection> rights = [right];
+        while (left.SetOperands is (var spineLeft, var spineRight, SetOpKind.UnionAll) && (combined.IsBareConstantRow || !left.IsBareConstantRow))
+        {
+            rights.Add(spineRight);
+            left = spineLeft;
+        }
+        foreach (var r in CoerceBranchRows(left, schema, batch, outer))
+            yield return r;
+        for (var i = rights.Count - 1; i >= 0; i--)
+        {
+            foreach (var r in CoerceBranchRows(rights[i], schema, batch, outer))
+                yield return r;
+        }
     }
 
     /// <summary>

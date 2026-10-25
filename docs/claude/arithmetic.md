@@ -29,7 +29,7 @@ A single leading sign agrees under either binding — negation commutes with `*`
 Its operand may itself be a sign, which then reaches for the chain again: `~ - 2 * 3` is `~(-(2 * 3))` = 5.
 
 `Expression.ParsePrimary` implements this — the two sign arms parse their operand through `ParseSignedOperand` (`ParseBinaryContinuation` at `minTightness: 2`), the `~` arm through `ParsePrimary`.
-Because a stack of signs recurses through `ParseSignedOperand` once per sign without passing through `Expression.Parse`, that method carries the Msg 8631 stack probe itself — see [`grammar.md`](grammar.md#msg-8631-backstop).
+Because a stack of signs recurses through `ParseSignedOperand` once per sign without passing through `Expression.Parse`, that method charges the shared nesting budget itself, which probes the stack too — see [`grammar.md`](grammar.md#nested-expressions--shared-weighted-budget-msg-191).
 
 The regrouping is not cosmetic.
 It moves which operands pair up, so it moves what `PromoteForArithmetic` computes: `cast(1 as decimal(9,2)) / -cast(3 as decimal(9,4)) / cast(7 as decimal(9,6))` is `decimal(38, 17)` where the parenthesized `/ (-cast(3 as decimal(9,4))) /` form is `decimal(38, 21)`.

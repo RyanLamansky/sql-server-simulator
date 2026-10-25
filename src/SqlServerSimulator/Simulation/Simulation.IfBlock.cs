@@ -7,6 +7,46 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
+    /// Real's budget for nested statement blocks, kept apart from an
+    /// expression's (<c>Expression.EnterNesting</c>): an <c>IF</c>,
+    /// <c>WHILE</c>, <c>TRY</c> or <c>CATCH</c> body costs one unit, a
+    /// <c>BEGIN … END</c> two, an <c>ELSE</c> three, and a <c>SELECT</c>
+    /// reached through them six — so 1,008 nested <c>IF</c>s or <c>TRY</c>s,
+    /// 504 <c>BEGIN</c>s or a 252-branch <c>ELSE IF</c> chain over a
+    /// <c>SELECT</c>, and 1,014 <c>IF</c>s, 507 <c>BEGIN</c>s or 253 branches
+    /// over a <c>SET</c>, are as deep as a batch goes, one more refused with
+    /// Msg 191 (probed 2026-10-24 against SQL Server 2025; a <c>CATCH</c> body
+    /// is charged as its <c>TRY</c>'s, unprobed).
+    /// </summary>
+    private const int MaxStatementNesting = 1014;
+
+    /// <summary>What an <c>IF</c>, a <c>WHILE</c>, a <c>TRY</c> or a <c>CATCH</c> body costs <see cref="MaxStatementNesting"/>.</summary>
+    private const int IfNestingCost = 1;
+
+    /// <summary>What a <c>BEGIN … END</c> block costs <see cref="MaxStatementNesting"/>.</summary>
+    private const int BeginNestingCost = 2;
+
+    /// <summary>What an <c>ELSE</c> branch costs <see cref="MaxStatementNesting"/>, beyond its <c>IF</c>'s unit.</summary>
+    private const int ElseNestingCost = 3;
+
+    /// <summary>What a <c>SELECT</c> statement needs of <see cref="MaxStatementNesting"/> past its blocks'.</summary>
+    private const int SelectStatementNestingCost = 6;
+
+    /// <summary>
+    /// Charges <paramref name="cost"/> units of <see cref="MaxStatementNesting"/>
+    /// for the block about to dispatch, which the caller refunds as the block
+    /// ends: Msg 191 past the budget, and Msg 8631 where the thread's stack
+    /// runs out first.
+    /// </summary>
+    private static void EnterStatementNesting(BatchContext batch, int cost)
+    {
+        Expression.EnsureParseStack();
+        if (batch.StatementNesting + cost > MaxStatementNesting)
+            throw SimulatedSqlException.StatementNestedTooDeeply();
+        batch.StatementNesting += cost;
+    }
+
+    /// <summary>
     /// Parses and runs an <c>IF &lt;boolean&gt; &lt;stmt&gt; [ELSE &lt;stmt&gt;]</c>
     /// statement. The condition is a Boolean predicate (<see cref="BooleanExpression"/>);
     /// value-typed expressions in this slot raise Msg 4145 from <see cref="BooleanExpression"/>'s
@@ -94,6 +134,7 @@ partial class Simulation
 
         var hadElse = false;
         batch.ShowplanRefusalLine ??= 0;
+        EnterStatementNesting(batch, IfNestingCost);
         batch.BlockDepth++;
         try
         {
@@ -119,14 +160,23 @@ partial class Simulation
                     || bindError is not null
                     || condResult
                     || batch.LoopControl != LoopControl.None;
-                foreach (var o in DispatchOneStatement(batch, afterUnterminatedStatement: false, atBatchStart: false))
-                    yield return o;
+                EnterStatementNesting(batch, ElseNestingCost);
+                try
+                {
+                    foreach (var o in DispatchOneStatement(batch, afterUnterminatedStatement: false, atBatchStart: false))
+                        yield return o;
+                }
+                finally
+                {
+                    batch.StatementNesting -= ElseNestingCost;
+                }
             }
         }
         finally
         {
             batch.SkipModeFlag = wasSkipModeFlag;
             batch.BlockDepth--;
+            batch.StatementNesting -= IfNestingCost;
         }
 
         // Probe-confirmed: an IF whose cond was false and which has no ELSE
@@ -327,6 +377,7 @@ partial class Simulation
         var wasSkipModeFlag = batch.SkipModeFlag;
         var outerSkipping = batch.IsSkipping || bindError is not null;
 
+        EnterStatementNesting(batch, IfNestingCost);
         batch.LoopDepth++;
         batch.ShowplanRefusalLine ??= 0;
         batch.BlockDepth++;
@@ -426,6 +477,7 @@ partial class Simulation
             batch.SkipModeFlag = wasSkipModeFlag;
             batch.LoopDepth--;
             batch.BlockDepth--;
+            batch.StatementNesting -= IfNestingCost;
         }
 
         // Probe-confirmed: every WHILE exit path (cond initially false,
@@ -696,8 +748,16 @@ partial class Simulation
             throw context.Token is null ? SimulatedSqlException.SyntaxErrorNear(end) : SimulatedSqlException.SyntaxErrorNear(context);
         }
 
-        foreach (var o in DispatchStatementsUntil(batch, endKeyword: Keyword.End))
-            yield return o;
+        EnterStatementNesting(batch, BeginNestingCost);
+        try
+        {
+            foreach (var o in DispatchStatementsUntil(batch, endKeyword: Keyword.End))
+                yield return o;
+        }
+        finally
+        {
+            batch.StatementNesting -= BeginNestingCost;
+        }
 
         // RETURN inside the block exits early without reaching END — abandon
         // the block; outer DispatchStatementsUntil also stops on ReturnSignaled.

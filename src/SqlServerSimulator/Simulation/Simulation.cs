@@ -2716,6 +2716,10 @@ public sealed partial class Simulation
     /// </summary>
     private IEnumerable<SimulatedStatementOutcome> DispatchFramedStatement(BatchContext batch, bool afterUnterminatedStatement, bool atBatchStart)
     {
+        // Whatever nests statements — a block, a module body, a dynamic batch —
+        // reaches here once per level, so the thread's stack is probed here.
+        Expression.EnsureParseStack();
+
         // A statement inside a block, a TRY, an IF or a WHILE is a point a
         // MARS request steps aside at, as one at a batch's own level is —
         // what the statements before it queued going out first.
@@ -3665,6 +3669,8 @@ public sealed partial class Simulation
             // too, `(SELECT 1) UNION (SELECT 2)` (probed 2026-09-26).
             case ReservedKeyword { Keyword: Keyword.Select }:
             case Operator { Character: '(' }:
+                if (batch.StatementNesting + SelectStatementNestingCost > MaxStatementNesting)
+                    throw SimulatedSqlException.StatementNestedTooDeeply();
                 var selectStart = context.Token.StartIndex;
                 outcome = this.RunSelectStatement(batch, out var cutShort);
                 // A query run under a query notification request subscribes.

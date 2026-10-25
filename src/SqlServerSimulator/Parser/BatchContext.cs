@@ -820,6 +820,13 @@ internal sealed partial class BatchContext
     public int BlockDepth;
 
     /// <summary>
+    /// The units of real's statement-nesting budget the blocks around the
+    /// statement being dispatched hold (<c>Simulation.EnterStatementNesting</c>),
+    /// which a body batch starts over as it does <see cref="BlockDepth"/>.
+    /// </summary>
+    public int StatementNesting;
+
+    /// <summary>
     /// Whether the batch's top-level dispatch has consumed at least one
     /// substantive statement (anything that isn't a bare <c>;</c>). The
     /// must-be-first-statement check on CREATE/ALTER

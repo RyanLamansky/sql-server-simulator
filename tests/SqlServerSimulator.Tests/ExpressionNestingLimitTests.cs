@@ -10,23 +10,25 @@ namespace SqlServerSimulator;
 /// Server's tolerance of thousands of terms), while genuinely-nested shapes are
 /// bounded by SQL Server's own graceful structural errors:
 /// <list type="bullet">
-/// <item>Msg 191 (Class 15) — parens / subquery / function-argument nesting,
-/// via the shared weighted budget (probe-confirmed 2026-07-18: real pools
-/// these into one budget where a subquery level costs ≈ 6 paren levels). The
-/// simulator's parse frames are fatter than real's, so the caps are lower than
-/// real's stack-dependent thresholds (500 parens vs 1015, 83 subqueries vs
-/// 168) but keep the probed ratio — a documented divergence.</item>
+/// <item>Msg 191 (Class 15) — parens, function calls, scalar subqueries,
+/// unary signs and derived tables draw on one budget, each where real's own
+/// limit is (probed 2026-10-24 against SQL Server 2025): 1,015 parens or
+/// stacked signs, 1,013 function calls, 168 subqueries, 100 derived tables
+/// and 339 chained signed factors pass, one more fails.</item>
 /// <item>Msg 125 (Class 15) — CASE / IIF nested past ten levels; State 4 for
 /// CASE, State 2 for IIF (the construct entered at the eleventh level).</item>
-/// <item>Msg 8631 (Class 17) — the runtime stack probe, the backstop for any
-/// deep recursive shape whose frames outrun a deterministic cap (deep function
-/// nesting reaches it near ~80 levels on a 1 MB thread; real raises Msg 191 at
-/// 1013 — a documented divergence).</item>
+/// <item>Msg 8631 (Class 17) — the runtime stack probe, for a thread whose
+/// stack runs out before real's limit: the depths real accepts need more
+/// stack than a default thread has, so those run on a 64 MB one here.</item>
 /// </list>
 /// </summary>
 [TestClass]
 public sealed class ExpressionNestingLimitTests
 {
+    private const int DeepStack = 64 * 1024 * 1024;
+
+    private const int SmallStack = 512 * 1024;
+
     private static string AdditionChain(int terms) =>
         $"select ({string.Join(" + ", Enumerable.Repeat("1", terms))})";
 
@@ -72,8 +74,8 @@ public sealed class ExpressionNestingLimitTests
         // the whole parse + run path is recursion-bounded. A stack overflow
         // would fault the process rather than fail the test, so reaching the
         // assertion at all is the guarantee.
-        var sql = "select 1 where " + string.Join(" and ", Enumerable.Repeat("1=1", 50000));
-        RunOnSmallStack(sql, out var result, out var failure);
+        var (result, failure) = Extensions.ExecuteScalarOnStack(
+            "select 1 where " + string.Join(" and ", Enumerable.Repeat("1=1", 50000)), SmallStack);
         IsNull(failure, "deep AND chain should evaluate, not raise");
         AreEqual(1, result);
     }
@@ -85,20 +87,17 @@ public sealed class ExpressionNestingLimitTests
         // `NOT NOT … p` used to recurse per NOT at Run time. NOT-runs now
         // collapse at parse (three-valued NOT is an involution), so an
         // even-length stack is the identity — here 50,000 NOTs over 1=1.
-        var sql = "select 1 where " + string.Concat(Enumerable.Repeat("not ", 50000)) + "1=1";
-        RunOnSmallStack(sql, out var result, out var failure);
+        var (result, failure) = Extensions.ExecuteScalarOnStack(
+            "select 1 where " + string.Concat(Enumerable.Repeat("not ", 50000)) + "1=1", SmallStack);
         IsNull(failure, "deep NOT stack should evaluate, not raise");
         AreEqual(1, result);
     }
 
-    // --- Stacked / chained unary signs: genuinely nested, Msg 8631 backstop. ---
+    // --- Stacked / chained unary signs: genuinely nested. ---
     // A sign parses the following multiplicative chain as its operand (SQL
     // Server's additive binding for `+` / `-`), so both a stack of signs and a
-    // chain of signed factors recurse once per sign without passing through
-    // Expression.Parse — ParseSignedOperand carries its own probe. Real bounds
-    // both shapes with Msg 191 (past ~350 signed factors, ~1000 stacked signs);
-    // the simulator tolerates far more and then raises Msg 8631, the same
-    // more-permissive-then-graceful direction taken for flat chains.
+    // chain of signed factors recurse once per sign. Real takes 1,015 stacked
+    // signs, as many as parens, but only 339 signed factors in a chain.
 
     [TestMethod]
     public void SignedMultiplicativeChain_ModerateDepth_Evaluates()
@@ -107,44 +106,42 @@ public sealed class ExpressionNestingLimitTests
 
     [TestMethod]
     [Timeout(60000)]
-    public void UnarySignStack_ExtremeDepth_OnSmallStackThread_IsGracefulNeverProcessDeath()
+    [DataRow(339, null)]
+    [DataRow(340, 191)]
+    public void SignedMultiplicativeChain_MeetsRealsLimit(int factors, int? error)
     {
-        var sql = "select " + string.Concat(Enumerable.Repeat("- ", 20000)) + "1";
-        RunOnSmallStack(sql, out _, out var failure);
-        AreEqual(8631, IsInstanceOfType<SimulatedSqlException>(failure).Number);
+        var (result, failure) = Extensions.ExecuteScalarOnStack("select " + string.Join(" * ", Enumerable.Repeat("-1", factors)), DeepStack);
+        AreEqual(error, failure.ErrorNumber());
+        if (error is null)
+            AreEqual(-1, result);
     }
 
     [TestMethod]
     [Timeout(60000)]
-    public void SignedMultiplicativeChain_ExtremeDepth_OnSmallStackThread_IsGracefulNeverProcessDeath()
+    [DataRow(1015, null)]
+    [DataRow(1016, 191)]
+    public void StackedSigns_MeetRealsLimit(int signs, int? error)
     {
-        var sql = "select " + string.Join(" * ", Enumerable.Repeat("-1", 20000));
-        RunOnSmallStack(sql, out _, out var failure);
-        AreEqual(8631, IsInstanceOfType<SimulatedSqlException>(failure).Number);
+        var (result, failure) = Extensions.ExecuteScalarOnStack("select " + string.Concat(Enumerable.Repeat("- ", signs)) + "1", DeepStack);
+        AreEqual(error, failure.ErrorNumber());
+        if (error is null)
+            AreEqual(-1, result);
     }
 
-    private void RunOnSmallStack(string sql, out object? result, out Exception? failure)
-        => RunOnStack(512 * 1024, sql, out result, out failure);
-
-    private void RunOnStack(int maxStackSize, string sql, out object? result, out Exception? failure)
+    // Past real's limit on a thread too small to reach it, whichever comes
+    // first raises — the budget's Msg 191 or the stack probe's Msg 8631 —
+    // and the process survives.
+    [TestMethod]
+    [Timeout(60000)]
+    [DataRow("stacked")]
+    [DataRow("chained")]
+    public void Signs_OnSmallStackThread_AreGracefulNeverProcessDeath(string shape)
     {
-        object? captured = null;
-        Exception? caught = null;
-        var thread = new Thread(() =>
-        {
-            try
-            {
-                captured = new Simulation().ExecuteScalar(sql);
-            }
-            catch (Exception ex) when (ex is SimulatedSqlException or NotSupportedException)
-            {
-                caught = ex;
-            }
-        }, maxStackSize);
-        thread.Start();
-        IsTrue(thread.Join(TimeSpan.FromSeconds(30)), "query did not complete on the sized-stack thread");
-        result = captured;
-        failure = caught;
+        var sql = shape == "stacked"
+            ? "select " + string.Concat(Enumerable.Repeat("- ", 20000)) + "1"
+            : "select " + string.Join(" * ", Enumerable.Repeat("-1", 20000));
+        var failure = Extensions.ExecuteScalarOnStack(sql, SmallStack).Failure;
+        IsTrue(failure.ErrorNumber() is 191 or 8631, $"raised {failure.ErrorNumber()}");
     }
 
     // --- Nested parens: shared budget, Msg 191. ---
@@ -154,18 +151,26 @@ public sealed class ExpressionNestingLimitTests
         => AreEqual(1, new Simulation().ExecuteScalar($"select {new string('(', 200)}1{new string(')', 200)}"));
 
     [TestMethod]
-    public void NestedParens_AtLimit_Evaluates()
-        => AreEqual(1, new Simulation().ExecuteScalar($"select {new string('(', 500)}1{new string(')', 500)}"));
+    [Timeout(60000)]
+    public void NestedParens_AtRealsLimit_Evaluates()
+    {
+        var (result, failure) = Extensions.ExecuteScalarOnStack($"select {new string('(', 1015)}1{new string(')', 1015)}", DeepStack);
+        IsNull(failure);
+        AreEqual(1, result);
+    }
 
     [TestMethod]
-    public void NestedParens_OverLimit_RaisesMsg191()
+    [Timeout(60000)]
+    public void NestedParens_PastRealsLimit_RaisesMsg191()
     {
-        var ex = new Simulation().AssertSqlError($"select {new string('(', 501)}1{new string(')', 501)}", 191);
+        var (_, failure) = Extensions.ExecuteScalarOnStack($"select {new string('(', 1016)}1{new string(')', 1016)}", DeepStack);
+        var ex = IsInstanceOfType<SimulatedSqlException>(failure);
+        AreEqual(191, ex.Number);
         AreEqual(15, ex.Class);
         AreEqual("Some part of your SQL statement is nested too deeply. Rewrite the query or break it up into smaller queries.", ex.Message);
     }
 
-    // --- Nested scalar subqueries: shared budget (≈ 6× a paren), Msg 191. ---
+    // --- Nested scalar subqueries, function calls and derived tables. ---
 
     private static string NestedSubqueries(int depth)
     {
@@ -175,45 +180,57 @@ public sealed class ExpressionNestingLimitTests
         return q;
     }
 
-    [TestMethod]
-    public void NestedSubqueries_AtLimit_Evaluates()
-        => AreEqual(1, new Simulation().ExecuteScalar(NestedSubqueries(83)));
-
-    [TestMethod]
-    public void NestedSubqueries_OverLimit_RaisesMsg191()
-        => AreEqual(15, new Simulation().AssertSqlError(NestedSubqueries(84), 191).Class);
-
-    // --- Nested functions: charged to the shared budget (Msg 191 at the cap
-    // on an adequate stack) but with fatter frames, so on a tight stack the
-    // runtime probe (Msg 8631) pre-empts — both graceful, never process death. ---
-
-    [TestMethod]
-    [Timeout(60000)]
-    public void NestedFunctions_OverBudget_RaisesMsg191()
+    private static string NestedDerivedTables(int depth, string innermost = "select 1 as x")
     {
-        // 501 nested ABS = 501 budget units > 500. The fat function frames
-        // exhaust a default 1 MB thread (Windows test runners) near ~97 levels,
-        // where the stack probe's Msg 8631 would pre-empt the budget's Msg 191
-        // — a dedicated 16 MB thread keeps the structural cap deterministic.
-        var sql = "select " + string.Concat(Enumerable.Repeat("abs(", 501)) + "1" + new string(')', 501);
-        RunOnStack(16 * 1024 * 1024, sql, out _, out var failure);
-        var ex = IsInstanceOfType<SimulatedSqlException>(failure);
-        AreEqual(191, ex.Number);
-        AreEqual(15, ex.Class);
+        var q = innermost;
+        for (var i = 0; i < depth; i++)
+            q = $"select * from ({q}) as d{i}";
+        return q;
     }
 
     [TestMethod]
     [Timeout(60000)]
-    public void NestedFunctions_ExtremeDepth_OnSmallStackThread_RaisesMsg8631NotProcessDeath()
+    [DataRow("subqueries", 168, null)]
+    [DataRow("subqueries", 169, 191)]
+    [DataRow("functions", 1013, null)]
+    [DataRow("functions", 1014, 191)]
+    [DataRow("derived tables", 100, null)]
+    [DataRow("derived tables", 101, 191)]
+    public void NestedQueriesAndCalls_MeetRealsLimit(string construct, int depth, int? error)
     {
-        // On a 512 KB thread the fat function frames exhaust the stack around
-        // ~40 levels — far below the 500-unit budget — so the runtime probe
+        var sql = construct switch
+        {
+            "subqueries" => NestedSubqueries(depth),
+            "functions" => "select " + string.Concat(Enumerable.Repeat("abs(", depth)) + "1" + new string(')', depth),
+            _ => NestedDerivedTables(depth),
+        };
+        var (result, failure) = Extensions.ExecuteScalarOnStack(sql, DeepStack);
+        AreEqual(error, failure.ErrorNumber());
+        if (error is null)
+            AreEqual(1, result);
+    }
+
+    [TestMethod]
+    [Timeout(60000)]
+    [DataRow("functions")]
+    [DataRow("derived tables")]
+    public void NestedQueriesAndCalls_OnSmallStackThread_RaiseMsg8631NotProcessDeath(string construct)
+    {
+        // The frames run the stack out far below real's limit, so the probe
         // converts the overflow into Msg 8631 rather than faulting the process.
-        var sql = "select " + string.Concat(Enumerable.Repeat("abs(", 5000)) + "1" + new string(')', 5000);
-        RunOnSmallStack(sql, out _, out var failure);
-        var ex = IsInstanceOfType<SimulatedSqlException>(failure);
-        AreEqual(8631, ex.Number);
+        var sql = construct == "functions"
+            ? "select " + string.Concat(Enumerable.Repeat("abs(", 5000)) + "1" + new string(')', 5000)
+            : NestedDerivedTables(100);
+        AreEqual(8631, Extensions.ExecuteScalarOnStack(sql, SmallStack).Failure.ErrorNumber());
     }
+
+    // A speculative read of a query's FROM ahead of its select list, retried in
+    // order when it failed, read every nested level's FROM twice — an error at
+    // the bottom of 30 nested derived tables raised 2^31 times.
+    [TestMethod]
+    [Timeout(20000)]
+    public void AnErrorUnderNestedDerivedTables_RaisesOnce()
+        => _ = new Simulation().AssertSqlError(NestedDerivedTables(30, "select 1 as x from nosuchtable"), 208);
 
     // --- Nested CASE / IIF: lexical cap of ten, Msg 125. ---
 
@@ -283,13 +300,36 @@ public sealed class ExpressionNestingLimitTests
         AreEqual(2, new Simulation().AssertSqlError($"select {NestedCase(1, NestedIif(10))}", 125).State);
     }
 
-    // --- Shared budget: parens and subqueries draw from one pool. ---
+    // --- Shared budget: the constructs draw from one pool, as real's mixtures
+    // probed 2026-10-24 against SQL Server 2025 land. ---
 
     [TestMethod]
-    public void SharedBudget_ParensPlusSubquery_RaisesMsg191()
+    [Timeout(60000)]
+    [DataRow("derived", 50, 500, null)]
+    [DataRow("derived", 50, 600, 191)]
+    [DataRow("derived", 90, 100, null)]
+    [DataRow("signs", 300, 100, null)]
+    [DataRow("signs", 330, 50, 191)]
+    public void SharedBudget_MixturesLandWhereRealsDo(string outer, int outerDepth, int parens, int? error)
     {
-        // 480 parens (480 units) wrapping a 4-deep subquery (24 units) = 504 > 500.
-        var sql = $"select {new string('(', 480)}{NestedSubqueries(4)}{new string(')', 480)}";
-        _ = new Simulation().AssertSqlError(sql, 191);
+        var innermost = $"select {new string('(', parens)}1{new string(')', parens)} as x";
+        var sql = outer == "derived"
+            ? NestedDerivedTables(outerDepth, innermost)
+            : $"select {new string('(', parens)}" + string.Join(" * ", Enumerable.Repeat("-1", outerDepth)) + new string(')', parens);
+        AreEqual(error, Extensions.ExecuteScalarOnStack(sql, DeepStack).Failure.ErrorNumber());
+    }
+
+    // --- A chain of UNION ALLs is as long as it is deep, which real doesn't
+    // count as nesting: it runs 10,000 branches. ---
+
+    [TestMethod]
+    [Timeout(60000)]
+    public void UnionAllChain_OfThousands_RunsOnADefaultSizedStack()
+    {
+        var (result, failure) = Extensions.ExecuteScalarOnStack(
+            "select count(*) from (" + string.Join(" union all ", Enumerable.Range(0, 3000).Select(i => $"select {i.ToInvariantString()} as x")) + ") u",
+            1024 * 1024);
+        IsNull(failure);
+        AreEqual(3000, result);
     }
 }

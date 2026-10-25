@@ -253,6 +253,40 @@ static class Extensions
     }
 
     /// <summary>
+    /// Runs <paramref name="commandText"/> through a fresh simulation on a
+    /// thread whose stack is <paramref name="maxStackSize"/> bytes — for a
+    /// shape nested deep enough that the stack it runs on decides whether it
+    /// reaches real's own limit first — returning its scalar or the
+    /// <see cref="SimulatedSqlException"/> it raised. A stack overflow would
+    /// end the process instead, so returning at all is part of the result.
+    /// </summary>
+    public static (object? Result, SimulatedSqlException? Failure) ExecuteScalarOnStack(string commandText, int maxStackSize)
+    {
+        object? result = null;
+        SimulatedSqlException? failure = null;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                result = new Simulation().ExecuteScalar(commandText);
+            }
+            catch (SimulatedSqlException raised)
+            {
+                failure = raised;
+            }
+        }, maxStackSize);
+        thread.Start();
+        Assert.IsTrue(thread.Join(TimeSpan.FromSeconds(60)), "the command did not complete on the sized-stack thread");
+        return (result, failure);
+    }
+
+    /// <summary>
+    /// The number of the error an <see cref="ExecuteScalarOnStack"/> run
+    /// raised, or null where it answered.
+    /// </summary>
+    public static int? ErrorNumber(this SimulatedSqlException? failure) => failure?.Number;
+
+    /// <summary>
     /// Exact-message variant of <see cref="AssertSqlError(Simulation, string, int)"/>,
     /// comparing the text of the error <paramref name="errorNumber"/> names —
     /// <c>Errors[0]</c>. The exception's own <c>Message</c> joins every entry

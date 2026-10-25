@@ -397,7 +397,7 @@ partial class Simulation
             var combined = branches[0].plan;
             for (var i = 1; i < branches.Count; i++)
                 combined = Selection.CombineSetOps(combined, branches[i].plan, branches[i].op, namesOwnCollation: false);
-            return combined;
+            return Selection.KeyConstantBranches(combined);
         }
 
         // Recursive CTE — every operator separating branches must be

@@ -806,7 +806,8 @@ Two details keep the scan honest:
   Every other FROM-bearing construct (`TRIM(… FROM …)`, `EXTRACT(… FROM …)`) is parenthesized and excluded by depth.
 - **The pre-pass is speculative.**
   If the FROM can't be parsed on its own — an unresolvable table, a skip-mode dead branch, or a statement-level error the normal order reports first (a CTE's Msg 319 outranking a Msg 208) — the attempt is discarded and the original in-place path runs, so error identity and ordering are unchanged.
-  Nothing is kept from a failed attempt.
+  Nothing is kept from a failed attempt but an error a nested query's own FROM raised reading in order (`SimulatedSqlException.RaisedByFromInOrder`), which reading this FROM again would only raise again: the in-place path raises it where the FROM falls instead.
+  Reading it again doubled the work at every level of nested derived tables, so an error at the bottom of 30 of them was raised 2^31 times.
 
 A FROM-less SELECT that references an outer column can't bake its projection at parse time the way `SELECT 1` does, since the value changes per invocation.
 `BuildSynthesizedSqlRow` detects any column reference and defers those expressions to the executor, where the outer resolver is supplied; the reference-free case keeps the baked fast path unchanged.

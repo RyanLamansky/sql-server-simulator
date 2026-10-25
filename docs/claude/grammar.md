@@ -386,7 +386,7 @@ A `DROP` of a kind no statement here creates (`UnbuiltDropKinds`) is answered in
 - **A literal real's lexer refuses among several syntax errors**: the batch reports every such literal — a float past `float`'s range (Msg 168), a number past 38 digits (Msg 1007) — with the parse's syntax errors in source order, as real's lexer reads on past each one (`Simulation.WithLexErrors`), but places them all around the *first* syntax error, so past a recovered one they follow the parse's: `SELECT 1 +; SELECT 1e400; SELECT 2 +` is 102, 168, 102 on real and 102, 102, 168 here (probed 2026-10-21 against SQL Server 2025).
 - **Multi-statement-TVF bodies treat a `SET QUOTED_IDENTIFIER` as top-level** rather than rejecting it (real SQL Server disallows `SET QUOTED_IDENTIFIER` inside a function body).
 
-## Expression depth limits (Msg 8631 / Msg 191 / Msg 125)
+## Depth limits (Msg 8631 / Msg 191 / Msg 125)
 
 A .NET stack overflow is uncatchable and process-fatal — unacceptable for an in-process library handed a pathological query.
 So no recursive spine that user SQL can drive arbitrarily deep is allowed to overflow: flat operator chains parse **and** evaluate iteratively (no per-term recursion), genuinely-nested shapes are bounded by SQL Server's own graceful structural errors, and a runtime stack probe backstops whatever remains.
@@ -403,15 +403,21 @@ So flat `+` / concat / `AND` / `OR` chains of tens of thousands of terms parse a
 The simulator has **no** artificial cap on flat chains — being more permissive than real on Msg 8631 (a physical limit, not a semantic one) is fine, so none is added.
 `IN`-list length is likewise uncapped on both.
 
-### Nested shapes — shared weighted budget, Msg 191
+### Nested expressions — shared weighted budget, Msg 191
 
-Parens, scalar subqueries, and function-argument lists share **one** nesting budget (`ParserContext.NestingDepth`, cap `Expression.MaxNestingDepth` = 500), each construct charging its cost on entry and refunding it in a `finally`; crossing the cap raises **Msg 191, Class 15** (`StatementNestedTooDeeply()`, `Some part of your SQL statement is nested too deeply. …`).
-Probe-confirmed that real pools these into a single budget (1000 nested parens + 14 nested funcs fails; 150 subqueries + 116 parens fails) where a subquery level costs ≈ 6 paren levels — the simulator mirrors the ratio: `ParenNestingCost` = `FunctionCallNestingCost` = 1, `SubqueryNestingCost` = 6.
+Parens, function-argument lists, scalar subqueries, unary signs and derived tables share **one** nesting budget (`ParserContext.NestingDepth`), each construct charging its cost through `Expression.EnterNesting` on entry and refunding it as its guard is disposed; crossing the budget raises **Msg 191, Class 15** (`StatementNestedTooDeeply()`, `Some part of your SQL statement is nested too deeply. …`).
+The costs are fine-grained so that each construct's own limit lands exactly on real's: 1,015 nested parens or stacked signs, 1,013 nested function calls, 168 nested scalar subqueries, 100 nested derived tables and 339 chained signed factors (`-1 * -1 * …`) pass, one more of each raises Msg 191, and real's mixtures land on the same side — 50 derived tables around 500 parens pass and around 600 fail, 300 chained signed factors inside 100 parens pass and 330 inside 50 fail (probed 2026-10-24 against SQL Server 2025).
+A sign costs a paren, and the factors its chain reads past the first nest it deeper, which is why chained signed factors meet the limit three times sooner than stacked signs.
 
-**Divergence:** real's absolute limits are higher and stack-dependent (1015 nested parens / 1013 nested funcs / 168 nested subqueries all succeed; +1 each raises Msg 191).
-The simulator's parse frames are fatter — a 1 MB Debug thread parses only ~990 nested parens before the stack probe would claim the shape as Msg 8631 — so the cap is set to 500 (paren/func limit 500, subquery limit ⌊500/6⌋ = 83), giving ~2× headroom on the tightest test config (1 MB Debug) while preserving the probed subquery ≈ 6× paren ratio.
-Deep **function** nesting alone has fatter frames still (~40 levels on a 512 KB thread, ~80–100 on 1 MB): on an adequate stack it reaches the 500-unit budget and raises Msg 191, but on a tight thread the runtime probe pre-empts with Msg 8631 (real always raises Msg 191 here).
-Both outcomes are graceful.
+**Divergence:** real weighs a function call by whether it is the innermost construct — 1,000 parens around 14 calls fail and 14 calls around 1,000 parens pass — which a sum of costs can't follow; the simulator passes both.
+
+### Nested statements — a budget of their own, Msg 191
+
+Statement blocks draw on a budget real keeps apart from an expression's — 500 nested `IF`s around 500 nested parens pass — charged by `Simulation.EnterStatementNesting` into `BatchContext.StatementNesting`: an `IF`, `WHILE`, `TRY` or `CATCH` body costs one unit, a `BEGIN … END` two, an `ELSE` three and a `SELECT` reached through them six, against 1,014.
+That puts 1,008 nested `IF`s or `TRY`s, 504 `BEGIN`s, 336 `BEGIN IF` pairs and a 252-branch `ELSE IF` chain over a `SELECT` — and 1,014 `IF`s or `WHILE`s, 507 `BEGIN`s and 253 branches over a `SET` — at real's limit (probed 2026-10-24 against SQL Server 2025).
+A statement other than `SELECT` costs nothing at the bottom and a `CATCH` body costs its `TRY`'s unit, both unprobed.
+
+**Divergence:** real's `WHILE` over an assigning `SELECT @i = …` stops one level sooner (1,007) than over a plain one.
 
 ### Nested CASE / IIF — Msg 125, cap 10
 
@@ -421,7 +427,12 @@ Probe-confirmed: nesting in a `WHEN` condition counts identically to a `THEN` / 
 
 ### Msg 8631 backstop
 
-**Msg 8631, Class 17** (`ServerStackLimitReached()`, `Internal error: Server stack limit has been reached. …`) is raised from a runtime stack probe (`RuntimeHelpers.EnsureSufficientExecutionStack()`) at the top of `Expression.Parse`, `Expression.ParseSignedOperand` and `BooleanExpression.ParseNot` — the faithful mechanism, since real's Msg 8631 is likewise a genuine stack probe whose threshold scales with the thread stack.
-The sign-operand site is its own probe because unary `+` / `-` prefixes are *genuinely* nested: each sign parses the following multiplicative chain as its operand (see [`arithmetic.md`](arithmetic.md#the-unary-signs-bind-at-the-additive-level)), so both a stack of signs (`- - - … 1`) and a chain of signed factors (`-1 * -1 * …`) recurse once per sign without passing through `Expression.Parse`.
-Real bounds both with **Msg 191** — probe-confirmed past ~350 signed factors and ~1000 stacked signs, where an *unsigned* `1 * 1 * …` chain of 3000 is flat and fine — while the simulator tolerates far more and then raises Msg 8631, the same more-permissive-then-graceful direction taken for flat chains.
-It composes across nested proc / dynamic-SQL batches (it measures the real stack) and catches any deep recursive shape whose frames outrun a deterministic cap (deep function nesting on a tight thread; deeply parenthesized boolean predicates).
+**Msg 8631, Class 17** (`ServerStackLimitReached()`, `Internal error: Server stack limit has been reached. …`) is raised from a runtime stack probe (`Expression.EnsureParseStack`, over `RuntimeHelpers.EnsureSufficientExecutionStack()`) at every recursive spine the parser and the dispatcher walk: `Expression.Parse`, `BooleanExpression.ParseNot`, every `EnterNesting` and `EnterStatementNesting` charge, and every statement dispatch (`DispatchFramedStatement`), which nested blocks, module bodies and dynamic batches all pass through.
+The depths real accepts need more stack than the simulator's frames find on a default thread — a derived-table level takes about 21 KB and a `BEGIN` block about 5 KB (Release, measured 2026-10-24), so a 1 MB thread meets the probe near 45 derived tables — so there the probe answers first with Msg 8631, never a stack overflow; on a large enough stack (the tests use 64 MB) every limit is real's.
+It composes across nested proc / dynamic-SQL batches, since it measures the real stack.
+
+### A chain of set operations is not nesting
+
+A `UNION ALL` chain is a tree as deep as it is long, but real doesn't count it as nesting — it runs 10,000 branches (probed 2026-10-24 against SQL Server 2025) — so the walks over one are iterative: execution reads the chain's branches off its left spine (`ConcatBranchRows`), `Selection.ReachOf` collects their reach on a stack of its own, and the constant-row keys are settled once per chain (`KeyConstantBranches`).
+
+**Not modeled yet:** each operator still copies the branch list to its left (`Selection.UnionAllBranches`), so parsing a chain is quadratic past several thousand branches — 10,000 take about 2.5 s (Release, measured 2026-10-24).

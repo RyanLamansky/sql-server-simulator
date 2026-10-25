@@ -265,8 +265,13 @@ internal abstract class Expression : ExpressionNode
     /// </summary>
     private static Expression ParseSignedOperand(ParserContext context)
     {
-        EnsureParseStack();
-        return ParseBinaryContinuation(ParsePrimary(context.MoveNextRequiredReturnSelf()), minTightness: 2, context);
+        using var sign = EnterNesting(context, SignNestingCost);
+        var operand = ParsePrimary(context.MoveNextRequiredReturnSelf());
+        // The factors a sign's chain reads past its first nest deeper still,
+        // which a stack of signs doesn't: real refuses a chain of 340 signed
+        // factors (`-1 * -1 * …`) where it takes 1,015 stacked signs.
+        using var chain = EnterNesting(context, BinaryTightness(context) == 2 ? SignedChainNestingCost : 0);
+        return ParseBinaryContinuation(operand, minTightness: 2, context);
     }
 
     /// <summary>Flags the keyword atom <paramref name="keyword"/> for <c>FIPS_FLAGGER</c> (<see cref="FipsFlagger"/>), passing <paramref name="atom"/> through.</summary>
@@ -803,53 +808,44 @@ internal abstract class Expression : ExpressionNode
         if (context.FromSourceColumnSink is { Count: > 0 } sink && ReferenceEquals(sink[^1], reference))
             sink.RemoveAt(sink.Count - 1);
 
-        context.NestingDepth += FunctionCallNestingCost;
-        if (context.NestingDepth > MaxNestingDepth)
-            throw SimulatedSqlException.StatementNestedTooDeeply();
-        try
+        using var nesting = EnterNesting(context, FunctionCallNestingCost);
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Distinct or Keyword.All }
+            && QuantifiedCall.Parse(reference, context) is { } quantified)
         {
-            if (context.Token is ReservedKeyword { Keyword: Keyword.Distinct or Keyword.All }
-                && QuantifiedCall.Parse(reference, context) is { } quantified)
+            return quantified;
+        }
+        if (reference.ReferencedName.Count >= 2)
+        {
+            if (context.RuleVariables is not null)
+                throw SimulatedSqlException.UserFunctionNotAllowedInThisContext();
+            if (VarbinaryToHex.TryResolve(reference.ReferencedName, context) is { } systemFunction)
+                return systemFunction;
+            if (context.Batch.TryResolveFunction(reference.ReferencedName, out var function))
             {
-                return quantified;
-            }
-            if (reference.ReferencedName.Count >= 2)
-            {
-                if (context.RuleVariables is not null)
-                    throw SimulatedSqlException.UserFunctionNotAllowedInThisContext();
-                if (VarbinaryToHex.TryResolve(reference.ReferencedName, context) is { } systemFunction)
-                    return systemFunction;
-                if (context.Batch.TryResolveFunction(reference.ReferencedName, out var function))
+                return function switch
                 {
-                    return function switch
-                    {
-                        ScalarFunction scalarFn => UserFunctionCall.ParseCall(scalarFn, context),
-                        ClrScalarFunction clrFn => ClrFunctionCall.ParseCall(clrFn, context),
-                        ClrAggregateFunction clrAggregate => AggregateExpression.ParseClr(clrAggregate, reference.ReferencedName, context),
-                        // A table-valued function in a value's place is a
-                        // missing scalar function, ahead of its arguments
-                        // (probed 2026-10-04 against SQL Server 2025).
-                        _ => throw SimulatedSqlException.CannotFindUserDefinedFunction(reference.ReferencedName),
-                    };
-                }
-                // Skip mode: real SQL Server defers user-function binding, so
-                // an un-taken branch calling a missing schema-qualified
-                // function compiles and is discarded. Parse-and-discard the
-                // argument list so the statement (and any trailing ELSE / END)
-                // parses to completion instead of throwing Msg 4121 mid-
-                // expression. A bare 1-part unrecognized function still raises
-                // Msg 195 below — real SQL Server errors on that at compile
-                // time even in a dead branch.
-                return context.Batch.IsSkipping
-                    ? ParseDeferredCallAndDiscard(context)
-                    : throw SimulatedSqlException.CannotFindUserDefinedFunction(reference.ReferencedName);
+                    ScalarFunction scalarFn => UserFunctionCall.ParseCall(scalarFn, context),
+                    ClrScalarFunction clrFn => ClrFunctionCall.ParseCall(clrFn, context),
+                    ClrAggregateFunction clrAggregate => AggregateExpression.ParseClr(clrAggregate, reference.ReferencedName, context),
+                    // A table-valued function in a value's place is a
+                    // missing scalar function, ahead of its arguments
+                    // (probed 2026-10-04 against SQL Server 2025).
+                    _ => throw SimulatedSqlException.CannotFindUserDefinedFunction(reference.ReferencedName),
+                };
             }
-            return ResolveBuiltIn(reference.Name, context);
+            // Skip mode: real SQL Server defers user-function binding, so
+            // an un-taken branch calling a missing schema-qualified
+            // function compiles and is discarded. Parse-and-discard the
+            // argument list so the statement (and any trailing ELSE / END)
+            // parses to completion instead of throwing Msg 4121 mid-
+            // expression. A bare 1-part unrecognized function still raises
+            // Msg 195 below — real SQL Server errors on that at compile
+            // time even in a dead branch.
+            return context.Batch.IsSkipping
+                ? ParseDeferredCallAndDiscard(context)
+                : throw SimulatedSqlException.CannotFindUserDefinedFunction(reference.ReferencedName);
         }
-        finally
-        {
-            context.NestingDepth -= FunctionCallNestingCost;
-        }
+        return ResolveBuiltIn(reference.Name, context);
     }
 
     /// <summary>
@@ -1762,38 +1758,56 @@ internal abstract class Expression : ExpressionNode
     internal virtual bool IsNonNullConstantComputation => false;
 
     /// <summary>
-    /// Maximum shared nesting budget (see <see cref="ParserContext.NestingDepth"/>)
-    /// before Msg 191. Grouped-expression parens and function-argument levels
-    /// each cost <see cref="ParenNestingCost"/>; a scalar subquery costs
-    /// <see cref="SubqueryNestingCost"/> (probe-confirmed 2026-07-18: on real
-    /// SQL Server the three share one budget where a subquery level costs
-    /// roughly six paren levels). Real's absolute limit is higher and
-    /// stack-dependent (1015 nested parens succeed, 1016 fail; 168 nested
-    /// subqueries succeed, 169 fail) but the simulator's parse frames are
-    /// fatter — a 1 MB thread parses only ~1000 nested parens (Debug) before
-    /// <see cref="Parse"/>'s stack probe would claim the same shape as Msg 8631.
-    /// So the cap is set to 500 (paren limit 500, subquery limit ⌊500/6⌋ = 83),
-    /// which keeps the structural Msg 191 firing with ~2× headroom on the
-    /// tightest test configuration (a 1 MB Debug thread) and preserves the
-    /// probed subquery ≈ 6× paren ratio; the lower absolute numbers are a
-    /// documented divergence (see docs/claude/grammar.md). Function-call
-    /// nesting alone has fatter frames still (~76 levels on a 1 MB Debug
-    /// thread), so it reaches the stack probe (Msg 8631) before this cap —
-    /// another documented divergence from real's Msg 191.
+    /// The shared nesting budget (see <see cref="ParserContext.NestingDepth"/>)
+    /// before Msg 191, in units fine enough that each construct's cost puts
+    /// its own limit exactly where real's is: 1,015 nested parentheses or
+    /// stacked signs, 1,013 nested function calls, 168 nested scalar
+    /// subqueries, 100 nested derived tables and 339 chained signed factors
+    /// pass, one more of each fails, and real's mixtures of them — derived
+    /// tables or signed factors around parentheses or subqueries — land on
+    /// the same side (probed 2026-10-24 against SQL Server 2025). Real weighs
+    /// a function call by whether it is the innermost construct, which a sum
+    /// can't follow: 1,000 parentheses around 14 calls fail there and pass
+    /// here. A thread whose stack runs out first meets
+    /// <see cref="EnsureParseStack"/>'s Msg 8631 instead.
     /// </summary>
-    private const int MaxNestingDepth = 500;
+    private const int MaxNestingDepth = 1_000_000;
 
-    /// <summary>Shared-budget cost of one grouped-expression paren level.</summary>
-    private const int ParenNestingCost = 1;
+    /// <summary>Shared-budget cost of one grouped-expression paren level, or of one stacked sign.</summary>
+    private const int ParenNestingCost = 985;
 
-    /// <summary>Shared-budget cost of one function-call argument-list level (same as a paren).</summary>
-    private const int FunctionCallNestingCost = 1;
+    /// <summary>Shared-budget cost of one function-call argument-list level.</summary>
+    private const int FunctionCallNestingCost = 987;
+
+    /// <summary>Shared-budget cost of one scalar-subquery level.</summary>
+    private const int SubqueryNestingCost = 5950;
+
+    /// <summary>Shared-budget cost of one derived table's body.</summary>
+    internal const int DerivedTableNestingCost = 9950;
+
+    /// <summary>Shared-budget cost of one unary sign, which nests its operand.</summary>
+    private const int SignNestingCost = ParenNestingCost;
 
     /// <summary>
-    /// Shared-budget cost of one scalar-subquery level — six paren-equivalents,
-    /// fitting real SQL Server's probed 1015-paren / 168-subquery ratio.
+    /// What a sign's operand chain adds to its cost once it reads a factor
+    /// past its first (see <see cref="ParseSignedOperand"/>).
     /// </summary>
-    private const int SubqueryNestingCost = 6;
+    private const int SignedChainNestingCost = 1965;
+
+    /// <summary>
+    /// Charges <paramref name="cost"/> to the shared nesting budget for the
+    /// construct about to parse, refunded as the returned guard is disposed:
+    /// Msg 191 past <see cref="MaxNestingDepth"/>, and Msg 8631 where the
+    /// thread's stack runs out first.
+    /// </summary>
+    internal static ParserScope<int> EnterNesting(ParserContext context, int cost)
+    {
+        EnsureParseStack();
+        var depth = context.NestingDepth + cost;
+        return depth > MaxNestingDepth
+            ? throw SimulatedSqlException.StatementNestedTooDeeply()
+            : ParserScope.Enter(ref context.NestingDepth, depth);
+    }
 
     /// <summary>
     /// Parses one of the conditional-family built-ins with
@@ -1873,8 +1887,8 @@ internal abstract class Expression : ExpressionNode
     /// the subquery path; anything else falls through to the standard
     /// parenthesized form. Both leave the cursor on the closing <c>)</c>,
     /// matching the lookahead contract <see cref="Parse"/> expects. Each level
-    /// charges the shared nesting budget before recursing (Msg 191 on
-    /// overflow).
+    /// charges the shared nesting budget before recursing
+    /// (<see cref="EnterNesting"/>).
     /// </summary>
     private static Expression ParseGroupedExpression(ParserContext context)
     {
@@ -1888,32 +1902,22 @@ internal abstract class Expression : ExpressionNode
             Operator { Character: '(' } => Selection.LeadsParenthesizedQuery(context, closeCounts: false),
             _ => false,
         };
-        var cost = isSubquery ? SubqueryNestingCost : ParenNestingCost;
-        context.NestingDepth += cost;
-        if (context.NestingDepth > MaxNestingDepth)
-            throw SimulatedSqlException.StatementNestedTooDeeply();
-        try
+        using var nesting = EnterNesting(context, isSubquery ? SubqueryNestingCost : ParenNestingCost);
+        if (isSubquery)
         {
-            if (isSubquery)
-            {
-                var inner = ParseSubqueryRejectingNextValueFor(context);
-                context.SubqueriesParsed++;
-                return inner.Schema.Length != 1
-                    ? throw SimulatedSqlException.SubqueryNotIntroducedWithExists()
-                    : context.Token is not Operator { Character: ')' }
-                        ? throw SimulatedSqlException.SyntaxErrorNear(context)
-                        : (Expression)new ScalarSubqueryExpression(inner);
-            }
+            var inner = ParseSubqueryRejectingNextValueFor(context);
+            context.SubqueriesParsed++;
+            return inner.Schema.Length != 1
+                ? throw SimulatedSqlException.SubqueryNotIntroducedWithExists()
+                : context.Token is not Operator { Character: ')' }
+                    ? throw SimulatedSqlException.SyntaxErrorNear(context)
+                    : (Expression)new ScalarSubqueryExpression(inner);
+        }
 
-            var grouped = Expression.Parse(context);
-            return context.Token is not Operator { Character: ')' }
-                ? throw SimulatedSqlException.SyntaxErrorNear(context)
-                : new Parenthesized(grouped);
-        }
-        finally
-        {
-            context.NestingDepth -= cost;
-        }
+        var grouped = Expression.Parse(context);
+        return context.Token is not Operator { Character: ')' }
+            ? throw SimulatedSqlException.SyntaxErrorNear(context)
+            : new Parenthesized(grouped);
     }
 
     /// <summary>

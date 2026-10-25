@@ -606,6 +606,7 @@ internal sealed partial class Selection
         using var rejection = ParserScope.Save(ref context.NextValueForRejection);
         if (!context.AllowNextValueForInFromClause)
             context.RaiseNextValueForFloor(NextValueForScope.Nested);
+        using var nesting = Expression.EnterNesting(context, Expression.DerivedTableNestingCost);
         return Selection.Parse(context, scope);
     }
 

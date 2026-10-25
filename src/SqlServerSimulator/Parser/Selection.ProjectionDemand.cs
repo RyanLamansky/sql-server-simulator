@@ -473,9 +473,30 @@ partial class Selection
     {
         if (plan.freeNames is { } names)
             return names;
-        if (plan.SetOperands is var (left, right, _) && ReachOf(left) is { } leftNames && ReachOf(right) is { } rightNames)
-            return [.. leftNames, .. rightNames];
-        return null;
+        if (plan.SetOperands is null)
+            return null;
+        // A set operation reaches what its branches do, read in order off a
+        // stack of its own: a chain of thousands of UNION ALLs is a tree as
+        // deep as it is long.
+        List<MultiPartName> reach = [];
+        Stack<Selection> pending = new([plan]);
+        while (pending.TryPop(out var node))
+        {
+            if (node.freeNames is { } nodeNames)
+            {
+                reach.AddRange(nodeNames);
+            }
+            else if (node.SetOperands is var (left, right, _))
+            {
+                pending.Push(right);
+                pending.Push(left);
+            }
+            else
+            {
+                return null;
+            }
+        }
+        return [.. reach];
     }
 
     /// <summary>

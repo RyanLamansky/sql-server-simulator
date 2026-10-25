@@ -191,7 +191,7 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 No entry is open.
 
 The opposite direction — the simulator refusing what real accepts — includes CLR registration: a `SAFE` assembly referencing the APIs the simulator's own verification denies (Msg 6218 / 6211), which real registers, an assembly real would trust for its signature, and a reference to another assembly registered in the database (Msg 6503 here) → [`clr-assemblies.md`](clr-assemblies.md#not-modeled-yet).
-It also includes the deterministic nesting caps, which sit below real's stack-dependent thresholds (paren 500 and subquery 83 against real's 1015 / 168, deep function nesting surfacing Msg 8631 rather than Msg 191 on tight threads) to keep Msg 191 firing with headroom before the stack probe; closing that wants a slimmer function-argument recursion frame → [`grammar.md`](grammar.md#expression-depth-limits-msg-8631--msg-191--msg-125).
+It also includes the nesting depths real accepts that the simulator's frames don't fit on a default-sized thread — 100 nested derived tables need about 2 MB of stack, so a 1 MB thread meets Msg 8631 near 45 — where closing it wants slimmer parse and dispatch frames → [`grammar.md`](grammar.md#msg-8631-backstop).
 
 ## Live-but-untested surfaces
 

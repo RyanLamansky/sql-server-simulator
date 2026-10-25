@@ -1072,7 +1072,7 @@ internal sealed partial class Selection
             RecordSetOperationShape(context);
             left = CombineSetOps(left, right, kind, scope.NamesOutputCollation);
         }
-        return left;
+        return KeyConstantBranches(left);
     }
 
     /// <summary>
@@ -2154,6 +2154,7 @@ internal sealed partial class Selection
         // re-parsing. A FROM-less SELECT skips all of this.
         List<FromSource>? preParsedSources = null;
         List<JoinSpec>? preParsedJoins = null;
+        SimulatedSqlException? settledFromFailure = null;
         var browseFrom = context.BrowseFlattenBody || (scope.Position == QueryPosition.Statement && context.BrowseStatement);
         ParserContext.Checkpoint afterSources = default;
         context.Batch.BindErrors?.EnterClause(context.Token, BindClause.SelectList);
@@ -2183,9 +2184,13 @@ internal sealed partial class Selection
                 // have reported first (a CTE's Msg 319 outranking a Msg 208) —
                 // discard it and leave the original path to parse the FROM in
                 // place, so error identity and ordering stay exactly as they
-                // were. Nothing is kept from the failed attempt.
+                // were. Nothing is kept from the failed attempt but an error
+                // a nested query's FROM raised reading in order, which reading
+                // this FROM again would only raise again — at every level of
+                // nested derived tables, doubling the work per level.
                 preParsedSources = null;
                 preParsedJoins = null;
+                settledFromFailure = ex is SimulatedSqlException { RaisedByFromInOrder: true } settled ? settled : null;
             }
 
             context.RestoreCheckpoint(selectListStart);
@@ -2588,8 +2593,18 @@ internal sealed partial class Selection
                     {
                         sources = [];
                         joins = [];
-                        using (ParserScope.Enter(ref context.BrowseFlattenFrom, browseFrom))
-                            ParseFromSourceAndJoins(context, scope, sources, joins, fromClause, allowOrderBy);
+                        if (settledFromFailure is not null)
+                            throw settledFromFailure;
+                        try
+                        {
+                            using (ParserScope.Enter(ref context.BrowseFlattenFrom, browseFrom))
+                                ParseFromSourceAndJoins(context, scope, sources, joins, fromClause, allowOrderBy);
+                        }
+                        catch (SimulatedSqlException inOrder)
+                        {
+                            inOrder.RaisedByFromInOrder = true;
+                            throw;
+                        }
                     }
 
                     if (topExpression is not null && fromClause.OffsetExpression is not null)

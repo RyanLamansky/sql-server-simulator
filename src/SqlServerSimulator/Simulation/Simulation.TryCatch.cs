@@ -94,6 +94,7 @@ partial class Simulation
 
         var outerInFlight = batch.InFlightError;
         var outerErrorSignaled = batch.ErrorSignaled;
+        EnterStatementNesting(batch, IfNestingCost);
         batch.InFlightError = null;
         batch.ErrorSignaled = false;
 
@@ -119,6 +120,7 @@ partial class Simulation
             batch.TryFrameDepth--;
             batch.Connection.OpenTryFrames--;
             batch.ShowplanRefusalLine = outerShowplanRefusal;
+            batch.StatementNesting -= IfNestingCost;
         }
 
         // A GOTO out of the TRY body leaves the cursor mid-block with a jump
@@ -164,6 +166,7 @@ partial class Simulation
                 yield return StatementDone(batch, StatementDoneKind.BeginCatch);
             if (StructuralExecutionTimes(batch, catchBegin.LineNumber) is { } catchTimes)
                 yield return catchTimes;
+            EnterStatementNesting(batch, IfNestingCost);
             batch.CatchDepth++;
             var enclosingCatchError = batch.Connection.EnclosingCatchError;
             batch.Connection.EnclosingCatchError = batch.InFlightError;
@@ -176,6 +179,7 @@ partial class Simulation
             {
                 batch.CatchDepth--;
                 batch.Connection.EnclosingCatchError = enclosingCatchError;
+                batch.StatementNesting -= IfNestingCost;
             }
         }
         else
@@ -189,6 +193,7 @@ partial class Simulation
             // batch has exactly that shape once its TRY body succeeds.
             if (unran)
                 yield return StatementDone(batch, StatementDoneKind.BeginCatch);
+            EnterStatementNesting(batch, IfNestingCost);
             var wasSkipModeFlag = batch.SkipModeFlag;
             batch.SkipModeFlag = true;
             batch.CatchDepth++;
@@ -201,6 +206,7 @@ partial class Simulation
             {
                 batch.CatchDepth--;
                 batch.SkipModeFlag = wasSkipModeFlag;
+                batch.StatementNesting -= IfNestingCost;
             }
         }
 

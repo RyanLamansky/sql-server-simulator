@@ -307,6 +307,15 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool RaisedInRowProjection;
 
     /// <summary>
+    /// Set as the error leaves a query's <c>FROM</c> clause read in the
+    /// statement's own order, which a query enclosing it would only repeat:
+    /// its speculative read of its own <c>FROM</c> failing on this error, it
+    /// raises it where its <c>FROM</c> falls rather than reading the clause
+    /// again (<c>Selection.ParseQueryBlock</c>).
+    /// </summary>
+    internal bool RaisedByFromInOrder;
+
+    /// <summary>
     /// With <see cref="RaisedInRowProjection"/>, how many identity draws the
     /// failure stands for beyond the failing row's own: the groups an aggregate
     /// or the rows a window passed on ahead of the failing one, which real's

@@ -120,14 +120,11 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
 
     /// <summary>
     /// Live weighted nesting budget shared by grouped-expression parens,
-    /// scalar subqueries, and function-call argument lists — the constructs
-    /// SQL Server pools into one "nested too deeply" limit (probe-confirmed
-    /// 2026-07-18: nesting them together fails on a single shared budget, a
-    /// subquery level costing roughly six paren levels). Each construct's
-    /// parser adds its cost on entry and subtracts it in a <c>finally</c>;
-    /// crossing <c>Expression.MaxNestingDepth</c> raises Msg 191. The
-    /// companion stack-probe guard at <see cref="Expression.Parse"/> entry
-    /// raises Msg 8631 when actual remaining stack runs low first.
+    /// scalar subqueries, function-call argument lists, unary signs and
+    /// derived tables — the constructs SQL Server pools into one "nested too
+    /// deeply" limit. Each construct's parser charges its cost through
+    /// <see cref="Expression.EnterNesting"/>, which raises Msg 191 past the
+    /// budget and Msg 8631 where the thread's stack runs low first.
     /// </summary>
     public int NestingDepth;
 
