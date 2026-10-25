@@ -179,7 +179,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         context.MoveNextRequired();
-        var tableArgument = ParseShowStatisticsArgument(context, parameterNumber: 1);
+        var tableArgument = ParseShowStatisticsArgument(context);
 
         // One argument is Msg 2583, Msg 2528 following it (probed 2026-10-04
         // against SQL Server 2025).
@@ -194,7 +194,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         context.MoveNextRequired();
-        var statisticArgument = ParseShowStatisticsArgument(context, parameterNumber: 2);
+        var statisticArgument = ParseShowStatisticsArgument(context);
 
         if (context.GetNextRequired() is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -369,12 +369,14 @@ partial class Simulation
     /// <summary>
     /// Reads one <c>DBCC SHOW_STATISTICS</c> argument: a string literal, a
     /// bare dotted / bracketed identifier, or a variable, resolved to a name
-    /// when the statement runs. A NULL or numeric argument is Msg 2560.
+    /// when the statement runs. A NULL or numeric argument stands for itself,
+    /// to be Msg 2560 as the statement runs, so the batch runs up to it and
+    /// past it (probed 2026-10-25 against SQL Server 2025).
     /// </summary>
-    private static object ParseShowStatisticsArgument(ParserContext context, int parameterNumber) => context.Token switch
+    private static object ParseShowStatisticsArgument(ParserContext context) => context.Token switch
     {
-        Literal literal => literal.Value.IsNull ? throw SimulatedSqlException.DbccParameterIsIncorrect(parameterNumber) : literal.Value,
-        Numeric => throw SimulatedSqlException.DbccParameterIsIncorrect(parameterNumber),
+        Literal literal => literal.Value,
+        Numeric or ReservedKeyword { Keyword: Keyword.Null } => context.Token,
         AtPrefixedString variable => variable.Span.ToString(),
         _ => BatchContext.ParseObjectName(context),
     };

@@ -336,6 +336,24 @@ public sealed class DbccShowStatisticsTests
     public void Arguments_Refusals(string statement, int number, string message)
         => new Simulation().AssertSqlError(Indexed + statement, number, message);
 
+    /// <summary>
+    /// A NULL or numeric argument is Msg 2560 as the statement runs, so the
+    /// batch runs on past it and an <c>IF</c> that doesn't take it raises
+    /// nothing (probed 2026-10-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("dbcc show_statistics('t', 2)", "Parameter 2 is incorrect for this DBCC statement.")]
+    [DataRow("dbcc show_statistics(1, 'x')", "Parameter 1 is incorrect for this DBCC statement.")]
+    [DataRow("dbcc show_statistics(NULL, NULL)", "Parameter 1 is incorrect for this DBCC statement.")]
+    public void NullOrNumericArgument_RaisesAsItRuns(string statement, string message)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(Indexed + "create table ran (step int)");
+        var ex = sim.AssertSqlError($"insert ran values (1); {statement}; insert ran values (2); if 1 = 0 {statement}", 2560);
+        AreEqual(message, ex.Errors[0].Message);
+        AreEqual(2, sim.ExecuteScalar("select count(*) from ran"));
+    }
+
     [TestMethod]
     public void StatsHistogramDmv_ReadsTheSameSteps()
         => AreEqual("10:1,20:2", new Simulation().ExecuteScalar(Indexed + """
