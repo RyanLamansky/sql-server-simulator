@@ -2889,7 +2889,7 @@ internal abstract class BooleanExpression : ExpressionNode
             PermissionEnforcement.CheckSubqueryReads(runtime.Batch, inner);
             var memo = UncorrelatedSubqueryCache.Open(runtime, this, replaysByKey: true);
             if (memo.Result is { } cached)
-                return this.Combine((SqlValue[])cached, lhs, operatorName, compare);
+                return this.Combine((SubqueryValues)cached, lhs, operatorName, compare);
 
             var resultSet = inner.Execute(runtime.Batch, memo.ResolverFor(runtime));
             var columns = RowDecoder.ColumnsFor(resultSet.Schema);
@@ -2897,7 +2897,7 @@ internal abstract class BooleanExpression : ExpressionNode
             foreach (var rowBytes in resultSet.RowBytes)
                 values.Add(RowDecoder.DecodeColumn(columns, rowBytes, 0));
 
-            var materialized = values.ToArray();
+            var materialized = new SubqueryValues([.. values]);
             memo.Remember(runtime, this, materialized);
             return this.Combine(materialized, lhs, operatorName, compare);
         }
@@ -2905,10 +2905,17 @@ internal abstract class BooleanExpression : ExpressionNode
         /// <summary>
         /// Folds the per-row comparisons into the quantifier's answer. NULL
         /// inner values reach <see cref="CompareValuesPromoted"/> like any
-        /// other, since it is their UNKNOWN result that taints the fold.
+        /// other, since it is their UNKNOWN result that taints the fold. An
+        /// ordering operator over values of the left operand's own type reads
+        /// the answer off their bounds instead (<see cref="CombineBounds"/>),
+        /// which the comparisons can't contradict.
         /// </summary>
-        private bool? Combine(SqlValue[] values, SqlValue lhs, string operatorName, Func<SqlValue, SqlValue, bool> compare)
+        private bool? Combine(SubqueryValues subquery, SqlValue lhs, string operatorName, Func<SqlValue, SqlValue, bool> compare)
         {
+            var values = subquery.Values;
+            if (values.Length != 0 && op is not (ComparisonOp.Equal or ComparisonOp.NotEqual) && subquery.Type is { } type && lhs.Type == type)
+                return this.CombineBounds(subquery, lhs);
+
             var sawUnknown = false;
             var sawDefinitiveTrue = false;
             var sawDefinitiveFalse = false;
@@ -2929,6 +2936,78 @@ internal abstract class BooleanExpression : ExpressionNode
                 : kind == QuantifiedKind.All
                     ? (sawDefinitiveFalse ? false : sawUnknown ? null : true)
                     : (sawDefinitiveTrue ? true : sawUnknown ? null : false);
+        }
+
+        /// <summary>
+        /// <see cref="Combine"/>'s answer for an ordering operator over a
+        /// non-empty set of values of <paramref name="lhs"/>'s own type, which
+        /// compares each pair as it is: the operator holds for every non-NULL
+        /// value when it holds for the extreme one and for some when it holds
+        /// for the other extreme, and a NULL value — or a NULL left operand —
+        /// leaves UNKNOWN what the non-NULL values don't settle. A group's rows
+        /// each reading the values the keyed memo replays then cost one
+        /// comparison or two rather than the group's size.
+        /// </summary>
+        private bool? CombineBounds(SubqueryValues subquery, SqlValue lhs)
+        {
+            if (lhs.IsNull || subquery.Least is not { } least || subquery.Greatest is not { } greatest)
+                return null;
+            var (forEvery, forSome) = op switch
+            {
+                ComparisonOp.Less => (lhs.CompareTo(least) < 0, lhs.CompareTo(greatest) < 0),
+                ComparisonOp.LessOrEqual => (lhs.CompareTo(least) <= 0, lhs.CompareTo(greatest) <= 0),
+                ComparisonOp.Greater => (lhs.CompareTo(greatest) > 0, lhs.CompareTo(least) > 0),
+                _ => (lhs.CompareTo(greatest) >= 0, lhs.CompareTo(least) >= 0),
+            };
+            return kind == QuantifiedKind.All
+                ? (!forEvery ? false : subquery.HasNull ? null : true)
+                : (forSome ? true : subquery.HasNull ? null : false);
+        }
+
+        /// <summary>
+        /// The values a quantified comparison's subquery returned, with the
+        /// bounds an ordering operator reads of them, settled once for each
+        /// result: the keyed memo hands the same result back to every row
+        /// reading the same values.
+        /// </summary>
+        private sealed class SubqueryValues
+        {
+            public readonly SqlValue[] Values;
+
+            /// <summary>
+            /// The type every value has, for which <see cref="Least"/> and
+            /// <see cref="Greatest"/> are set; null when the values differ, are
+            /// <c>sql_variant</c> or large objects, or there are none.
+            /// </summary>
+            public readonly SqlType? Type;
+
+            /// <summary>The least and greatest non-NULL value under <see cref="Type"/>'s order; null when every value is NULL.</summary>
+            public readonly SqlValue? Least, Greatest;
+
+            public readonly bool HasNull;
+
+            public SubqueryValues(SqlValue[] values)
+            {
+                this.Values = values;
+                if (values.Length == 0 || values[0].Type is SqlVariantSqlType || values[0].Type.IsLob)
+                    return;
+                var type = values[0].Type;
+                foreach (var value in values)
+                {
+                    if (value.Type != type)
+                        return;
+                    if (value.IsNull)
+                    {
+                        this.HasNull = true;
+                        continue;
+                    }
+                    if (this.Least is not { } least || value.CompareTo(least) < 0)
+                        this.Least = value;
+                    if (this.Greatest is not { } greatest || value.CompareTo(greatest) > 0)
+                        this.Greatest = value;
+                }
+                this.Type = type;
+            }
         }
 
         internal override string DebugDisplay()

@@ -44,6 +44,8 @@ A site whose first execution read the outer row keys its results by the values o
 A deterministic plan handed the same values takes the same path through its rows, so the replay is exact; a run that consults a name outside the key starts the memo over under the wider key, and one that draws a per-call value sends the site per row as above.
 Measured 2026-10-25 (Release, the faster of two runs): over 4,000 rows, `WHERE a.x > (SELECT AVG(b.x) FROM t b WHERE b.g = a.g)` across 10 groups took 1.7 s and takes 23 ms, and `WHERE a.id = (SELECT MAX(b.id) FROM t b WHERE b.s = a.s)` across 13 groups 2.6 s and 46 ms.
 A correlation reading a unique column gains nothing: every row is a new key, filed until the site's capacity.
+A quantified comparison's ordering operators answer a replayed result from its bounds — its least and greatest value and whether one is NULL, settled once for each result — rather than comparing the row with each value: `WHERE a.x >= ALL (SELECT b.x FROM t b WHERE b.g = a.g)` over 64,000 rows in 10 groups took 5.2 s and takes 0.6 s, and 1.3 s on real (2026-10-25, Release).
+Its equality operators compare the row with each value (see the backlog).
 
 ## An equi-correlated body switches to a hash semi / anti-join
 

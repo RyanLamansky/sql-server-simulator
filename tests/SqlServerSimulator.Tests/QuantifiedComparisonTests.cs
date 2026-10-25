@@ -302,6 +302,58 @@ public sealed class QuantifiedComparisonTests
         CollectionAssert.AreEqual(new int[] { 5, 10 }, values);
     }
 
+    /// <summary>
+    /// An ordering operator over values of the left operand's own type answers
+    /// from their least and greatest value, a NULL among them — or a NULL left
+    /// operand — leaving UNKNOWN what those don't settle: 1 is true, 0 false,
+    /// -1 UNKNOWN (probed 2026-10-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("30 > all (select x from q2)", -1)]
+    [DataRow("20 > all (select x from q2)", 0)]
+    [DataRow("20 > any (select x from q2)", 1)]
+    [DataRow("10 > any (select x from q2)", -1)]
+    [DataRow("10 < all (select x from q2)", -1)]
+    [DataRow("10 < all (select x from q2 where x is not null)", 1)]
+    [DataRow("25 >= all (select x from q2 where x is not null)", 1)]
+    [DataRow("25 > all (select x from q2 where x is not null)", 0)]
+    [DataRow("15 <= any (select x from q2)", 1)]
+    [DataRow("30 < any (select x from q2)", -1)]
+    [DataRow("cast(null as int) > any (select x from q2 where x is not null)", -1)]
+    [DataRow("5 > all (select x from q2 where x is null)", -1)]
+    public void OrderingOperator_AnswersThreeValued(string predicate, int expected)
+    {
+        using var conn = SeededTwoTables();
+        AreEqual(expected, conn.CreateCommand($"select case when {predicate} then 1 when not ({predicate}) then 0 else -1 end").ExecuteScalar());
+    }
+
+    /// <summary>A string's bounds follow its collation, under which a case-insensitive tie is equal.</summary>
+    [TestMethod]
+    [DataRow("s >= all (select s from qb)", "1,2,3")]
+    [DataRow("s > all (select s from qb)", "3")]
+    [DataRow("s < any (select s from qb)", "4")]
+    [DataRow("s <= all (select s from qb)", "4")]
+    public void OrderingOperator_OverStrings_OrdersByCollation(string predicate, string expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($"""
+            create table qa (id int primary key, s varchar(10)); insert qa values (1, 'B'), (2, 'b'), (3, 'C'), (4, 'a');
+            create table qb (s varchar(10)); insert qb values ('a'), ('B');
+            select string_agg(cast(id as varchar(10)), ',') within group (order by id) from qa where {predicate}
+            """));
+
+    /// <summary>
+    /// A correlated comparison whose rows share their group's values costs a
+    /// comparison or two per row, where comparing each row with every value
+    /// cost the group's size.
+    /// </summary>
+    [TestMethod]
+    [Timeout(20000)]
+    public void OrderingOperator_OverLargeGroups_RunsInLinearTime() =>
+        AreEqual(1030, new Simulation().ExecuteScalar("""
+            create table t (id int primary key, g int, x int);
+            insert t select value, value % 10, value % 97 from generate_series(1, 100000);
+            select count(*) from t a where a.x >= all (select b.x from t b where b.g = a.g)
+            """));
+
     [TestMethod]
     public void TypeMismatch_StringLhs_IntInner_ConversionError()
     {
