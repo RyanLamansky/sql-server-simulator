@@ -336,6 +336,7 @@ internal sealed class CaseExpression : Expression
         // column, variable or subquery inside it sorts (probe-confirmed).
         // IIF reaches the same treatment through the built-in dispatcher.
         using var foldable = ParserScope.Enter(ref context.FoldableArguments, true);
+        using var caseLevel = EnterExpressionLevels(context, 1);
         try
         {
             var parsed = ParseCaseBody(context);

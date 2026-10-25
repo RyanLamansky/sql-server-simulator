@@ -7,9 +7,9 @@ namespace SqlServerSimulator;
 /// Expression depth limits. Two failure modes must never reach the host: a
 /// .NET stack overflow (uncatchable, process-fatal) from deep recursion, and
 /// a silently-wrong result. So flat left-associative chains parse and evaluate
-/// iteratively (no per-term recursion, no artificial cap — matching real SQL
-/// Server's tolerance of thousands of terms), while genuinely-nested shapes are
-/// bounded by SQL Server's own graceful structural errors:
+/// iteratively (no per-term recursion), as deep as real's compile takes them,
+/// while genuinely-nested shapes are bounded by SQL Server's own graceful
+/// structural errors:
 /// <list type="bullet">
 /// <item>Msg 191 (Class 15) — parens, function calls, scalar subqueries,
 /// unary signs and derived tables draw on one budget, each where real's own
@@ -18,9 +18,10 @@ namespace SqlServerSimulator;
 /// and 339 chained signed factors pass, one more fails.</item>
 /// <item>Msg 125 (Class 15) — CASE / IIF nested past ten levels; State 4 for
 /// CASE, State 2 for IIF (the construct entered at the eleventh level).</item>
-/// <item>Msg 8631 (Class 17) — the runtime stack probe, for a thread whose
-/// stack runs out before real's limit: the depths real accepts need more
-/// stack than a default thread has, so those run on a 64 MB one here.</item>
+/// <item>Msg 8631 (Class 17) — a flat chain past the depth real's compile
+/// takes, and the runtime stack probe, for a thread whose stack runs out before
+/// real's limit: the depths real accepts need more stack than a default thread
+/// has, so those run on a 64 MB one here.</item>
 /// </list>
 /// </summary>
 [TestClass]
@@ -33,23 +34,56 @@ public sealed class ExpressionNestingLimitTests
     private static string AdditionChain(int terms) =>
         $"select ({string.Join(" + ", Enumerable.Repeat("1", terms))})";
 
-    // --- Flat left-associative chains: no cap, iterative parse + evaluation. ---
+    // --- Flat left-associative chains: an iterative parse and evaluation, as
+    // deep as real's compile takes them. ---
 
     [TestMethod]
     public void AdditionChain_ModerateDepth_Evaluates()
         => AreEqual(200, new Simulation().ExecuteScalar(AdditionChain(200)));
 
+    /// <summary>
+    /// A chain runs as deep as real's compile takes it, past which real's
+    /// stack gives out with Msg 8631: 3,030 terms of <c>+</c> at the top,
+    /// parentheses counting nothing, one fewer in a function call or a
+    /// comparison, two fewer in a scalar subquery, and a shift chain two fewer
+    /// (probed 2026-10-25 against SQL Server 2025).
+    /// </summary>
     [TestMethod]
     [Timeout(60000)]
-    public void AdditionChain_ExtremeDepth_Evaluates()
-        => AreEqual(50000, new Simulation().ExecuteScalar(AdditionChain(50000)));
+    [DataRow("select {0}", " + ", "1", 3030)]
+    [DataRow("select ((((({0})))))", " + ", "1", 3030)]
+    [DataRow("select abs({0})", " + ", "1", 3029)]
+    [DataRow("select 1 where {0} > 0", " + ", "1", 3029)]
+    [DataRow("select (select {0})", " + ", "1", 3028)]
+    [DataRow("select len({0})", " || ", "'a'", 3029)]
+    [DataRow("select {0}", " << ", "1", 3028)]
+    public void FlatChain_RunsAsDeepAsRealsCompile(string shape, string op, string term, int terms)
+    {
+        string Chain(int count) => string.Format(CultureInfo.InvariantCulture, shape, string.Join(op, Enumerable.Repeat(term, count)));
+        IsNull(Extensions.ExecuteScalarOnStack(Chain(terms), DeepStack).Failure);
+        AreEqual(8631, Extensions.ExecuteScalarOnStack(Chain(terms + 1), DeepStack).Failure.ErrorNumber());
+    }
+
+    /// <summary>
+    /// A chain of postfix operations runs as deep as real's compile takes it
+    /// too (probed 2026-10-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [Timeout(60000)]
+    [DataRow("select cast(cast('2020-01-01' as datetimeoffset){0} as varchar(40))", " at time zone 'UTC'", 3026)]
+    [DataRow("select cast(cast('/1/2/3/' as hierarchyid){0} as varchar(40))", ".GetAncestor(0)", 3026)]
+    public void PostfixChain_RunsAsDeepAsRealsCompile(string shape, string postfix, int count)
+    {
+        string Chain(int length) => string.Format(CultureInfo.InvariantCulture, shape, string.Concat(Enumerable.Repeat(postfix, length)));
+        IsNull(Extensions.ExecuteScalarOnStack(Chain(count), DeepStack).Failure);
+        AreEqual(8631, Extensions.ExecuteScalarOnStack(Chain(count + 1), DeepStack).Failure.ErrorNumber());
+    }
 
     [TestMethod]
     [Timeout(60000)]
-    public void ConcatChain_ExtremeDepth_Evaluates()
-        // A bounded concatenation stops growing at varchar's 8000.
+    public void ConcatChain_AtRealsDepth_StopsGrowingAtVarcharsLimit()
         => AreEqual(new string('a', 8000), new Simulation().ExecuteScalar(
-            "select " + string.Join(" + ", Enumerable.Repeat("'a'", 20000))));
+            "select " + string.Join(" + ", Enumerable.Repeat("'aaa'", 3030))));
 
     [TestMethod]
     [Timeout(60000)]
@@ -94,19 +128,19 @@ public sealed class ExpressionNestingLimitTests
         AreEqual(1, result);
     }
 
-    // A flat chain nests a level per term down its left side, which no level
-    // charges to the nesting budget, so whatever reads the whole chain walks
-    // it without recursing — a `+` checked for constants inside a folded call,
-    // a `||` evaluated — or probes the stack as it recurses (`<<`): on a small
-    // thread a chain answers or raises Msg 8631, never ends the process.
+    // A flat chain nests a level per term down its left side, so whatever
+    // reads the whole chain walks it without recursing — a `+` checked for
+    // constants inside a folded call, a `||` evaluated — or probes the stack as
+    // it recurses (`<<`): on a small thread a chain as deep as real's allows
+    // answers or raises Msg 8631, never ends the process.
     [TestMethod]
     [Timeout(60000)]
-    [DataRow("select len({0})", " + ", "'a'")]
-    [DataRow("select {0}", " || ", "'a'")]
-    [DataRow("select {0}", " << ", "1")]
-    public void OperatorChain_ExtremeDepth_OnSmallStackThread_IsGracefulNeverProcessDeath(string shape, string op, string term)
+    [DataRow("select len({0})", " + ", "'a'", 3029)]
+    [DataRow("select len({0})", " || ", "'a'", 3029)]
+    [DataRow("select {0}", " << ", "1", 3028)]
+    public void OperatorChain_AtRealsDepth_OnSmallStackThread_IsGracefulNeverProcessDeath(string shape, string op, string term, int terms)
     {
-        var sql = string.Format(CultureInfo.InvariantCulture, shape, string.Join(op, Enumerable.Repeat(term, 20000)));
+        var sql = string.Format(CultureInfo.InvariantCulture, shape, string.Join(op, Enumerable.Repeat(term, terms)));
         var failure = Extensions.ExecuteScalarOnStack(sql, SmallStack).Failure;
         IsTrue(failure is null || failure.Number == 8631, $"raised {failure?.Number}");
     }

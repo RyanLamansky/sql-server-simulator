@@ -210,6 +210,7 @@ internal abstract class Expression : ExpressionNode
             left = isConcat ? new Concatenate(left, right)
                 : shiftLeft is bool isLeftShift ? new BitShift(isLeftShift, left, right)
                 : TwoSidedExpression.FromCompoundOp(op, left, right, context);
+            RejectChainDepth(left, context.ExpressionDepth);
             tightness = BinaryTightness(context);
         }
         return left;
@@ -266,6 +267,7 @@ internal abstract class Expression : ExpressionNode
     private static Expression ParseSignedOperand(ParserContext context)
     {
         using var sign = EnterNesting(context, SignNestingCost);
+        using var signLevel = EnterExpressionLevels(context, 1);
         var operand = ParsePrimary(context.MoveNextRequiredReturnSelf());
         // The factors a sign's chain reads past its first nest deeper still,
         // which a stack of signs doesn't: real refuses a chain of 340 signed
@@ -403,8 +405,12 @@ internal abstract class Expression : ExpressionNode
     /// </summary>
     private static Expression ParsePostfix(Expression expression, ParserContext context)
     {
-        while (true)
+        // Each pass past the first follows a postfix the loop applied, of which
+        // real's compile chains PostfixChainLimit, less the levels around.
+        for (var applied = 0; ; applied++)
         {
+            if (context.ExpressionDepth + applied > PostfixChainLimit)
+                throw SimulatedSqlException.ServerStackLimitReached();
             switch (context.GetNextOptional())
             {
                 case Operator { Character: '.' }:
@@ -809,6 +815,7 @@ internal abstract class Expression : ExpressionNode
             sink.RemoveAt(sink.Count - 1);
 
         using var nesting = EnterNesting(context, FunctionCallNestingCost);
+        using var callLevel = EnterExpressionLevels(context, 1);
         if (context.Token is ReservedKeyword { Keyword: Keyword.Distinct or Keyword.All }
             && QuantifiedCall.Parse(reference, context) is { } quantified)
         {
@@ -1160,6 +1167,52 @@ internal abstract class Expression : ExpressionNode
     /// meaningless for non-decimal results and defaults to <see langword="false"/>.
     /// </summary>
     internal virtual bool ResultReportsNumeric => false;
+
+    /// <summary>
+    /// The levels real's compile counts down this node's chain of operators —
+    /// a flat <c>a + b + c …</c> one per term — and 1 for any other node
+    /// (<see cref="RejectChainDepth"/>).
+    /// </summary>
+    internal virtual int ChainDepth => 1;
+
+    /// <summary>
+    /// How deep real's compile takes a chain of operators before its stack
+    /// gives out with Msg 8631: 3,030 terms of <c>+</c> run and 3,031 fail, one
+    /// fewer for each function call, sign, <c>CASE</c>, comparison or derived
+    /// table around the chain and two fewer in a scalar subquery, parentheses
+    /// counting nothing; a shift chain stops two terms sooner (probed
+    /// 2026-10-25 against SQL Server 2025).
+    /// </summary>
+    internal const int ChainDepthLimit = 3030;
+
+    /// <summary>
+    /// How many postfix operations — a call's argument list, <c>AT TIME
+    /// ZONE</c>, a method call — real chains onto one operand before Msg 8631,
+    /// one fewer in each level around the chain (probed 2026-10-25 against SQL
+    /// Server 2025: a <c>CAST</c> followed by 3,027 <c>AT TIME ZONE</c> runs
+    /// and by 3,028 fails).
+    /// </summary>
+    private const int PostfixChainLimit = 3028;
+
+    /// <summary>
+    /// Raises Msg 8631 where <paramref name="expression"/>'s chain is deeper,
+    /// under the <paramref name="enclosing"/> levels around it, than real's
+    /// compile goes (<see cref="ChainDepthLimit"/>), as a statement nesting a
+    /// flat chain of thousands of terms gets on real.
+    /// </summary>
+    internal static void RejectChainDepth(Expression expression, int enclosing)
+    {
+        if (enclosing + expression.ChainDepth > ChainDepthLimit)
+            throw SimulatedSqlException.ServerStackLimitReached();
+    }
+
+    /// <summary>
+    /// Counts <paramref name="levels"/> more levels around what parses next
+    /// (<see cref="ParserContext.ExpressionDepth"/>), until the returned guard
+    /// is disposed.
+    /// </summary>
+    internal static ParserScope<int> EnterExpressionLevels(ParserContext context, int levels) =>
+        ParserScope.Enter(ref context.ExpressionDepth, context.ExpressionDepth + levels);
 
     /// <summary>
     /// The user alias type the result carries, which real reports as the
@@ -1917,6 +1970,7 @@ internal abstract class Expression : ExpressionNode
             _ => false,
         };
         using var nesting = EnterNesting(context, isSubquery ? SubqueryNestingCost : ParenNestingCost);
+        using var subqueryLevels = EnterExpressionLevels(context, isSubquery ? 2 : 0);
         if (isSubquery)
         {
             var inner = ParseSubqueryRejectingNextValueFor(context);

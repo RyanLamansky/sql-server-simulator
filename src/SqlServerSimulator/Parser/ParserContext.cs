@@ -179,6 +179,14 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public Collation? ColumnCollation;
 
     /// <summary>
+    /// The levels real's compile counts for the expressions around the one
+    /// parsing — a function call, sign, <c>CASE</c> or derived table one, a
+    /// scalar subquery two, a parenthesis none — which a chain's own depth
+    /// adds to (<see cref="Expression.RejectChainDepth"/>).
+    /// </summary>
+    public int ExpressionDepth;
+
+    /// <summary>
     /// The statement whose option names a key's or inline index's
     /// <c>WITH (…)</c> list is checked against while column and constraint
     /// definitions parse — <c>CREATE TABLE</c> (a table variable's and a

@@ -607,6 +607,7 @@ internal sealed partial class Selection
         if (!context.AllowNextValueForInFromClause)
             context.RaiseNextValueForFloor(NextValueForScope.Nested);
         using var nesting = Expression.EnterNesting(context, Expression.DerivedTableNestingCost);
+        using var derivedLevel = Expression.EnterExpressionLevels(context, 1);
         return Selection.Parse(context, scope);
     }
 

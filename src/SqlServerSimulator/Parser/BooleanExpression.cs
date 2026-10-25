@@ -755,8 +755,11 @@ internal abstract class BooleanExpression : ExpressionNode
             return new QuantifiedComparisonExpression(left, op, kind, inner);
         }
 
-        // Regular comparison: RHS is a value expression.
+        // Regular comparison: RHS is a value expression. Real counts the
+        // comparison as a level above either operand's chain.
         var right = Expression.Parse(context);
+        Expression.RejectChainDepth(left, context.ExpressionDepth + 1);
+        Expression.RejectChainDepth(right, context.ExpressionDepth + 1);
         if (left.IsWrittenConstant && right.IsWrittenConstant)
             context.SimpleParameterizationBlocked = true;
         if (op is ComparisonOp.Equal or ComparisonOp.NotEqual && ComparesNullTolerantly(context, left, right))

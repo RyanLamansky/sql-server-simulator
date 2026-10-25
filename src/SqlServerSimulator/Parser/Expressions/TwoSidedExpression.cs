@@ -6,12 +6,16 @@ internal abstract class TwoSidedExpression : Expression
 {
     private readonly Expression left;
     private readonly Expression right;
+    private readonly int chainDepth;
 
     private protected TwoSidedExpression(Expression left, Expression right)
     {
         this.left = left;
         this.right = right;
+        this.chainDepth = Math.Max(left.ChainDepth, right.ChainDepth) + 1;
     }
+
+    internal sealed override int ChainDepth => this.chainDepth;
 
     // Arithmetic result reports the numeric type name when ANY contributing
     // operand is numeric-named (integer / decimal-named-column operands

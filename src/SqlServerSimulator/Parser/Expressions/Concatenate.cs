@@ -25,6 +25,9 @@ internal sealed class Concatenate(Expression left, Expression right) : Expressio
 {
     private readonly Expression left = left;
     private readonly Expression right = right;
+    private readonly int chainDepth = Math.Max(left.ChainDepth, right.ChainDepth) + 1;
+
+    internal override int ChainDepth => this.chainDepth;
 
     public override SqlValue Run(RuntimeContext runtime)
     {

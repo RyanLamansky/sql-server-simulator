@@ -192,7 +192,7 @@ The simulator accepting what real rejects is the more dangerous divergence direc
 This is the standing list: each entry names the error real raises that the simulator doesn't, and the linked deep-dive carries the detail.
 Entries are verified against the simulator, so one that no longer reproduces is removed rather than re-worded.
 
-- A flat chain of operators or postfix applications longer than about 3,030 terms runs here, where real raises Msg 8631 → [`grammar.md`](grammar.md#msg-8631-backstop).
+- An `AND` chain longer than 8,871 terms in a top-level `WHERE` runs here, where real raises Msg 8631 → [`grammar.md`](grammar.md#msg-8631-backstop).
 
 The opposite direction — the simulator refusing what real accepts — includes CLR registration: a `SAFE` assembly referencing the APIs the simulator's own verification denies (Msg 6218 / 6211), which real registers, an assembly real would trust for its signature, and a reference to another assembly registered in the database (Msg 6503 here) → [`clr-assemblies.md`](clr-assemblies.md#not-modeled-yet).
 It also includes the nesting depths real accepts that an in-process caller's default-sized thread can't hold — nested calls, parens and statement blocks on a 1 MB thread, where the engine's own threads hold them all — where closing it wants slimmer frames still, the statement dispatch's iterators most → [`grammar.md`](grammar.md#msg-8631-backstop).
