@@ -418,17 +418,19 @@ partial class Simulation
     /// the view: SELECT on the base columns the <c>WHERE</c> and <c>SET</c>
     /// expressions read, then the write — <c>UPDATE</c> on the columns
     /// assigned, or <c>DELETE</c>, which isn't column-grantable, on the table
-    /// (probed 2026-09-27 against SQL Server 2025). Under the action's
-    /// <c>INSTEAD OF</c> trigger nothing is written through the view, but its
-    /// pseudo-tables still read every base column, which takes SELECT on the
-    /// whole base table and nothing more.
+    /// (probed 2026-09-27 against SQL Server 2025). An <c>OUTPUT</c> clause's
+    /// reads of the view's columns count with the <c>WHERE</c>'s. Under the
+    /// action's <c>INSTEAD OF</c> trigger nothing is written through the view,
+    /// but its pseudo-tables still read every base column, which takes SELECT
+    /// on the whole base table and nothing more.
     /// </summary>
     private static void CheckBrokenChainMutation(
         BatchContext batch,
         View? sourceView,
         TriggerActions action,
         BooleanExpression? where,
-        List<(string? ColumnName, Expression Expr)>? rawAssignments)
+        List<(string? ColumnName, Expression Expr)>? rawAssignments,
+        OutputProjection? output = null)
     {
         if (sourceView is not { BaseTable: { } baseTable })
             return;
@@ -441,10 +443,11 @@ partial class Simulation
         // a table target's early return allocates no closure.
         if (action == TriggerActions.Delete)
         {
-            if (where is not null)
+            if (where is not null || output is not null)
             {
                 var baseRead = new ColumnReadTarget(sourceView);
-                where.VisitOperandExpressions(op => op.VisitColumnReferences(baseRead.Add));
+                where?.VisitOperandExpressions(op => op.VisitColumnReferences(baseRead.Add));
+                output?.NoteTargetReads(baseRead);
                 PermissionEnforcement.CheckBrokenChainColumns(batch, Permission.Select, sourceView, baseRead);
             }
             PermissionEnforcement.CheckBrokenChainWrite(batch, "DELETE", sourceView, baseTable);
@@ -455,6 +458,7 @@ partial class Simulation
             where?.VisitOperandExpressions(op => op.VisitColumnReferences(read.Add));
             foreach (var (_, expr) in rawAssignments!)
                 expr.VisitColumnReferences(read.Add);
+            output?.NoteTargetReads(read);
             PermissionEnforcement.CheckBrokenChainColumns(batch, Permission.Select, sourceView, read);
             var assigned = new ColumnReadTarget(sourceView);
             foreach (var columnName in SetColumnNames(rawAssignments))

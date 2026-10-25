@@ -80,11 +80,12 @@ partial class Simulation
                 where = Selection.ParseAndBindPredicate(context, typeResolver);
         }
 
-        CheckUpdatePermissions(context, targetName, table, view, rawAssignments, where);
+        CheckUpdatePermissions(context, targetName, table, view, rawAssignments, where, output);
         var readViewColumns = new List<string>();
         where?.VisitOperandExpressions(operand => operand.VisitColumnReferences(name => readViewColumns.Add(name.Leaf)));
         foreach (var (_, expr) in rawAssignments)
             expr.VisitColumnReferences(name => readViewColumns.Add(name.Leaf));
+        output?.VisitTargetReads(name => readViewColumns.Add(name.Leaf));
         CheckJoinViewBrokenChains(batch, chain, table, readViewColumns, assignments);
 
         return RunJoinViewUpdate(context, chain, path, table, assignments, where, output, tuplesByRow, top, positionedCursor);

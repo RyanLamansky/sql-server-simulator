@@ -249,7 +249,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         if (!context.Batch.IsSkipping || !SkipUnresolvedMergeSource(context))
-            _ = ParseMergeSource(context);
+            _ = ParseMergeSource(context, out _, out _);
         if (!context.Batch.IsSkipping)
             return;
         context.Batch.CurrentStatement.BindsDeferredSource = true;

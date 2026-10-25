@@ -984,7 +984,7 @@ internal sealed partial class Selection
     /// isn't tracking reads); the synonym is resolved either way, since the
     /// joined UPDATE / DELETE paths read it off the source without a sink.
     /// </summary>
-    private static Schemas.Synonym? RecordSecurableRead(ParserContext context, Schemas.SchemaObject obj, MultiPartName name, Selection? moduleBody = null)
+    internal static Schemas.Synonym? RecordSecurableRead(ParserContext context, Schemas.SchemaObject obj, MultiPartName name, Selection? moduleBody = null)
     {
         var synonym = context.Batch.TryResolveSynonym(name, out var resolved) ? resolved : null;
         context.PartitionedWriteReads?.Add(obj);
@@ -1022,7 +1022,7 @@ internal sealed partial class Selection
     /// stays empty: that is the <c>COUNT(*)</c> shape, which requires SELECT on
     /// every column and so absorbs any narrower set.
     /// </summary>
-    private static void FoldSecurables(ParserContext context, Selection plan)
+    internal static void FoldSecurables(ParserContext context, Selection plan)
     {
         if (context.SecurableSink is not { } sink || plan.ReferencedSecurables is not { } securables)
             return;

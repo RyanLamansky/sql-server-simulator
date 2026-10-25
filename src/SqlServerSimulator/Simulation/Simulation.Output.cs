@@ -475,7 +475,8 @@ partial class Simulation
             targetTable,
             columnOrdinals,
             declaredTableVariable ? targetName.Leaf : null,
-            replayable: declaredTableVariable || (!targetTable.IsTableVariable && !BlocksDmlPlan(context.Batch, targetTable, clientOutput: false)));
+            replayable: declaredTableVariable || (!targetTable.IsTableVariable && !BlocksDmlPlan(context.Batch, targetTable, clientOutput: false)),
+            targetTable.IsTableVariable || BatchContext.IsLocalTempName(targetName.Leaf) || BatchContext.IsGlobalTempName(targetName.Leaf) ? null : targetName);
     }
 
     /// <summary>
@@ -523,7 +524,7 @@ partial class Simulation
     /// column index to target table column ordinal (positional fill if INTO
     /// had no explicit column list).
     /// </summary>
-    private sealed class OutputTarget(HeapTable target, int[] projectionToTargetOrdinal, string? tableVariable, bool replayable)
+    private sealed class OutputTarget(HeapTable target, int[] projectionToTargetOrdinal, string? tableVariable, bool replayable, MultiPartName? checkedName)
     {
         /// <summary>
         /// The table written, unless it is a table variable: that one belongs
@@ -557,6 +558,19 @@ partial class Simulation
         /// batch declares, or a table nothing in <see cref="BlocksDmlPlan"/> names.
         /// </summary>
         public readonly bool Replayable = replayable;
+
+        /// <summary>
+        /// Checks the <c>INSERT</c> permission writing the target takes, which
+        /// a table variable or a temporary table, holding no name to check
+        /// through, doesn't: real checks it after every other permission the
+        /// statement needs, the target's and its sources' alike (probed
+        /// 2026-10-25 against SQL Server 2025).
+        /// </summary>
+        public void CheckInsert(BatchContext batch)
+        {
+            if (checkedName is { } name && this.table is { } written && !PermissionEnforcement.Bypasses(batch.Connection, batch.DatabaseFor(written)))
+                PermissionEnforcement.CheckReference(batch, "INSERT", name, written);
+        }
 
         /// <summary>The table this target writes in <paramref name="batch"/>.</summary>
         private HeapTable TargetIn(BatchContext batch) =>
@@ -923,6 +937,39 @@ partial class Simulation
             foreach (var expression in expressions)
                 visit(expression);
             logged?.VisitExpressions(visit);
+        }
+
+        /// <summary>
+        /// Adds the columns this clause, or the <c>OUTPUT … INTO</c> clause it
+        /// follows, reads through <c>INSERTED</c> / <c>DELETED</c> to
+        /// <paramref name="read"/>, the target's columns the statement reads:
+        /// real checks SELECT on them as on its other reads of the target, so
+        /// a principal who may write a column but not read it can't read it
+        /// back this way either (probed 2026-10-25 against SQL Server 2025).
+        /// </summary>
+        public void NoteTargetReads(ColumnReadTarget read) => this.VisitTargetReads(read.Add);
+
+        /// <summary>Whether <see cref="NoteTargetReads"/> notes any column.</summary>
+        public bool ReadsTargetColumn()
+        {
+            var reads = false;
+            this.VisitTargetReads(_ => reads = true);
+            return reads;
+        }
+
+        /// <summary>Calls <paramref name="visit"/> on each name <see cref="NoteTargetReads"/> notes.</summary>
+        public void VisitTargetReads(Action<MultiPartName> visit) =>
+            this.VisitExpressions(expression => expression.VisitColumnReferences(name =>
+            {
+                if (BuiltInToken.EqualsAny(name.ImmediateQualifier, "INSERTED", "DELETED"))
+                    visit(name);
+            }));
+
+        /// <summary>Checks the <c>INSERT</c> permission on this clause's <c>INTO</c> target, or that of the clause it follows (<see cref="OutputTarget.CheckInsert"/>).</summary>
+        public void CheckIntoTarget(BatchContext batch)
+        {
+            logged?.CheckIntoTarget(batch);
+            outputTarget?.CheckInsert(batch);
         }
 
         // A non-persisted computed column is evaluated when OUTPUT reads it,

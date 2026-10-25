@@ -180,7 +180,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         bindErrors?.EnterClause(context.Token, BindClause.MergeSource);
 
-        var (materializeSource, sourceAlias, sourceColumnNames, sourceSchema, sourceMasks, replayableSource, sourceNullability, matchSources, matchJoins, sourceDemand) = ParseMergeSource(context);
+        var (materializeSource, sourceAlias, sourceColumnNames, sourceSchema, sourceMasks, replayableSource, sourceNullability, matchSources, matchJoins, sourceDemand) = ParseMergeSource(context, out var sourceReads, out var sourceReadColumns);
         if (context.Batch.CurrentDatabase.Collation.Equals(sourceAlias, targetAlias))
             throw SimulatedSqlException.MergeSourceAndTargetShareAName();
 
@@ -308,10 +308,17 @@ partial class Simulation
         var sourceDeferred = sourceDemand?.Invoke(
             MergeSourceReads(context.CurrentDatabase.Collation, sourceAlias, sourceColumnNames, onPredicate, whenClauses, output),
             MergeSourceReads(context.CurrentDatabase.Collation, sourceAlias, sourceColumnNames, onPredicate, [], output));
+        if (sourceReads.Count != 0)
+        {
+            NoteMergeSourceColumnReads(
+                context.CurrentDatabase.Collation, sourceReadColumns, matchSources, matchJoins,
+                MergeSourceReads(context.CurrentDatabase.Collation, sourceAlias, sourceColumnNames, onPredicate, whenClauses, output, MergeNameScope.Source));
+        }
 
         var plan = new MergePlan(
             destinationName, triggerTarget, destinationTable, sourceView, targetAlias, materializeSource, sourceAlias, sourceColumnNames, sourceSchema, sourceDeferred,
-            onPredicate, whenClauses, writeMasks, output, serializableHint, viewRowsTarget, joinWrite, top);
+            onPredicate, whenClauses, writeMasks, output, serializableHint, viewRowsTarget, joinWrite, top,
+            sourceReads.Count == 0 ? null : sourceReads, sourceReadColumns.Count == 0 ? null : sourceReadColumns);
         // Which INSTEAD OF triggers take the actions is settled above from
         // their enabled state, which no schema change records, so a target
         // carrying any keeps its statements parsing.
@@ -348,7 +355,9 @@ partial class Simulation
         bool serializableHint,
         View? viewRowsTarget,
         JoinViewMergePlan? joinWrite,
-        Selection.DmlTopLimit? top) : DmlStatementPlan
+        Selection.DmlTopLimit? top,
+        List<ReferencedSecurable>? sourceReads,
+        Dictionary<int, ColumnReadTarget>? sourceReadColumns) : DmlStatementPlan
     {
         public readonly MultiPartName DestinationName = destinationName;
         public readonly SchemaObject TriggerTarget = triggerTarget;
@@ -376,6 +385,20 @@ partial class Simulation
         public readonly View? ViewRowsTarget = viewRowsTarget;
         public readonly JoinViewMergePlan? JoinWrite = joinWrite;
         public readonly Selection.DmlTopLimit? Top = top;
+
+        /// <summary>The objects the <c>USING</c> source reads, checked once the target's permissions pass.</summary>
+        public readonly List<ReferencedSecurable>? SourceReads = sourceReads;
+
+        /// <summary>The columns of <see cref="SourceReads"/> the statement reads (<see cref="NoteMergeSourceColumnReads"/>).</summary>
+        public readonly Dictionary<int, ColumnReadTarget>? SourceReadColumns = sourceReadColumns;
+
+        /// <summary>
+        /// The target's columns the statement reads and sets, which the
+        /// permission check of each execution asks about — collected once,
+        /// since which columns a statement names doesn't depend on who runs it
+        /// (<see cref="MergeTargetColumns"/>).
+        /// </summary>
+        public (ColumnReadTarget Read, ColumnReadTarget Assigned)? TargetColumns;
 
         public override SimulatedStatementOutcome Run(ParserContext context) => RunMerge(context, this);
     }
@@ -557,9 +580,16 @@ partial class Simulation
     /// trailing <c>(...)</c> as a hint clause (probed Msg 321 with the
     /// first column name as the would-be hint name) and the simulator
     /// matches by routing through <see cref="Selection.ParseOptionalTableHints"/>.
+    /// What the source reads collects on <paramref name="reads"/> and
+    /// <paramref name="readColumns"/> rather than on any statement's lists,
+    /// since real checks it once the target's permissions pass (see
+    /// <see cref="RunMerge"/>).
     /// </summary>
-    private static (Func<BatchContext, List<SqlValue[]>, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability, FromSource[] MatchSources, JoinSpec[] MatchJoins, MergeSourceDemand? Demand) ParseMergeSource(ParserContext context)
+    private static (Func<BatchContext, List<SqlValue[]>, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability, FromSource[] MatchSources, JoinSpec[] MatchJoins, MergeSourceDemand? Demand) ParseMergeSource(
+        ParserContext context, out List<ReferencedSecurable> reads, out Dictionary<int, ColumnReadTarget> readColumns)
     {
+        using var securableSink = ParserScope.Enter(ref context.SecurableSink, reads = []);
+        using var readColumnSink = ParserScope.Enter(ref context.ReadColumnSink, readColumns = []);
         if (IsJoinedMergeSourceAhead(context))
             return ParseJoinedMergeSource(context);
         context.MoveNextRequired();
@@ -919,10 +949,6 @@ partial class Simulation
             nullability = selection.ColumnNullability;
             materialize = (batch, rows) =>
             {
-                // The USING source is its own query expression, so it owns the
-                // securable list of its reads and reaches none of the statement
-                // check sites the MERGE target's own permissions run through.
-                PermissionEnforcement.CheckSubqueryReads(batch, selection);
                 var rs = selection.Execute(batch);
                 foreach (var rowBytes in rs.RowBytes)
                     rows.Add(RowDecoder.DecodeRow(sourceSchema, rowBytes));
@@ -1019,6 +1045,7 @@ partial class Simulation
             if (cteBinding.Plan is null)
                 throw SimulatedSqlException.RecursiveCteMissingUnionAll(cteBinding.Name);
             var ctePlan = cteBinding.Plan;
+            Selection.FoldSecurables(context, ctePlan);
             sourceSchema = ctePlan.Schema;
             columnNames = cteBinding.ColumnNames;
             var cteAlias = Selection.ConsumeOptionalAlias(context) ?? cteBinding.Name;
@@ -1066,6 +1093,7 @@ partial class Simulation
         else if (context.Batch.TryResolveView(objectName, out var resolvedView))
         {
             var viewColumns = context.Batch.Connection.Simulation.BindViewColumns(context.Batch, resolvedView, objectName, out var viewBody);
+            _ = Selection.RecordSecurableRead(context, resolvedView, objectName, viewBody);
             sourceSchema = new SqlType[viewColumns.Length];
             columnNames = new string[viewColumns.Length];
             for (var i = 0; i < viewColumns.Length; i++)
@@ -1099,6 +1127,8 @@ partial class Simulation
                     (masks ??= new DataMask?[heapTable.Columns.Length])[i] = columnMask;
             }
             var sourceTable = heapTable;
+            if (!sourceTable.IsTableVariable)
+                _ = Selection.RecordSecurableRead(context, sourceTable, objectName);
             var alias = Selection.ConsumeOptionalAlias(context) ?? objectName.Leaf;
             var sourceHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: true, commitOnLegacyParen: true);
             // Phase 1b: MERGE bare-table source is a READ — table-IS plus
@@ -1149,14 +1179,21 @@ partial class Simulation
     /// Per USING column, whether the MERGE's ON, a WHEN clause or the OUTPUT
     /// reads it — a bare name answering to it counting as a read; null when a
     /// clause reads what no walk sees (a <c>MATCH</c>, or a subquery whose
-    /// reach is unknown).
+    /// reach is unknown). With a <paramref name="side"/>, the columns are that
+    /// side's, and a bare name counts only in a clause whose names bind it —
+    /// not a <c>NOT MATCHED BY SOURCE</c> clause's for the source, nor a
+    /// <c>NOT MATCHED</c> clause's for the target.
     /// </summary>
-    private static bool[]? MergeSourceReads(Collation collation, string sourceAlias, string[] sourceColumnNames, BooleanExpression onPredicate, List<WhenClause> whenClauses, OutputProjection? output)
+    private static bool[]? MergeSourceReads(
+        Collation collation, string sourceAlias, string[] sourceColumnNames, BooleanExpression onPredicate, List<WhenClause> whenClauses, OutputProjection? output, MergeNameScope? side = null)
     {
         var read = new bool[sourceColumnNames.Length];
         var known = true;
+        var bareNamesBind = true;
         void Name(MultiPartName name)
         {
+            if (name.Count == 1 && !bareNamesBind)
+                return;
             try
             {
                 if (MergeSourceOrdinal(collation, name, sourceAlias, sourceColumnNames, unqualified: true) is >= 0 and var ordinal)
@@ -1191,14 +1228,74 @@ partial class Simulation
         onPredicate.Walk(Visit);
         foreach (var clause in whenClauses)
         {
+            bareNamesBind = side switch
+            {
+                MergeNameScope.Source => clause.Kind != WhenClauseKind.NotMatchedBySource,
+                MergeNameScope.Target => clause.Kind != WhenClauseKind.NotMatchedByTarget,
+                _ => true,
+            };
             clause.SearchCondition?.Walk(Visit);
             foreach (var (_, expression) in clause.Assignments ?? [])
                 expression.Walk(Visit);
             foreach (var value in clause.InsertValues ?? [])
                 value.Walk(Visit);
         }
+        bareNamesBind = true;
         output?.VisitExpressions(expression => expression.Walk(Visit));
         return known ? read : null;
+    }
+
+    /// <summary>
+    /// Notes on <paramref name="readColumns"/> the columns of each table or
+    /// view a <c>USING</c> side names that the statement reads — through
+    /// <paramref name="reads"/>, its <c>ON</c>, <c>WHEN</c> clauses and
+    /// <c>OUTPUT</c>, and a joined side's own join conditions — so its SELECT
+    /// check is column-grain; a table it reads no column of answers for
+    /// every column, as a query's <c>COUNT(*)</c> does (probed 2026-10-25
+    /// against SQL Server 2025). An <c>APPLY</c> reads its left sides in
+    /// arguments no walk here sees, so a joined side holding one answers for
+    /// every column of each.
+    /// </summary>
+    private static void NoteMergeSourceColumnReads(Collation collation, Dictionary<int, ColumnReadTarget> readColumns, FromSource[] sources, JoinSpec[] joins, bool[]? reads)
+    {
+        var applies = Array.Exists(joins, static join => join.Kind is JoinKind.CrossApply or JoinKind.OuterApply);
+        var targets = new ColumnReadTarget?[sources.Length];
+        var offset = 0;
+        for (var s = 0; s < sources.Length; s++)
+        {
+            var source = sources[s];
+            var width = source.ColumnNames.Length;
+            var read = (SchemaObject?)source.BackingView ?? (source.LateralPlan is null ? source.BackingTable : null);
+            // A column set some other read of the object left empty stands
+            // for every column already.
+            if (read is not null && !(readColumns.TryGetValue(read.ObjectId, out var existing) && existing.Ordinals.Count == 0))
+            {
+                var target = existing ?? (source.BackingView is { } view ? new ColumnReadTarget(view) : new ColumnReadTarget(source.BackingTable!));
+                readColumns[read.ObjectId] = targets[s] = target;
+                for (var c = 0; c < width; c++)
+                {
+                    if (applies || reads?[offset + c] != false)
+                        target.Add(source.ColumnNames[c]);
+                }
+            }
+            offset += width;
+        }
+        foreach (var join in joins)
+        {
+            join.OnPredicate?.VisitOperandExpressions(operand => operand.VisitColumnReferences(name =>
+            {
+                for (var s = 0; s < sources.Length; s++)
+                {
+                    if (targets[s] is { } target
+                        && (name.ImmediateQualifier is { } qualifier
+                            ? sources[s].Qualifier is { } named && collation.Equals(named, qualifier)
+                            : Array.Exists(sources[s].ColumnNames, column => collation.Equals(column, name.Leaf))))
+                    {
+                        target.Add(name.Leaf);
+                    }
+                }
+            }));
+        }
     }
 
     /// <summary>

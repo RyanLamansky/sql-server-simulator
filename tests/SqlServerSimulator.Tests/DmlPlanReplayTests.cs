@@ -645,6 +645,53 @@ public sealed class DmlPlanReplayTests
             As("blind", ("@id", 3), ("@v", 3)),
             As("seer", ("@id", 4), ("@v", 4)));
 
+    private const string ReadGrants = """
+        create table r (id int primary key, secret varchar(20) null, pub varchar(20) null);
+        insert r values (1, 's1', 'p1'), (2, 's2', 'p2'), (3, 's3', 'p3'), (4, 's4', 'p4');
+        create table rs (id int primary key, v varchar(20) null);
+        insert rs values (1, 'v1'), (2, 'v2'), (3, 'v3'), (4, 'v4');
+        create table ro (v varchar(20) null);
+        create user reader without login;
+        create user writer without login;
+        grant select, insert, update, delete on r to reader, writer;
+        deny select (secret) on r to writer;
+        grant select on rs to reader;
+        grant insert on ro to reader;
+        """;
+
+    [TestMethod]
+    public void OutputReadPermission_PrincipalsInAlternation()
+        => AssertReplayMatchesFreshParse(
+            ReadGrants,
+            "insert r (id, secret, pub) output inserted.secret values (@id, 'n', 'n')",
+            "select count(*) from r",
+            As("writer", ("@id", 10)),
+            As("reader", ("@id", 11)),
+            As("writer", ("@id", 12)),
+            As("reader", ("@id", 13)));
+
+    [TestMethod]
+    public void MergeSourcePermission_PrincipalsInAlternation()
+        => AssertReplayMatchesFreshParse(
+            ReadGrants,
+            "merge r using rs on r.id = rs.id and rs.id = @id when matched then update set pub = rs.v;",
+            "select id, pub from r order by id",
+            As("writer", ("@id", 1)),
+            As("reader", ("@id", 2)),
+            As("writer", ("@id", 3)),
+            As("reader", ("@id", 4)));
+
+    [TestMethod]
+    public void OutputIntoPermission_PrincipalsInAlternation()
+        => AssertReplayMatchesFreshParse(
+            ReadGrants,
+            "delete r output deleted.pub into ro where id = @id",
+            "select v from ro order by v",
+            As("writer", ("@id", 1)),
+            As("reader", ("@id", 2)),
+            As("writer", ("@id", 3)),
+            As("reader", ("@id", 4)));
+
     [TestMethod]
     public void ConcurrentReplays_OfOneUpdatePlan_ApplyEveryIncrement()
     {

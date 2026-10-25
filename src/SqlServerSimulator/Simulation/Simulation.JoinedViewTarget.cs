@@ -143,9 +143,10 @@ partial class Simulation
         // already read; INSERTED / DELETED are the view's columns.
         var output = ParseJoinedViewTargetOutput(context, leadingIdent, view, table, TriggerActions.Update, new OutputPartnerScope(sources, targetIndex));
         var where = ParseJoinedViewTargetWhere(context, from.After, sources, joins, tupleTypeResolver);
-        CheckJoinedViewTargetPermissions(batch, sources, targetIndex, view, table, TriggerActions.Update, rawAssignments);
+        CheckJoinedViewTargetPermissions(batch, sources, targetIndex, view, table, TriggerActions.Update, rawAssignments, output);
         if (batch.IsSkipping)
             return new SimulatedNonQuery(0);
+        output?.CheckIntoTarget(batch);
         if (where?.IsNeverTrue != true && !DmlTopIsZero(top, batch))
             RunUpdateStartupConstants(context, table, JoinedPredicates(joins, where), assignments);
 
@@ -303,9 +304,10 @@ partial class Simulation
 
         var output = ParseJoinedViewTargetOutput(context, leadingIdent, view, table, TriggerActions.Delete, new OutputPartnerScope(sources, targetIndex));
         var where = ParseJoinedViewTargetWhere(context, from.After, sources, joins, Selection.ColumnTypeResolverFor(sources));
-        CheckJoinedViewTargetPermissions(batch, sources, targetIndex, view, table, TriggerActions.Delete, rawAssignments: null);
+        CheckJoinedViewTargetPermissions(batch, sources, targetIndex, view, table, TriggerActions.Delete, rawAssignments: null, output);
         if (batch.IsSkipping)
             return new SimulatedNonQuery(0);
+        output?.CheckIntoTarget(batch);
         if (where?.IsNeverTrue != true && !DmlTopIsZero(top, batch))
             RunUpdateStartupConstants(context, table, JoinedPredicates(joins, where), []);
 
@@ -469,12 +471,14 @@ partial class Simulation
             RejectClientOutputOnTriggeredTarget(batch, table, TriggerActions.Update, table.Name, output is { HasTarget: false });
         }
         var where = ParseJoinedViewTargetWhere(context, afterFrom, sources, joins, tupleTypeResolver);
-        CheckJoinedViewTargetPermissions(batch, sources, targetIndex, view, table, TriggerActions.Update, rawAssignments);
+        CheckJoinedViewTargetPermissions(batch, sources, targetIndex, view, table, TriggerActions.Update, rawAssignments, output);
         var readViewColumns = new List<string>();
         CollectTargetColumnReads(sources, targetIndex, where, rawAssignments, readViewColumns.Add);
+        output?.VisitTargetReads(name => readViewColumns.Add(name.Leaf));
         CheckJoinViewBrokenChains(batch, nested, table, readViewColumns, assignments);
         if (batch.IsSkipping)
             return new SimulatedNonQuery(0);
+        output?.CheckIntoTarget(batch);
         if (where?.IsNeverTrue != true && !DmlTopIsZero(top, batch))
             RunUpdateStartupConstants(context, table, JoinedPredicates(joins, where), assignments);
 
@@ -600,7 +604,8 @@ partial class Simulation
         View view,
         HeapTable table,
         TriggerActions action,
-        List<(string? ColumnName, Expression Expr)>? rawAssignments)
+        List<(string? ColumnName, Expression Expr)>? rawAssignments,
+        OutputProjection? output)
     {
         if (batch.IsSkipping)
             return;
@@ -618,11 +623,12 @@ partial class Simulation
         }
         if (!PermissionEnforcement.Applies(batch, batch.DatabaseFor(view)))
         {
-            CheckBrokenChainMutation(batch, view, action, where: null, rawAssignments);
+            CheckBrokenChainMutation(batch, view, action, where: null, rawAssignments, output);
             return;
         }
         var read = new ColumnReadTarget(view);
         CollectTargetColumnReads(sources, targetIndex, where: null, rawAssignments, read.Add);
+        output?.NoteTargetReads(read);
         PermissionEnforcement.CheckColumns(batch, Permission.Select, read);
         if (rawAssignments is null)
         {
@@ -635,7 +641,7 @@ partial class Simulation
                 assigned.Add(columnName);
             PermissionEnforcement.CheckColumns(batch, Permission.Update, assigned);
         }
-        CheckBrokenChainMutation(batch, view, action, where: null, rawAssignments);
+        CheckBrokenChainMutation(batch, view, action, where: null, rawAssignments, output);
     }
 
     /// <summary>

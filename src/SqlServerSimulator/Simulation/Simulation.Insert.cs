@@ -213,6 +213,19 @@ partial class Simulation
             RejectClientOutputOnTriggeredTarget(context.Batch, destinationView, TriggerActions.Insert, destinationName.ToString(), output is { HasTarget: false });
         }
 
+        // The clause's reads take SELECT on the view, as a WHERE's do on
+        // the INSTEAD OF DELETE path, and its INTO target INSERT.
+        if (output is not null && !context.Batch.IsSkipping)
+        {
+            if (output.ReadsTargetColumn()
+                && PermissionEnforcement.SecurableFor(context.Batch, destinationName, destinationView) is { } securable
+                && PermissionEnforcement.Applies(context.Batch, context.Batch.DatabaseFor(securable)))
+            {
+                PermissionEnforcement.CheckSchemaObject(context.Batch, "SELECT", securable);
+            }
+            output.CheckIntoTarget(context.Batch);
+        }
+
         // DEFAULT VALUES hands the trigger one row of NULLs, a derived column
         // included (probed 2026-10-04 against SQL Server 2025).
         if (!hasExplicitColumnList && context.Token is ReservedKeyword { Keyword: Keyword.Default })
@@ -451,7 +464,7 @@ partial class Simulation
 
         if (valueTuples is not null)
         {
-            var plan = new InsertPlan(destinationTable, destinationView, joinViewPlan, destinationColumns, output, top, valueTuples);
+            var plan = new InsertPlan(destinationTable, destinationView, joinViewPlan, destinationColumns, output, top, valueTuples, targetName: destinationName);
             NoteDmlPlan(
                 context,
                 plan,
@@ -470,7 +483,7 @@ partial class Simulation
             if (context.Token is not ReservedKeyword { Keyword: Keyword.Values })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextOptional();
-            var defaultsPlan = new InsertSourcePlan(new InsertPlan(destinationTable, destinationView, joinViewPlan, [], output, top, valueTuples: null), source: null);
+            var defaultsPlan = new InsertSourcePlan(new InsertPlan(destinationTable, destinationView, joinViewPlan, [], output, top, valueTuples: null, targetName: destinationName), source: null);
             NoteDmlPlan(context, defaultsPlan, admitted: AdmitsDmlPlan(context.Batch, destinationTable, destinationView, output));
             return InsertSourceRows(context, defaultsPlan, sourceStamps: null);
         }
@@ -494,7 +507,7 @@ partial class Simulation
                     ? ParseParenthesizedSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable)
                     : ParseSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable);
                 NoteViewInsertSource(context, bindErrors, sourceStart, destinationView, destinationName);
-                var selectPlan = new InsertSourcePlan(new InsertPlan(destinationTable, destinationView, joinViewPlan, destinationColumns, output, top, valueTuples: null), selection);
+                var selectPlan = new InsertSourcePlan(new InsertPlan(destinationTable, destinationView, joinViewPlan, destinationColumns, output, top, valueTuples: null, targetName: destinationName), selection);
                 NoteDmlPlan(context, selectPlan, admitted: AdmitsDmlPlan(context.Batch, destinationTable, destinationView, output));
                 return InsertSourceRows(context, selectPlan, sourceStamps);
             }
@@ -566,6 +579,7 @@ partial class Simulation
     private static SimulatedStatementOutcome InsertSourceRows(ParserContext context, InsertSourcePlan plan, List<long>? sourceStamps)
     {
         var insert = plan.Insert;
+        CheckInsertOutputPermissions(context.Batch, insert);
         if (plan.Source is not { } selection)
             return InsertRows(context, insert, [[]], valueTupleStamps: null);
         var batch = context.Batch;
@@ -664,9 +678,13 @@ partial class Simulation
         OutputProjection? output,
         Selection.DmlTopLimit? top,
         List<Expression[]>? valueTuples,
-        string verb = "INSERT") : DmlStatementPlan
+        string verb = "INSERT",
+        MultiPartName? targetName = null) : DmlStatementPlan
     {
         public readonly HeapTable DestinationTable = destinationTable;
+
+        /// <summary>The target as the statement names it, which an <c>OUTPUT</c> clause's permissions are checked through (<see cref="CheckInsertOutputPermissions"/>).</summary>
+        public readonly MultiPartName? TargetName = targetName;
 
         /// <summary>
         /// The statement a constraint's refusal names: <c>INSERT</c>, or the
@@ -690,6 +708,7 @@ partial class Simulation
     /// </summary>
     private static SimulatedStatementOutcome RunInsertValues(ParserContext context, InsertPlan plan)
     {
+        CheckInsertOutputPermissions(context.Batch, plan);
         // Parsing the tuples is the binding; evaluating them is execution,
         // and in skip mode it is pure side effect — a `NEXT VALUE FOR`
         // cell would burn a sequence value for a row that never lands.
@@ -740,6 +759,41 @@ partial class Simulation
             if (retainsDraws)
                 batch.SequenceValuesByRow = null;
         }
+    }
+
+    /// <summary>
+    /// The permissions an <c>OUTPUT</c> clause adds to an <c>INSERT</c>'s,
+    /// checked as the statement starts: SELECT on the target's columns it
+    /// reads through <c>INSERTED</c> — through a synonym on the synonym, and
+    /// through a view whose owner differs from its base table's on the base
+    /// columns too — then <c>INSERT</c> on an <c>INTO</c> target (probed
+    /// 2026-10-25 against SQL Server 2025).
+    /// </summary>
+    private static void CheckInsertOutputPermissions(BatchContext batch, InsertPlan plan)
+    {
+        if (plan.Output is not { } output || plan.TargetName is not { } targetName || batch.IsSkipping)
+            return;
+        var view = plan.DestinationView;
+        var target = (SchemaObject?)view ?? plan.DestinationTable;
+        var applies = PermissionEnforcement.Applies(batch, batch.DatabaseFor(target));
+        var chainedView = view is { BaseTable: not null } && plan.JoinViewPlan is null ? view : null;
+        if (applies || chainedView is not null)
+        {
+            var read = view is not null ? new ColumnReadTarget(view) : new ColumnReadTarget(plan.DestinationTable);
+            output.NoteTargetReads(read);
+            if (applies && PermissionEnforcement.SecurableFor(batch, targetName, target) is Synonym synonym)
+            {
+                if (read.Ordinals.Count > 0)
+                    PermissionEnforcement.CheckSchemaObject(batch, "SELECT", synonym);
+            }
+            else if (applies)
+            {
+                PermissionEnforcement.CheckColumns(batch, Permission.Select, read);
+            }
+            if (chainedView is not null)
+                PermissionEnforcement.CheckBrokenChainColumns(batch, Permission.Select, chainedView, read);
+        }
+        output.CheckIntoTarget(batch);
     }
 
     /// <summary>

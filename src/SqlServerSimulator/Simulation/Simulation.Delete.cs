@@ -180,13 +180,14 @@ partial class Simulation
         var (targetName, table, where, positionedCursor) = (plan.TargetName, plan.Table, plan.Where, plan.PositionedCursor);
         var (output, top, serializableHint, sourceView) = (plan.Output, plan.Top, plan.SerializableHint, plan.SourceView);
 
-        // DELETE reads the target when it has a WHERE clause — real then
-        // also requires SELECT, checked first so the SELECT denial surfaces
-        // when both SELECT and DELETE are missing (probe M1d). A bare DELETE
-        // with no WHERE reads nothing and needs only DELETE (M1e). DELETE
-        // itself is not column-grantable, so it stays object-grain; only the
-        // read-implies-SELECT is column-grain — on a base table or a view,
-        // but not through a synonym, which takes no column grants at all.
+        // DELETE reads the target when it has a WHERE clause, or an OUTPUT
+        // clause reading DELETED — real then also requires SELECT, checked
+        // first so the SELECT denial surfaces when both SELECT and DELETE are
+        // missing (probe M1d). A bare DELETE reads nothing and needs only
+        // DELETE (M1e). DELETE itself is not column-grantable, so it stays
+        // object-grain; only the read-implies-SELECT is column-grain — on a
+        // base table or a view, but not through a synonym, which takes no
+        // column grants at all.
         var deleteSecurable = context.Batch.IsSkipping
             ? null
             : PermissionEnforcement.SecurableFor(context.Batch, targetName, (SchemaObject?)sourceView ?? table);
@@ -194,24 +195,24 @@ partial class Simulation
             Audit.AuditSites.TargetWrite(context.Batch, audited, "DELETE", reads: where is not null, succeeded: true);
         if (deleteSecurable is { } securable && PermissionEnforcement.Applies(context.Batch, context.Batch.DatabaseFor(securable)))
         {
-            SimulatedSqlException? readDenied = null;
-            if (where is not null && securable is not Synonym)
-            {
-                var read = sourceView is not null ? new ColumnReadTarget(sourceView) : new ColumnReadTarget(table);
-                where.VisitOperandExpressions(op => op.VisitColumnReferences(read.Add));
-                readDenied = PermissionEnforcement.ColumnsDenial(context.Batch, Permission.Select, read);
-            }
-            else if (where is not null)
-            {
-                readDenied = PermissionEnforcement.SchemaObjectDenial(context.Batch, "SELECT", securable);
-            }
+            var read = sourceView is not null ? new ColumnReadTarget(sourceView) : new ColumnReadTarget(table);
+            where?.VisitOperandExpressions(op => op.VisitColumnReferences(read.Add));
+            output?.NoteTargetReads(read);
+            var readDenied = securable is not Synonym
+                ? PermissionEnforcement.ColumnsDenial(context.Batch, Permission.Select, read)
+                : where is not null || read.Ordinals.Count > 0
+                ? PermissionEnforcement.SchemaObjectDenial(context.Batch, "SELECT", securable)
+                : null;
             if (PermissionEnforcement.Combine(readDenied, PermissionEnforcement.SchemaObjectDenial(context.Batch, "DELETE", securable)) is { } refusal)
                 throw refusal;
         }
         // Checked even from a module body whose reference to the view is
         // chained.
         if (deleteSecurable is not null)
-            CheckBrokenChainMutation(context.Batch, sourceView, TriggerActions.Delete, where, rawAssignments: null);
+        {
+            CheckBrokenChainMutation(context.Batch, sourceView, TriggerActions.Delete, where, rawAssignments: null, output);
+            output?.CheckIntoTarget(context.Batch);
+        }
 
         if (positionedCursor is null)
             Selection.SettleSerializableWriteFence(table, where, serializableHint, context.Batch);
@@ -580,6 +581,7 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
         var (table, where, output, top) = (plan.Table, plan.Where, plan.Output, plan.Top);
+        output?.CheckIntoTarget(context.Batch);
         var sources = (FromSource[])plan.Sources.Clone();
         var joins = plan.Joins;
         var targetIndex = plan.TargetIndex;

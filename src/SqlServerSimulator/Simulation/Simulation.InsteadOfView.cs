@@ -93,7 +93,7 @@ partial class Simulation
         }
 
         var where = ParseInsteadOfViewWhere(context, typeResolver);
-        CheckUpdatePermissions(context, targetName, shapeTable, view, rawAssignments, where);
+        CheckUpdatePermissions(context, targetName, shapeTable, view, rawAssignments, where, output);
         if (batch.IsSkipping)
             return new SimulatedNonQuery(0);
 
@@ -196,12 +196,13 @@ partial class Simulation
             && PermissionEnforcement.SecurableFor(batch, targetName, view) is { } securable
             && PermissionEnforcement.Applies(batch, batch.DatabaseFor(securable)))
         {
-            if (where is not null)
+            if (where is not null || output?.ReadsTargetColumn() == true)
                 PermissionEnforcement.CheckSchemaObject(batch, "SELECT", securable);
             PermissionEnforcement.CheckSchemaObject(batch, "DELETE", securable);
         }
         if (batch.IsSkipping)
             return new SimulatedNonQuery(0);
+        output?.CheckIntoTarget(batch);
 
         var deletedRows = new List<SqlValue[]>();
         var statementColumns = level?.Columns ?? columns;

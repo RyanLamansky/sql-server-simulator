@@ -765,7 +765,7 @@ partial class Simulation
     {
         var (targetName, table, rawAssignments, assignments, where) = (plan.TargetName, plan.Table, plan.RawAssignments, plan.Assignments, plan.Where);
         var (positionedCursor, output, top, serializableHint, sourceView) = (plan.PositionedCursor, plan.Output, plan.Top, plan.SerializableHint, plan.SourceView);
-        CheckUpdatePermissions(context, targetName, table, sourceView, rawAssignments, where, plan);
+        CheckUpdatePermissions(context, targetName, table, sourceView, rawAssignments, where, output, plan);
         RowSecurity.NoteWrite(context.Batch, table);
         var setMasks = DataMasking.Applying(context.Batch, plan.SetMasks);
         var enforceConstraints = !ReplacedByInsteadOfTrigger(context.Batch, table, sourceView);
@@ -1029,6 +1029,7 @@ partial class Simulation
         View? sourceView,
         List<(string? ColumnName, Expression Expr)> rawAssignments,
         BooleanExpression? where,
+        OutputProjection? output,
         UpdatePlan? plan = null)
     {
         var updateSecurable = context.Batch.IsSkipping
@@ -1038,13 +1039,14 @@ partial class Simulation
             return;
         if (context.Simulation.RunningAudits is null)
         {
-            CheckUpdateSecurable(context, updateSecurable, table, sourceView, rawAssignments, where, plan);
+            CheckUpdateSecurable(context, updateSecurable, table, sourceView, rawAssignments, where, output, plan);
+            output?.CheckIntoTarget(context.Batch);
             return;
         }
         var reads = where is not null || AnySetExpressionReadsColumn(rawAssignments, table, context.Batch);
         try
         {
-            CheckUpdateSecurable(context, updateSecurable, table, sourceView, rawAssignments, where, plan);
+            CheckUpdateSecurable(context, updateSecurable, table, sourceView, rawAssignments, where, output, plan);
         }
         catch (SimulatedSqlException)
         {
@@ -1052,55 +1054,57 @@ partial class Simulation
             throw;
         }
         Audit.AuditSites.TargetWrite(context.Batch, updateSecurable, "UPDATE", reads, succeeded: true);
+        output?.CheckIntoTarget(context.Batch);
     }
 
     private static void CheckUpdateSecurable(ParserContext context, SchemaObject updateSecurable, HeapTable table, View? sourceView,
-        List<(string? ColumnName, Expression Expr)> rawAssignments, BooleanExpression? where, UpdatePlan? plan)
+        List<(string? ColumnName, Expression Expr)> rawAssignments, BooleanExpression? where, OutputProjection? output, UpdatePlan? plan)
     {
         if (!PermissionEnforcement.Applies(context.Batch, context.Batch.DatabaseFor(updateSecurable)))
         {
             // A module body's reference to the view is chained, but the
             // view's own reference to its base table still breaks on an
             // owner change.
-            CheckBrokenChainMutation(context.Batch, sourceView, TriggerActions.Update, where, rawAssignments);
+            CheckBrokenChainMutation(context.Batch, sourceView, TriggerActions.Update, where, rawAssignments, output);
             return;
         }
 
-        if (updateSecurable is Synonym synonym)
-        {
-            // A synonym takes no column grants at all, so a reference
-            // through one is checked object-grain against the synonym.
-            var synonymDenied = where is not null || AnySetExpressionReadsColumn(rawAssignments, table, context.Batch)
-                ? PermissionEnforcement.SchemaObjectDenial(context.Batch, "SELECT", synonym)
-                : null;
-            if (PermissionEnforcement.Combine(synonymDenied, PermissionEnforcement.SchemaObjectDenial(context.Batch, "UPDATE", synonym)) is { } synonymRefusal)
-                throw synonymRefusal;
-            CheckBrokenChainMutation(context.Batch, sourceView, TriggerActions.Update, where, rawAssignments);
-            return;
-        }
-
-        // Column-grain on a base table and a view alike: the WHERE +
-        // SET-RHS columns require SELECT (checked first, per probe M1
+        // Column-grain on a base table and a view alike: the WHERE, SET-RHS
+        // and OUTPUT columns require SELECT (checked first, per probe M1
         // ordering), each SET-target column requires UPDATE — first
         // inaccessible column → Msg 230 (or Msg 229 when the object is
         // wholly inaccessible for that permission). Through a view the
         // ordinals are the view's own, matching what
         // `GRANT UPDATE (col) ON <view>` stored.
-        var (read, assigned) = plan is null ? UpdateColumnTargets(table, sourceView, rawAssignments, where) : plan.ColumnTargets ??= UpdateColumnTargets(table, sourceView, rawAssignments, where);
+        var (read, assigned) = plan is null ? UpdateColumnTargets(table, sourceView, rawAssignments, where, output) : plan.ColumnTargets ??= UpdateColumnTargets(table, sourceView, rawAssignments, where, output);
+        if (updateSecurable is Synonym synonym)
+        {
+            // A synonym takes no column grants at all, so a reference
+            // through one is checked object-grain against the synonym.
+            var synonymDenied = where is not null || read.Ordinals.Count > 0 || AnySetExpressionReadsColumn(rawAssignments, table, context.Batch)
+                ? PermissionEnforcement.SchemaObjectDenial(context.Batch, "SELECT", synonym)
+                : null;
+            if (PermissionEnforcement.Combine(synonymDenied, PermissionEnforcement.SchemaObjectDenial(context.Batch, "UPDATE", synonym)) is { } synonymRefusal)
+                throw synonymRefusal;
+            CheckBrokenChainMutation(context.Batch, sourceView, TriggerActions.Update, where, rawAssignments, output);
+            return;
+        }
+
         var readDenied = PermissionEnforcement.ColumnsDenial(context.Batch, Permission.Select, read);
         if (PermissionEnforcement.Combine(readDenied, PermissionEnforcement.ColumnsDenial(context.Batch, Permission.Update, assigned)) is { } refusal)
             throw refusal;
-        CheckBrokenChainMutation(context.Batch, sourceView, TriggerActions.Update, where, rawAssignments);
+        CheckBrokenChainMutation(context.Batch, sourceView, TriggerActions.Update, where, rawAssignments, output);
     }
 
-    /// <summary>The columns an <c>UPDATE</c>'s WHERE and SET expressions read, and those its SET list assigns.</summary>
+    /// <summary>The columns an <c>UPDATE</c>'s WHERE, SET and OUTPUT expressions read, and those its SET list assigns.</summary>
     private static (ColumnReadTarget Read, ColumnReadTarget Assigned) UpdateColumnTargets(
-        HeapTable table, View? sourceView, List<(string? ColumnName, Expression Expr)> rawAssignments, BooleanExpression? where)
+        HeapTable table, View? sourceView, List<(string? ColumnName, Expression Expr)> rawAssignments, BooleanExpression? where, OutputProjection? output)
     {
         var read = sourceView is not null ? new ColumnReadTarget(sourceView) : new ColumnReadTarget(table);
         where?.VisitOperandExpressions(op => op.VisitColumnReferences(read.Add));
         foreach (var (_, expr) in rawAssignments)
             expr.VisitColumnReferences(read.Add);
+        output?.NoteTargetReads(read);
         var assigned = sourceView is not null ? new ColumnReadTarget(sourceView) : new ColumnReadTarget(table);
         foreach (var columnName in SetColumnNames(rawAssignments))
             assigned.Add(columnName);
@@ -1291,6 +1295,7 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
         var (table, assignments, where, output, top) = (plan.Table, plan.Assignments, plan.Where, plan.Output, plan.Top);
+        output?.CheckIntoTarget(context.Batch);
         var sources = (FromSource[])plan.Sources.Clone();
         var joins = plan.Joins;
         var targetIndex = plan.TargetIndex;

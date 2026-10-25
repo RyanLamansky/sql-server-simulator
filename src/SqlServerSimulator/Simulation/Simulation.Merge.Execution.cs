@@ -18,7 +18,15 @@ partial class Simulation
         var (destinationTable, viewRowsTarget, joinWrite) = (plan.DestinationTable, plan.ViewRowsTarget, plan.JoinWrite);
         RowSecurity.NoteWrite(context.Batch, destinationTable);
         if (!context.Batch.IsSkipping)
-            CheckMergePermissions(context.Batch, plan.DestinationName, plan.TriggerTarget, plan.WhenClauses, joinWrite, plan.OnPredicate, plan.TargetAlias);
+        {
+            // The target's permissions, then what the USING source reads, then
+            // an OUTPUT INTO target's INSERT: real reports the first of the
+            // three that fails and none after it (probed 2026-10-25 against
+            // SQL Server 2025).
+            CheckMergePermissions(context.Batch, plan);
+            PermissionEnforcement.CheckReadSources(context.Batch, plan.SourceReads, plan.SourceReadColumns);
+            plan.Output?.CheckIntoTarget(context.Batch);
+        }
         if (joinWrite is not null && !context.Batch.IsSkipping)
         {
             // The written table's rows the load holds in U go once the
@@ -48,52 +56,53 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Checks MERGE permissions on the target: SELECT (the ON predicate reads
-    /// it) plus the write permission of each action kind present (INSERT /
-    /// UPDATE / DELETE). Denials surface as Msg 229. A single-table view
-    /// target whose owner differs from its base table's breaks the ownership
-    /// chain, so the same permissions are then checked on the base table,
-    /// after the view's (probed 2026-09-27 against SQL Server 2025). The
-    /// source read is not separately checked — a documented gap.
+    /// Checks a MERGE's permissions on its target, reported together as real
+    /// reports them: SELECT on the target columns its <c>ON</c>, <c>WHEN</c>
+    /// conditions, <c>SET</c> values and <c>OUTPUT</c> read — none when it
+    /// reads none — then for each action it takes <c>INSERT</c>,
+    /// <c>DELETE</c> and <c>UPDATE</c> on the columns it sets, in that order
+    /// whatever order its <c>WHEN</c> clauses take (probed 2026-10-25 against
+    /// SQL Server 2025). A single-table view target whose owner differs from
+    /// its base table's breaks the ownership chain, so the same permissions
+    /// are then checked on the base table, after the view's (probed
+    /// 2026-09-27 against SQL Server 2025).
     /// </summary>
-    private static void CheckMergePermissions(BatchContext batch, MultiPartName destinationName, SchemaObject destination, List<WhenClause> whenClauses, JoinViewMergePlan? joinWrite = null, BooleanExpression? onPredicate = null, string? targetAlias = null)
+    private static void CheckMergePermissions(BatchContext batch, MergePlan plan)
     {
-        var insert = false;
-        var update = false;
-        var delete = false;
-        foreach (var clause in whenClauses)
-        {
-            switch (clause.Action)
-            {
-                case MergeActionKind.Insert:
-                    insert = true;
-                    break;
-                case MergeActionKind.Update:
-                    update = true;
-                    break;
-                case MergeActionKind.Delete:
-                    delete = true;
-                    break;
-            }
-        }
+        var whenClauses = plan.WhenClauses;
+        var insert = HasMergeAction(whenClauses, MergeActionKind.Insert);
+        var update = HasMergeAction(whenClauses, MergeActionKind.Update);
+        var delete = HasMergeAction(whenClauses, MergeActionKind.Delete);
+        var destination = plan.TriggerTarget;
 
-        var target = PermissionEnforcement.SecurableFor(batch, destinationName, destination);
+        var target = PermissionEnforcement.SecurableFor(batch, plan.DestinationName, destination);
         if (PermissionEnforcement.Applies(batch, batch.DatabaseFor(target)))
         {
-            var denied = PermissionEnforcement.SchemaObjectDenial(batch, "SELECT", target);
+            var (read, assigned) = plan.TargetColumns ??= MergeTargetColumns(batch, plan);
+            // A synonym takes no column grants, so a reference through one is
+            // checked object-grain against the synonym.
+            var denied = target is Synonym
+                ? read.Ordinals.Count > 0 ? PermissionEnforcement.SchemaObjectDenial(batch, "SELECT", target) : null
+                : PermissionEnforcement.ColumnsDenial(batch, Permission.Select, read);
             if (insert)
                 denied = PermissionEnforcement.Combine(denied, PermissionEnforcement.SchemaObjectDenial(batch, "INSERT", target));
-            if (update)
-                denied = PermissionEnforcement.Combine(denied, PermissionEnforcement.SchemaObjectDenial(batch, "UPDATE", target));
             if (delete)
                 denied = PermissionEnforcement.Combine(denied, PermissionEnforcement.SchemaObjectDenial(batch, "DELETE", target));
+            if (update)
+            {
+                denied = PermissionEnforcement.Combine(
+                    denied,
+                    target is Synonym || assigned.Ordinals.Count == 0
+                        ? PermissionEnforcement.SchemaObjectDenial(batch, "UPDATE", target)
+                        : PermissionEnforcement.ColumnsDenial(batch, Permission.Update, assigned));
+            }
             if (denied is not null)
                 throw denied;
         }
 
-        if (destination is View && joinWrite is not null)
+        if (destination is View && plan.JoinWrite is { } joinWrite)
         {
-            CheckJoinViewMergeChain(batch, joinWrite, whenClauses, onPredicate!, targetAlias!, insert, update, delete);
+            CheckJoinViewMergeChain(batch, joinWrite, whenClauses, plan.OnPredicate, plan.TargetAlias, insert, update, delete);
             return;
         }
         if (destination is not View view || view.BaseTable is not { } baseTable)
@@ -106,6 +115,41 @@ partial class Simulation
             CheckBase("UPDATE");
         if (delete)
             CheckBase("DELETE");
+    }
+
+    /// <summary>
+    /// The target's columns a <c>MERGE</c> reads — through its <c>ON</c>,
+    /// <c>WHEN</c> conditions, <c>SET</c> values and <c>OUTPUT</c> — and those
+    /// its <c>UPDATE</c> actions set, as columns of the target the statement
+    /// names: a view's own for a view.
+    /// </summary>
+    private static (ColumnReadTarget Read, ColumnReadTarget Assigned) MergeTargetColumns(BatchContext batch, MergePlan plan)
+    {
+        var table = plan.DestinationTable;
+        var view = plan.SourceView ?? plan.ViewRowsTarget;
+        var read = view is not null ? new ColumnReadTarget(view) : new ColumnReadTarget(table);
+        var assigned = view is not null ? new ColumnReadTarget(view) : new ColumnReadTarget(table);
+        // Through a single-base view the clauses name the view's columns, and
+        // its assignments land on the base table's.
+        var names = Array.ConvertAll(plan.SourceView?.OutputColumns ?? table.Columns, static column => column.Name);
+        var reads = MergeSourceReads(batch.CurrentDatabase.Collation, plan.TargetAlias, names, plan.OnPredicate, plan.WhenClauses, output: null, MergeNameScope.Target);
+        for (var i = 0; i < names.Length; i++)
+        {
+            if (reads?[i] != false)
+                read.Add(names[i]);
+        }
+        plan.Output?.NoteTargetReads(read);
+        foreach (var clause in plan.WhenClauses)
+        {
+            foreach (var (ordinal, _) in clause.Assignments ?? [])
+            {
+                if (plan.SourceView is not { } baseView)
+                    assigned.Add(table.Columns[ordinal].Name);
+                else if (Array.IndexOf(baseView.BaseColumnOrdinals, ordinal) is var viewOrdinal and >= 0)
+                    assigned.Add(baseView.OutputColumns[viewOrdinal].Name);
+            }
+        }
+        return (read, assigned);
     }
 
     /// <summary>

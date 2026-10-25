@@ -136,6 +136,7 @@ partial class Simulation
         reqStatic |= (options & CursorOptions.Static) != 0;
 
         context.MoveNextRequired(); // consume FOR
+        var queryLine = context.Token!.LineNumber;
         Selection selection;
         var reads = new List<SchemaObject>();
         using (ParserScope.Enter(ref context.CursorStatement, true))
@@ -214,6 +215,25 @@ partial class Simulation
 
         if (batch.IsSkipping)
             return null;
+
+        // Real checks the query's reads as the cursor is declared, as a
+        // SELECT's as it runs, at the line the query starts on: a cursor over
+        // a table the principal can't read is refused at DECLARE, and one a
+        // procedure declares over its owner's tables opens and fetches
+        // outside it unchecked (probed 2026-10-25 against SQL Server 2025).
+        try
+        {
+            PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
+        }
+        catch (SimulatedSqlException denied)
+        {
+            foreach (var error in denied.Errors)
+            {
+                if (error.LineNumber == 0)
+                    error.LineNumber = queryLine;
+            }
+            throw;
+        }
 
         // A forward-only read-only cursor naming no sensitivity is a
         // FAST_FORWARD one, which sys.dm_exec_cursors reports it as (probed
