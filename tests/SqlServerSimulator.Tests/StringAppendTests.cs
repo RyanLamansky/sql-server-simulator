@@ -5,7 +5,7 @@ namespace SqlServerSimulator;
 
 /// <summary>
 /// A <c>varchar(max)</c> or <c>nvarchar(max)</c> variable built up a piece at
-/// a time — <c>@v + …</c>, <c>@v += …</c>, the list idiom
+/// a time — <c>@v + …</c>, <c>@v += …</c>, <c>CONCAT(@v, …)</c>, the list idiom
 /// <c>COALESCE(@v + ',', '') + …</c> — appends to its text in place, and every
 /// answer is the ordinary assignment's, a NULL, a read of the variable mid-way
 /// and a number among the parts included (probed 2026-10-25 against SQL
@@ -27,6 +27,11 @@ public sealed class StringAppendTests
     [DataRow("declare @v varchar(max) = 'a'; set @v = @v + char(13) + char(10) + quotename('t') + space(1) + replicate('z', 2); select @v", "a\r\n[t] zz")]
     [DataRow("declare @v varchar(max) = 'ab   '; set @v += 'c   '; select concat(len(@v), '|', datalength(@v), '|', @v, '|')", "6|9|ab   c   |")]
     [DataRow("declare @v varchar(max) = ''; select @v = @v + c from (values (1, cast('ab' as char(4))), (2, cast('c' as char(2)))) t(id, c) order by id; select @v + '|'", "ab  c   |")]
+    [DataRow("declare @v varchar(max) = 'a'; select @v = concat(@v, ',', s) from (values (1, 'b'), (2, null), (3, 'c')) t(id, s) order by id; select @v", "a,b,,c")]
+    [DataRow("declare @v varchar(max) = 'x'; set @v = concat(@v, 1, 2.5, null, cast('2026-10-25' as date)); select @v", "x12.52026-10-25")]
+    [DataRow("declare @v varchar(max); select @v = concat(@v, s) from (values (1, 'a'), (2, 'b'), (3, 'c')) t(id, s) order by id; select @v", "abc")]
+    [DataRow("declare @v varchar(max) = 'o'; set @v = concat(@v, N'é', N'ő'); select @v", "oéo")]
+    [DataRow("declare @v nvarchar(max) = N'z'; set @v = concat(@v, 'a', N'ő'); select @v", "zaő")]
     public void Append_AnswersAsTheAssignmentDoes(string sql, string expected) =>
         AreEqual(expected, ExecuteScalar(sql));
 
@@ -39,6 +44,7 @@ public sealed class StringAppendTests
     [DataRow("declare @v varchar(max) = ''; select @v = @v + cast(value as varchar(10)) from generate_series(1, 100000) order by value; select len(@v)", 488895L)]
     [DataRow("declare @v varchar(max); select @v = coalesce(@v + ',', '') + cast(value as varchar(10)) from generate_series(1, 100000) order by value; select len(@v)", 588894L)]
     [DataRow("declare @v nvarchar(max) = N'', @i int = 0; while @i < 100000 begin set @v += N'abcdefghij'; set @i += 1; end; select len(@v)", 1000000L)]
+    [DataRow("declare @v varchar(max) = ''; select @v = concat(@v, value, ',') from generate_series(1, 100000) order by value; select len(@v)", 588895L)]
     public void ManyAppends_RunInLinearTime(string sql, long expected) =>
         AreEqual(expected, ExecuteScalar(sql));
 }

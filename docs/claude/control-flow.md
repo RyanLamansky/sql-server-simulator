@@ -11,7 +11,7 @@ Variable references resolve at runtime via a captured `VariableSlot` — require
 Assignment coercion routes through `Cast.ApplyCoercion` so the slot's declared type is honored: `SET @v(varchar(3)) = 'hello'` truncates to `'hel'`; `SET @v(int) = 'abc'` raises Msg 245.
 
 **A string variable grows in place.**
-An assignment of a `varchar(max)` / `nvarchar(max)` variable followed by more text — `@v + a`, `@v += a`, `COALESCE(@v + ',', '') + a` — appends to the variable's text without copying it (`StringAppend`), where real copies the whole string at each step, more cheaply than a copy costs here: over 32,000 rows `SELECT @v = @v + ',' + s` takes 86 ms on real, 0.9 s here copying the string and 14 ms appending to it (2026-10-25, Release).
+An assignment of a `varchar(max)` / `nvarchar(max)` variable followed by more text — `@v + a`, `@v += a`, `CONCAT(@v, a)`, `COALESCE(@v + ',', '') + a` — appends to the variable's text without copying it (`StringAppend`), where real copies the whole string at each step, more cheaply than a copy costs here: over 32,000 rows `SELECT @v = @v + ',' + s` takes 86 ms on real, 0.9 s here copying the string and 14 ms appending to it (2026-10-25, Release).
 The text joins on when the variable is read, in the one copy a read costs, so a loop reading the variable at each step stays quadratic, as real's is.
 
 **SELECT-assign quirks**:

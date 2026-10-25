@@ -123,34 +123,10 @@ internal sealed class StringConcat : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        // Resolve result type from runtime argument types: any national-string
-        // input promotes to nvarchar, and any MAX-typed input widens the result
-        // to MAX so a concatenation larger than the bounded wire prefix streams
-        // as PLP. Computed inline (not from a GetSqlType cache) because Run is
-        // reachable when GetSqlType wasn't called — e.g. when this expression is
-        // nested inside a function whose own GetSqlType doesn't cascade into
-        // operand types.
         var values = new SqlValue[this.arguments.Length];
-        var anyNational = false;
-        var anyMax = false;
-        var anyUnspecified = false;
-        var width = 0;
-        var separatorWidth = 0;
-        var collation = new CollationAccumulator();
         for (var i = 0; i < this.arguments.Length; i++)
-        {
             values[i] = this.arguments[i].Run(runtime);
-            anyNational |= SqlType.IsNationalStringCategory(values[i].Type);
-            anyMax |= IsMaxForm(values[i].Type);
-            collation.Fold(values[i].Type, this.kind);
-            var argumentWidth = IsBareNullLiteral(this.arguments[i]) ? 0 : ArgumentWidth(values[i].Type);
-            anyUnspecified |= argumentWidth == UnspecifiedWidth;
-            if (this.kind == StringConcatKind.ConcatWs && i == 0)
-                separatorWidth = Math.Max(0, argumentWidth);
-            else
-                width += Math.Max(0, argumentWidth);
-        }
-        var resultType = ResolveResultType(anyNational, anyMax, anyUnspecified, width + SeparatorTotal(separatorWidth), runtime.Batch, collation);
+        var resultType = this.ResultTypeOf(values, runtime.Batch);
 
         if (this.kind == StringConcatKind.Concat)
         {
@@ -183,6 +159,52 @@ internal sealed class StringConcat : Expression
     }
 
     /// <summary>
+    /// The result type for arguments of <paramref name="values"/>' types: any
+    /// national-string input promotes to nvarchar, and any MAX-typed input
+    /// widens the result to MAX so a concatenation larger than the bounded wire
+    /// prefix streams as PLP. Read off the runtime types rather than a
+    /// GetSqlType cache because Run is reachable when GetSqlType wasn't called
+    /// — e.g. when this expression is nested inside a function whose own
+    /// GetSqlType doesn't cascade into operand types. Only each value's type
+    /// counts, so a NULL of a variable's type stands for its value
+    /// (<see cref="StringAppend"/>).
+    /// </summary>
+    internal SqlType ResultTypeOf(SqlValue[] values, BatchContext batch)
+    {
+        var anyNational = false;
+        var anyMax = false;
+        var anyUnspecified = false;
+        var width = 0;
+        var separatorWidth = 0;
+        var collation = new CollationAccumulator();
+        for (var i = 0; i < this.arguments.Length; i++)
+        {
+            anyNational |= SqlType.IsNationalStringCategory(values[i].Type);
+            anyMax |= IsMaxForm(values[i].Type);
+            collation.Fold(values[i].Type, this.kind);
+            var argumentWidth = IsBareNullLiteral(this.arguments[i]) ? 0 : ArgumentWidth(values[i].Type);
+            anyUnspecified |= argumentWidth == UnspecifiedWidth;
+            if (this.kind == StringConcatKind.ConcatWs && i == 0)
+                separatorWidth = Math.Max(0, argumentWidth);
+            else
+                width += Math.Max(0, argumentWidth);
+        }
+        return ResolveResultType(anyNational, anyMax, anyUnspecified, width + SeparatorTotal(separatorWidth), batch, collation);
+    }
+
+    /// <summary>
+    /// The arguments past the first when this is a <c>CONCAT</c> whose first
+    /// argument reads the variable named <paramref name="variableName"/> — what
+    /// assigning its value to that variable appends (<see cref="StringAppend"/>)
+    /// — or null.
+    /// </summary>
+    internal Expression[]? ArgumentsAfterVariable(string variableName) =>
+        this.kind == StringConcatKind.Concat && this.arguments[0] is VariableReference reference
+            && BatchContext.VariableNameComparer.Equals(reference.VariableName, variableName)
+            ? this.arguments[1..]
+            : null;
+
+    /// <summary>
     /// Coerces a non-NULL <see cref="SqlValue"/> to the result string type and
     /// returns the underlying string. String-category sources copy through;
     /// other categories pass through <see cref="SqlValue.CoerceTo"/>, which
@@ -193,7 +215,7 @@ internal sealed class StringConcat : Expression
     /// <c>CONCAT('ßé', s)</c> over a Greek <c>s</c> reads <c>ίι</c> (probed
     /// 2026-10-25 against SQL Server 2025).
     /// </summary>
-    private static string StringifyForConcat(SqlValue value, SqlType resultType) =>
+    internal static string StringifyForConcat(SqlValue value, SqlType resultType) =>
         !SqlType.IsStringCategory(value.Type) ? value.CoerceTo(resultType).AsString
         : value.Type is VarcharSqlType or CharSqlType && resultType is VarcharSqlType
             && resultType.Collation is { } result && value.Type.Collation is { } own && own.StorageEncoding != result.StorageEncoding
