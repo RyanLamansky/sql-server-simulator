@@ -177,9 +177,20 @@ public sealed class LoginDdlTests
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create login [carol ] with password = 'Zz!98765'; alter login [CAROL] disable");
         AreEqual(12, sim.ExecuteScalar("select datalength(name) from sys.server_principals where name = 'carol'"));
-        AreEqual(sim.ExecuteScalar("select suser_id('carol')"), sim.ExecuteScalar("select suser_id('Carol  ')"));
+        var id = sim.ExecuteScalar("select principal_id from sys.server_principals where name = 'carol'");
+        AreEqual(id, sim.ExecuteScalar("select suser_id('carol')"));
+        AreEqual(id, sim.ExecuteScalar("select suser_id('Carol  ')"));
         IsTrue((bool)sim.ExecuteScalar("select is_disabled from sys.server_principals where name = 'carol'")!);
     }
+
+    // A function naming a server principal finds it without its trailing
+    // spaces too (probed 2026-10-25 against SQL Server 2025).
+    [TestMethod]
+    [DataRow("suser_id('SA  ')")]
+    [DataRow("is_srvrolemember('public ')")]
+    [DataRow("has_perms_by_name('sa ', 'LOGIN', 'ALTER')")]
+    public void ServerPrincipalName_ResolvesWithoutItsTrailingSpaces(string call)
+        => AreEqual(1, new Simulation().ExecuteScalar($"select {call}"));
 
     // === The built-in server principals ===
     //

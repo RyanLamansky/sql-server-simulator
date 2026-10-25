@@ -50,7 +50,7 @@ internal sealed class PrincipalIdLookup : Expression
             var loginName = runtime.Batch.Connection.Security.Effective.LoginName;
             foreach (var row in BuiltInResources.EnumerateSysServerPrincipals(runtime.Batch, runtime.Batch.CurrentDatabase))
             {
-                if (BuiltInToken.Comparer.Equals(row[0].AsString, loginName))
+                if (ServerNameComparer.Instance.Equals(row[0].AsString, loginName))
                     return SqlValue.FromInt32(row[1].AsInt32);
             }
             return SqlValue.FromInt32(1);
@@ -63,11 +63,11 @@ internal sealed class PrincipalIdLookup : Expression
         {
             // Any server principal sys.server_principals lists — a login, a
             // fixed or user-defined server role — by its principal_id
-            // (probed 2026-09-25: sa 1, public 2, sysadmin 3, bulkadmin 10);
-            // unknown → NULL.
+            // (probed 2026-09-25: sa 1, public 2, sysadmin 3, bulkadmin 10),
+            // its name matched as server principals' are; unknown → NULL.
             foreach (var row in BuiltInResources.EnumerateSysServerPrincipals(runtime.Batch, runtime.Batch.CurrentDatabase))
             {
-                if (BuiltInToken.Comparer.Equals(row[0].AsString, name))
+                if (ServerNameComparer.Instance.Equals(row[0].AsString, name))
                     return SqlValue.FromInt32(row[1].AsInt32);
             }
             return SqlValue.Null(SqlType.Int32);
@@ -614,7 +614,7 @@ internal sealed class HasPermsByName : Expression
         if (blanket is not { } serverWide || securableVal.IsNull)
             return SqlValue.Null(SqlType.Int32);
         var loginName = securableVal.CoerceTo(SqlType.NVarchar).AsString;
-        if (!(BuiltInToken.Comparer.Equals(loginName, "sa") || simulation.Logins.ContainsKey(loginName))
+        if (!(ServerNameComparer.Instance.Equals(loginName, "sa") || simulation.Logins.ContainsKey(loginName))
             || !simulation.TryResolveServerPrincipalId(loginName, out var targetId))
         {
             return SqlValue.FromInt32(0);
@@ -855,11 +855,11 @@ internal sealed class RoleMemberCheck : Expression
         // against SQL Server 2025).
         if (this.serverScope && this.principalArg is null && connection.Security.Effective.IsDatabaseScoped)
         {
-            return connection.Simulation.TryResolveServerRole(roleName, out _, out _) || BuiltInToken.Comparer.Equals(roleName, "public")
+            return connection.Simulation.TryResolveServerRole(roleName, out _, out _) || ServerNameComparer.Instance.Equals(roleName, "public")
                 ? SqlValue.FromInt32(0)
                 : SqlValue.Null(SqlType.Int32);
         }
-        if (BuiltInToken.Comparer.Equals(roleName, "public"))
+        if (ServerNameComparer.Instance.Equals(roleName, "public"))
             return SqlValue.FromInt32(1);
         if (this.serverScope)
         {
