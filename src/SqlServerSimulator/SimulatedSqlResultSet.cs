@@ -152,6 +152,29 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
     }
 
     /// <summary>
+    /// Runs the row sequence to its end without keeping it, reporting the row
+    /// count: a variable-assigning <c>SELECT</c>'s rows are its assignments
+    /// run, and keeping them would keep every value its variables held on the
+    /// way, which for <c>SELECT @v = @v + s FROM t</c> is every prefix of the
+    /// string it builds.
+    /// </summary>
+    public int DrainRows()
+    {
+        var count = 0;
+        if (this.rowValues is { } values)
+        {
+            foreach (var _ in values)
+                count++;
+        }
+        else
+        {
+            foreach (var _ in this.rowBytes!)
+                count++;
+        }
+        return count;
+    }
+
+    /// <summary>
     /// The innermost <c>WITH RESULT SETS</c> sink the statement producing
     /// these rows sent them through, converting them as it produced them, so
     /// the <c>EXECUTE</c> of that sink and of every sink enclosing it passes

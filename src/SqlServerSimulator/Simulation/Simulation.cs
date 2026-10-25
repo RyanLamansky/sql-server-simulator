@@ -4403,7 +4403,7 @@ public sealed partial class Simulation
             // one that fits is produced whole, as it would be anyway.
             if (StreamsRows(batch, selection))
                 stream = executed.BeginStreaming(batch.CurrentStatement, batch.Connection);
-            rowCount = stream is null ? executed.MaterializeRows() : 0;
+            rowCount = stream is not null ? 0 : selection.IsAssignmentOnly ? executed.DrainRows() : executed.MaterializeRows();
             if (selection.CountsForClauseSourceRows)
             {
                 if (stream is null)
