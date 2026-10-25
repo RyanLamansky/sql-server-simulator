@@ -161,6 +161,26 @@ public sealed class LoginDdlTests
         _ = sim.AssertSqlError("create login APP with password = 'Zz!98765'", 15025);
     }
 
+    // A login name matches without trailing spaces, while the login keeps the
+    // name as written: real refuses a second login named as the first plus a
+    // space, and resolves any spelling of it, case and trailing spaces aside
+    // (probed 2026-10-25 against SQL Server 2025).
+    [TestMethod]
+    public void CreateLogin_NamedAsAnotherPlusATrailingSpace_Raises15025()
+        => new Simulation().AssertSqlError(
+            "create login bob with password = 'Zz!98765'; create login [bob ] with password = 'Zz!98766'",
+            15025, "The server principal 'bob ' already exists.");
+
+    [TestMethod]
+    public void Login_NamedWithATrailingSpace_KeepsItAndResolvesWithout()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create login [carol ] with password = 'Zz!98765'; alter login [CAROL] disable");
+        AreEqual(12, sim.ExecuteScalar("select datalength(name) from sys.server_principals where name = 'carol'"));
+        AreEqual(sim.ExecuteScalar("select suser_id('carol')"), sim.ExecuteScalar("select suser_id('Carol  ')"));
+        IsTrue((bool)sim.ExecuteScalar("select is_disabled from sys.server_principals where name = 'carol'")!);
+    }
+
     // === The built-in server principals ===
     //
     // `sa` is a fixed login the catalog views synthesize rather than a registry

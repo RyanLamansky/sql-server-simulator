@@ -53,16 +53,16 @@ partial class Simulation
     /// <summary><c>principal_id</c> of the <c>serveradmin</c> fixed server role — with <c>sysadmin</c>, the membership the message procedures require.</summary>
     internal const int ServerAdminRoleId = 5;
 
-    /// <summary>Fixed-server-role name → id, for role-name resolution. Keyed by <see cref="BuiltInToken.Comparer"/>.</summary>
+    /// <summary>Fixed-server-role name → id, for role-name resolution. Keyed by <see cref="ServerNameComparer"/>.</summary>
     private static readonly FrozenDictionary<string, int> FixedServerRoleIds =
-        FixedServerRoles.ToFrozenDictionary(r => r.Name, r => r.Id, BuiltInToken.Comparer);
+        FixedServerRoles.ToFrozenDictionary(r => r.Name, r => r.Id, ServerNameComparer.Instance);
 
     /// <summary>
     /// Custom server roles created via <c>CREATE SERVER ROLE</c>, keyed by name.
     /// Projected into <c>sys.server_principals</c> (<c>type R</c>,
     /// <c>is_fixed_role 0</c>). Case-insensitive keys.
     /// </summary>
-    internal readonly ConcurrentDictionary<string, ServerRole> ServerRoles = new(concurrencyLevel: 1, capacity: 0, BuiltInToken.Comparer);
+    internal readonly ConcurrentDictionary<string, ServerRole> ServerRoles = new(concurrencyLevel: 1, capacity: 0, ServerNameComparer.Instance);
 
     /// <summary>
     /// Server-role membership records: each entry is a (role_principal_id,
@@ -151,12 +151,12 @@ partial class Simulation
     /// <summary>Resolves a server-principal name (<c>sa</c> / <c>public</c> / a fixed or custom role / a login) to its <c>principal_id</c>.</summary>
     internal bool TryResolveServerPrincipalId(string name, out int principalId)
     {
-        if (BuiltInToken.Comparer.Equals(name, "sa"))
+        if (ServerNameComparer.Instance.Equals(name, "sa"))
         {
             principalId = 1;
             return true;
         }
-        if (BuiltInToken.Comparer.Equals(name, "public"))
+        if (ServerNameComparer.Instance.Equals(name, "public"))
         {
             principalId = 2;
             return true;

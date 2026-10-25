@@ -814,7 +814,7 @@ public sealed partial class Simulation
     /// (immutable) entry wholesale so concurrent endpoint reads see a
     /// consistent hash.
     /// </summary>
-    internal readonly ConcurrentDictionary<string, ServerLogin> Logins = new(concurrencyLevel: 1, capacity: 16, BuiltInToken.Comparer);
+    internal readonly ConcurrentDictionary<string, ServerLogin> Logins = new(concurrencyLevel: 1, capacity: 16, ServerNameComparer.Instance);
 
     /// <summary>
     /// Per-Simulation monotonic counter for user server-principal ids (created
