@@ -66,12 +66,13 @@ Projects live under `src/` (`SqlServerSimulator`, `SqlServerSimulator.EFCore`, `
 `tools/` holds local tooling, in the sln under a `tools` folder so CI compiles it but outside the analyzer and test gates — [`tools/sqllogictest/`](tools/sqllogictest/README.md) is the differential sweep whose in-process replay (`./tools/sqllogictest/replay.sh`, about a minute) catches regressions across millions of generated queries the committed suites never write; run it before committing a change to parsing, binding or expression evaluation.
 Shared build settings live in the root `Directory.Build.props` (TargetFramework, nullable, warnings-as-errors, `EnforceCodeStyleInBuild=true` — so `dotnet build` runs the IDE / SSS / MSTEST analyzers and fails on violations); package versions are centralized in `Directory.Packages.props` (NuGet CPM), with deliberate per-project divergences as visible `VersionOverride`s (Tests.Smo pins SqlClient 5.1.x, SMO's supported line, while Tests.SqlClient tests the current 7.x — the reason those two projects stay separate).
 Csprojs carry only per-project content.
-No separate `dotnet format` pass — it catches nothing build doesn't.
+No separate `dotnet format` pass — it catches nothing build doesn't but line endings, which git settles.
 CI matrix: Debug + Release.
 `obj/` permission errors mean building outside the dev container; `rm -rf obj/ bin/` clears them.
 Building while another long-lived `dotnet` process runs can fail with tens of thousands of bogus `CS0246` "type or namespace not found" errors — MSBuild node reuse racing it, not a code or restore problem, and `rm -rf obj/ bin/` does not clear it.
 The tell is that identical back-to-back invocations alternate between failing and clean; build with `MSBUILDDISABLENODEREUSE=1` (add `-m:1` if it persists), or don't build concurrently.
-Line endings are LF everywhere: `.gitattributes` `eol=lf` forces an LF working tree on Windows and Linux alike, and `.editorconfig` `end_of_line = lf` makes IDE0055 enforce it — so a CRLF checkout fails the formatter.
+Line endings are LF everywhere, and git is what holds them there: `.gitattributes` `* text=auto eol=lf` stores every text file with LF and checks it out with LF on Windows and Linux alike.
+The build doesn't check them — IDE0055 passes a source file an editor saved with CRLF (seen 2026-10-25 on the .NET 10 SDK) — so such a file builds, and its commit stores it with LF.
 
 MSBuild's share of a round trip is a modest fixed cost and the tests themselves are the bulk of it — `SqlServerSimulator.Tests` most of all — so `--filter` saves real time on the csproj path too.
 That balance depends on generated directories staying out of MSBuild's default item globs (`DefaultItemExcludes` in the root `Directory.Build.props`): the globs walk a project folder on every evaluation, so a grown `TestResults` tree becomes the dominant cost of even a no-op build.
