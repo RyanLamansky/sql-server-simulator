@@ -70,6 +70,18 @@ public class CompatibilityLevelTests
         Assert.AreEqual("Valid values of the database compatibility level are 100, 110, 120, 130, 140, 150, 160 or 170.", ex.Message);
     }
 
+    /// <summary>
+    /// The level is an <c>int</c> literal: a fraction, a whole number past
+    /// <c>int</c> or a float is Msg 102 near it (probed 2026-10-25 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("150.5")]
+    [DataRow("99999999999")]
+    [DataRow("1e2")]
+    public void ANonIntegerCompatibilityLevel_IsASyntaxError(string level)
+        => new Simulation().AssertSqlError($"alter database current set compatibility_level = {level}", 102, $"Incorrect syntax near '{level}'.");
+
     [TestMethod]
     [DataRow("alter database [simulated] set compatibility_level = 160")]
     [DataRow("alter database current set compatibility_level = 160")]

@@ -389,7 +389,9 @@ partial class Simulation
         if (context.GetNextRequired() is not Operator { Character: '=' })
             return false;
 
-        if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } numericValue })
+        // An int literal; a decimal or float one is Msg 102 near it (probed
+        // 2026-10-25 against SQL Server 2025).
+        if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } numericValue } || numericValue.Type != SqlType.Int32)
             return false;
 
         var requested = numericValue.AsInt32;
