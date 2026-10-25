@@ -9,6 +9,9 @@ User schemas allocate ids starting at 5 from `Database.AllocateSchemaId()` (a co
 Probed against SQL Server 2025.
 
 - **Duplicate `CREATE SCHEMA`** (case-insensitive) → **Msg 2714** (`"There is already an object named '<n>' in the database."`), which unlike a table's ends only its statement.
+- **A new object's name is checked against the schema's whole shared namespace**, its objects' names and every table's constraint names alike (`Schema.HasNameInSharedNamespace`, Msg 2714).
+  The objects are looked up in the schema's dictionaries while the database compares under the collation those were keyed in, and walked only once an `ALTER DATABASE … COLLATE` has left them keyed under another ([`collations.md`](collations.md#server-level-seed-simulationservercollationname)); the constraints are walked table by table.
+  Measured 2026-10-25 (Release, one batch per fresh simulation): 8,000 `CREATE TABLE`s in one batch took 4.5 s while the objects were walked too, and take 2.0 s, two thirds of it the constraint walk.
 - **Reserved schema names** (`dbo`, `sys`, `INFORMATION_SCHEMA`) → **Msg 2760** (`"The specified schema name \"<n>\" either does not exist or you do not have permission to use it."`).
   Wording is quirky for a CREATE (says "does not exist"), but probe-confirmed verbatim — real SQL Server resolves the principal first and these schemas tie to system principals.
 - **Three-part `db.schema.t`** routes the db segment through `Simulation.Databases` (case-insensitive).

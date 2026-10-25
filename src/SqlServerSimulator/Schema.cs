@@ -55,6 +55,7 @@ internal sealed class Schema
         this.Database = database;
         this.Name = name;
         this.SchemaId = schemaId;
+        this.keyCollation = database.Collation;
         var collation = database.Collation.NameKeys;
         // Read without a lock and written by DDL alone, so one lock stripe
         // and no preallocated table serve them: the default striping took a
@@ -77,6 +78,13 @@ internal sealed class Schema
         this.DefinitionLocks = new(concurrencyLevel: 1, capacity: 0, collation);
         this.TypeDefinitionLocks = new(concurrencyLevel: 1, capacity: 0, collation);
     }
+
+    /// <summary>
+    /// The collation the object dictionaries key their names under: the
+    /// database's when the schema was built, which an <c>ALTER DATABASE …
+    /// COLLATE</c> leaves them keeping.
+    /// </summary>
+    private readonly Collation keyCollation;
 
     public readonly ConcurrentDictionary<string, HeapTable> HeapTables;
 
@@ -350,6 +358,28 @@ internal sealed class Schema
         string leaf, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out SchemaObject? found)
     {
         var collation = this.Database.Collation;
+        // Each dictionary keys its objects by name under the collation they
+        // were registered in, which answers the walk's question without the
+        // walk while the database still compares under it: a CREATE checking
+        // its name walked every object, which made creating a schema's
+        // objects quadratic in their number.
+        if (ReferenceEquals(collation, this.keyCollation))
+        {
+            found = this.HeapTables.TryGetValue(leaf, out var table) ? table
+                : this.Views.TryGetValue(leaf, out var view) ? view
+                : this.Functions.TryGetValue(leaf, out var function) ? function
+                : this.Procedures.TryGetValue(leaf, out var procedure) ? procedure
+                : this.Sequences.TryGetValue(leaf, out var sequence) ? sequence
+                : this.Triggers.TryGetValue(leaf, out var trigger) ? trigger
+                : this.Synonyms.TryGetValue(leaf, out var synonym) ? synonym
+                : this.Defaults.TryGetValue(leaf, out var @default) ? @default
+                : this.Rules.TryGetValue(leaf, out var rule) ? rule
+                : this.SecurityPolicies.TryGetValue(leaf, out var policy) ? policy
+                : this.Queues.TryGetValue(leaf, out var queue) ? queue
+                : null;
+            return found is not null;
+        }
+
         foreach (var obj in this.SchemaObjects())
         {
             if (collation.Equals(obj.Name, leaf))
