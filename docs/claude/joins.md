@@ -101,7 +101,11 @@ See [`control-flow.md`](control-flow.md#waitfor-delay) for how the interrupted s
 
 ### Equi-join fast path
 
-`TryPlanEquiJoin` splits an INNER / LEFT / RIGHT / FULL ON predicate into `left.col = right.col` conjuncts (bare-column `Reference`s only, each classified by a single `FindSourceColumn` lookup) plus a residual of everything else.
+`TryPlanEquiJoin` splits an INNER / LEFT / RIGHT / FULL ON predicate into equality keys plus a residual of everything else.
+A key is a `left.col = right.col` conjunct (bare-column `Reference`s, each classified by a single `FindSourceColumn` lookup), or a column of the level's source equated with an expression computed over the sources left of it (`TryExtractComputedEquiKey`: `b.id = a.id + 1`, `b.d = DATEADD(day, 1, a.d)`) through node kinds whose value follows from their operands alone.
+Only the bare pairs steer the join order; a computed key is hashed once per left row, or read as the per-outer seek's value, where the nested loop evaluated it for every pair.
+Measured 2026-10-25 (Release, the faster of two runs): 4,000 rows joined to themselves on `b.id = a.id + 1` took 2.1 s and take 17 ms, and an `UPDATE … FROM` over that join 2.1 s and 34 ms.
+An empty build computes no probe key, so a key that would raise for some left row raises nothing, as under the nested loop and under real's hash join, which doesn't read its probe side past an empty build (probed 2026-10-25 against SQL Server 2025: `a LEFT JOIN e ON e.x = 10 / a.y` over an empty `e` and a zero `y` returns every `a` row).
 With ≥1 equi-key, RIGHT / FULL route straight to `HashEquiJoin` (their unmatched-right tracking needs the inner materialized), while **INNER / LEFT go through `EquiJoinSeekOrHash`**, which adaptively chooses between a per-outer index seek on the inner and the hash build:
 
 - It buffers the outer up to `SeekOuterBufferCap` (4096).

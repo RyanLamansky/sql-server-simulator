@@ -795,4 +795,30 @@ public sealed class JoinTests
             while @i <= 200 begin insert p values (@i); insert c values (@i, @i); set @i += 1; end;
             select count(*) from p join c on c.pid = p.id
             """));
+
+    /// <summary>
+    /// A key computed over the left sources' columns, equated with a column of
+    /// the joined table, matches as the equality does under every join kind,
+    /// promoting its type and folding case as the comparison would, and an
+    /// empty table joined on one that would raise raises nothing (probed
+    /// 2026-10-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select string_agg(concat(a.id, '-', b.id), ',') within group (order by a.id, b.id) from a join b on b.id = a.id + 1", "1-2,2-3,3-4")]
+    [DataRow("select string_agg(concat(a.id, '-', isnull(cast(b.id as varchar), 'n')), ',') within group (order by a.id) from a left join b on b.id = a.id + 1", "1-2,2-3,3-4")]
+    [DataRow("select string_agg(concat(isnull(cast(a.id as varchar), 'n'), '-', b.id), ',') within group (order by b.id) from a right join b on b.id = a.id + 1 where b.id is not null", "1-2,2-3,3-4")]
+    [DataRow("select count(*) from a full join b on b.id = a.id + 1", 4)]
+    [DataRow("select string_agg(concat(a.id, '-', b.id), ',') within group (order by a.id) from a join b on b.d = dateadd(day, 1, a.d)", "1-2,2-3")]
+    [DataRow("select string_agg(concat(a.id, '-', b.id), ',') within group (order by a.id) from a join b on b.code = upper(a.code)", "1-2,2-3")]
+    [DataRow("select count(*) from a join e on e.x = 10 / a.y", 0)]
+    [DataRow("select count(*) from a left join e on e.x = 10 / a.y", 3)]
+    public void ComputedJoinKey_MatchesAsTheEqualityDoes(string query, object expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"""
+            create table a (id int, d date, code varchar(10), y int);
+            create table b (id int, d datetime, code varchar(10), x int);
+            create table e (x int);
+            insert a values (1, '2020-01-01', 'ab', 1), (2, '2020-01-02', 'CD', 0), (3, null, null, 2);
+            insert b values (2, '2020-01-02', 'AB', 1), (3, '2020-01-03', 'cd', 2), (4, '2020-01-04', 'EF', 3), (null, null, null, null);
+            {query}
+            """));
 }

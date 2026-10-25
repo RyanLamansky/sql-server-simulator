@@ -340,7 +340,7 @@ internal sealed partial class Selection
         // operators for non-equi ON predicates, lateral / derived-table right
         // sides, and CROSS / APPLY (none of which can be hashed).
         var equiPlan = join.Kind is JoinKind.Inner or JoinKind.Left or JoinKind.Right or JoinKind.Full
-            ? TryPlanEquiJoin(join, sources, level)
+            ? TryPlanEquiJoin(join, sources, level, batch)
             : null;
         // INNER / LEFT equi-joins decide hash-vs-seek dynamically inside
         // EquiJoinSeekOrHash (which logs its own strategy); only the other
@@ -548,16 +548,17 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// One <c>left.col = right.col</c> equality extracted from an ON
-    /// predicate. <see cref="Left"/> resolves to a source left of the join
-    /// level, <see cref="Right"/> to the level's own source; both key values
+    /// One equality extracted from an ON predicate. <see cref="Left"/> is a
+    /// column of a source left of the join level, or an expression computed
+    /// over such columns (<see cref="TryExtractComputedEquiKey"/>), and
+    /// <see cref="Right"/> a column of the level's own source; both key values
     /// are coerced to <see cref="Common"/> (the operator's promotion target)
     /// before hashing so bucket equality matches the <c>=</c> operator's
     /// promote-then-compare semantics exactly.
     /// </summary>
-    private sealed class EquiKey(Reference left, Reference right, SqlType common, int rightOrdinal)
+    private sealed class EquiKey(Expression left, Reference right, SqlType common, int rightOrdinal)
     {
-        public readonly Reference Left = left;
+        public readonly Expression Left = left;
         public readonly Reference Right = right;
         public readonly SqlType Common = common;
 
@@ -589,7 +590,7 @@ internal sealed partial class Selection
     /// collation conflict, cross-category), so those cases keep the exact
     /// per-row error behavior of the streaming operators.
     /// </summary>
-    private static EquiJoinPlan? TryPlanEquiJoin(JoinSpec join, FromSource[] sources, int level)
+    private static EquiJoinPlan? TryPlanEquiJoin(JoinSpec join, FromSource[] sources, int level, BatchContext batch)
     {
         if (join.OnPredicate is null || sources[level].LateralPlan is not null)
         {
@@ -603,7 +604,7 @@ internal sealed partial class Selection
         var residual = new List<BooleanExpression>();
         foreach (var conjunct in conjuncts)
         {
-            if (TryExtractEquiKey(conjunct, sources, level, out var key))
+            if (TryExtractEquiKey(conjunct, sources, level, out var key) || TryExtractComputedEquiKey(conjunct, sources, level, batch, out key))
                 keys.Add(key);
             else
                 residual.Add(conjunct);
@@ -642,6 +643,76 @@ internal sealed partial class Selection
 
         key = new EquiKey(leftRef, rightRef, common, FindSourceColumn(sources, rightRef.ReferencedName).ColumnIndex);
         return true;
+    }
+
+    /// <summary>
+    /// Recognizes a conjunct equating a column of the level's source with an
+    /// expression computed over the sources left of it — <c>b.id = a.id + 1</c>,
+    /// <c>b.day = DATEADD(day, 1, a.day)</c> — which the hash probes once per
+    /// left row and the per-outer seek reads as its value, where the nested
+    /// loop evaluated it for every pair. Kept apart from
+    /// <see cref="TryExtractEquiKey"/>, whose bare-column pairs alone steer
+    /// the join order.
+    /// </summary>
+    private static bool TryExtractComputedEquiKey(BooleanExpression conjunct, FromSource[] sources, int level, BatchContext batch, out EquiKey key)
+    {
+        key = null!;
+        if (!conjunct.TryGetEqualityOperands(out var a, out var b))
+            return false;
+        var (rightRef, computed) = a is Reference refA && SourceSide(refA, sources, level) > 0 ? (refA, b)
+            : b is Reference refB && SourceSide(refB, sources, level) > 0 ? (refB, a)
+            : (null, a);
+        if (rightRef is null || !ComputesOverLeftSources(computed, sources, level))
+            return false;
+
+        SqlType computedType;
+        try
+        {
+            computedType = computed.GetSqlType(batch, name => ResolveColumnTypeAcrossSources(sources, name, null));
+        }
+        catch (Exception e) when (e is SimulatedSqlException or NotSupportedException)
+        {
+            return false;
+        }
+        if (!TryPromoteComparableKeyTypes(computedType, ResolveColumnTypeAcrossSources(sources, rightRef.ReferencedName, null), out var common))
+            return false;
+
+        key = new EquiKey(computed, rightRef, common, FindSourceColumn(sources, rightRef.ReferencedName).ColumnIndex);
+        return true;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="expression"/> reads a column of the sources
+    /// left of <paramref name="level"/> and nothing else, through node kinds
+    /// whose value follows from their operands alone: literals, arithmetic,
+    /// the conversions and the common date and string functions. A subquery,
+    /// a variable, a function reading session or clock state, or any other
+    /// node declines, leaving the conjunct to the nested loop.
+    /// </summary>
+    private static bool ComputesOverLeftSources(Expression expression, FromSource[] sources, int level)
+    {
+        var state = (Sources: sources, Level: level, ReadsLeft: false, Qualifies: true);
+        expression.Walk(ref state, static (node, _, ref state) =>
+        {
+            switch (node)
+            {
+                case Reference reference:
+                    var (source, _) = FindSourceColumn(state.Sources, reference.ReferencedName);
+                    if (source < 0 || source >= state.Level)
+                        state.Qualifies = false;
+                    else
+                        state.ReadsLeft = true;
+                    return false;
+                case Value or Parenthesized or Expressions.Negate or Add or Subtract or Multiply or Divide or Modulus or Cast or ConvertExpression
+                    or DateAdd or DatePart or DateDiff.Standard or AbsoluteValue or Expressions.Left or Expressions.Right or Substring
+                    or Upper or Lower or LeftTrim or RightTrim or Trim or Replace or IsNullExpression or Coalesce:
+                    return state.Qualifies;
+                default:
+                    state.Qualifies = false;
+                    return false;
+            }
+        });
+        return state.Qualifies && state.ReadsLeft;
     }
 
     /// <summary>
@@ -1029,13 +1100,17 @@ internal sealed partial class Selection
         // write per emitted row for something nothing looks at.
         var matchedRight = emitUnmatchedRight ? new bool[rightRows.Count] : [];
 
+        // An empty build matches nothing, so no probe key is computed — a
+        // computed key that would raise for some left row stays silent, as
+        // it does under the nested loop and under real's hash join, which
+        // doesn't read its probe side past an empty build.
         foreach (var _ in left)
         {
             batch.ThrowIfCancelled();
             var matchedLeft = false;
-            if (integerBuckets is not null
+            if (rightRows.Count > 0 && (integerBuckets is not null
                 ? TryComputeIntegerKey(plan.Keys[0], plan.Keys[0].Left.Run(runtime), out var probeInteger) && integerBuckets.TryGetValue(probeInteger, out var probeChain)
-                : TryComputeKeyInto(plan.Keys, runtime, rightSide: false, keyScratch, out var probeKey) && buckets!.TryGetValue(probeKey, out probeChain))
+                : TryComputeKeyInto(plan.Keys, runtime, rightSide: false, keyScratch, out var probeKey) && buckets!.TryGetValue(probeKey, out probeChain)))
             {
                 for (var ordinal = probeChain.Head; ordinal != -1; ordinal = next[ordinal])
                 {

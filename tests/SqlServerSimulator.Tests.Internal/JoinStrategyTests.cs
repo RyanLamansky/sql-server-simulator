@@ -82,6 +82,23 @@ public sealed class JoinStrategyTests
         => Contains("Left:HashMatch(keys=1,residual=0)",
             CaptureStrategies("select a.id from a left join b on a.id = b.a_id"));
 
+    // A key computed over the left sources' columns, equated with a column of
+    // the joined table, hashes as a bare pair does.
+    [TestMethod]
+    [DataRow("a.id + 9 = b.id")]
+    [DataRow("b.id = a.id + 9")]
+    [DataRow("b.a_id = abs(a.id)")]
+    public void ComputedKeyOverTheLeftSources_TakesHashPath(string on)
+        => Contains("Inner:HashMatch(keys=1,residual=0)", CaptureStrategies($"select a.id from a join b on {on}"));
+
+    // A key computed over the joined table's own columns, or through a node
+    // the computed key doesn't take, stays a residual of the nested loop.
+    [TestMethod]
+    [DataRow("a.id = b.id - 9")]
+    [DataRow("b.id = a.id + rand()")]
+    public void KeyTheHashCantTake_StaysNestedLoops(string on)
+        => Contains("Inner:NestedLoops", CaptureStrategies($"select a.id from a join b on {on}"));
+
     [TestMethod]
     public void NonEquiJoin_FallsBackToNestedLoops()
         => Contains("Inner:NestedLoops",
