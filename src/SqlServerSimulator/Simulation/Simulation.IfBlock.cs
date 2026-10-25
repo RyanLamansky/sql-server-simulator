@@ -374,6 +374,7 @@ partial class Simulation
         var bindError = BindCondition(cond, batch);
 
         var bodyStart = context.SaveCheckpoint();
+        ParserContext.Checkpoint? bodyEnd = null;
         var wasSkipModeFlag = batch.SkipModeFlag;
         var outerSkipping = batch.IsSkipping || bindError is not null;
 
@@ -432,7 +433,15 @@ partial class Simulation
 
                     if (!condResult)
                     {
-                        // Final pass: advance cursor past body in skip mode.
+                        // Final pass: the cursor goes past the body — to where
+                        // its last run ended, or by walking it in skip mode
+                        // when it never ran. Walking it again at every exit
+                        // made a nest of WHILEs quadratic in its depth.
+                        if (bodyEnd is { } end)
+                        {
+                            context.RestoreCheckpoint(end);
+                            break;
+                        }
                         batch.SkipModeFlag = true;
                         try
                         {
@@ -448,6 +457,7 @@ partial class Simulation
 
                     foreach (var o in DispatchOneStatement(batch, afterUnterminatedStatement: false, atBatchStart: false))
                         yield return o;
+                    bodyEnd = context.SaveCheckpoint();
 
                     // RETURN, GOTO, a batch-ending error and an error a TRY
                     // caught propagate through WHILE (unlike BREAK / CONTINUE
