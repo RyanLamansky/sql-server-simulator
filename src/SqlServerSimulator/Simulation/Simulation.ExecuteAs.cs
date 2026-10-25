@@ -409,19 +409,41 @@ partial class Simulation
         : null;
 
     /// <summary>
-    /// Refuses a module's <c>EXECUTE AS 'user'</c> naming no user of the
-    /// database with Msg 15151, as the module is created (probed 2026-10-02
-    /// against SQL Server 2025).
+    /// Refuses with Msg 15151, as a module is created or altered, an
+    /// <c>EXECUTE AS</c> the session may not give it (probed 2026-10-02 and
+    /// 2026-10-25 against SQL Server 2025): a named user the database doesn't
+    /// hold, and a user other than the session's own — the one named, or for
+    /// <c>OWNER</c> the module's owner, <paramref name="ownerPrincipalId"/> —
+    /// that the session holds no <c>IMPERSONATE</c> on, which is what keeps a
+    /// <c>db_ddladmin</c> from running a module of its own as <c>dbo</c>.
+    /// <c>CALLER</c> and <c>SELF</c> pass, and dbo passes everything.
     /// </summary>
-    internal static void RequireExecuteAsUser(ParserContext context, string? clause)
+    internal static void RequireExecuteAsUser(ParserContext context, string? clause, int ownerPrincipalId)
     {
-        if (clause is null || clause.Equals("CALLER", StringComparison.OrdinalIgnoreCase)
-            || clause.Equals("OWNER", StringComparison.OrdinalIgnoreCase) || clause.Equals("SELF", StringComparison.OrdinalIgnoreCase)
-            || context.CurrentDatabase.Principals.ContainsKey(clause))
-        {
+        if (clause is null || clause.Equals("CALLER", StringComparison.OrdinalIgnoreCase) || clause.Equals("SELF", StringComparison.OrdinalIgnoreCase))
             return;
+        var database = context.CurrentDatabase;
+        int targetId;
+        string targetName;
+        if (clause.Equals("OWNER", StringComparison.OrdinalIgnoreCase))
+        {
+            targetId = ownerPrincipalId;
+            targetName = Ownership.PrincipalName(database, ownerPrincipalId) ?? clause;
         }
-        throw SimulatedSqlException.CannotExecuteAsUser(clause);
+        else if (database.Principals.TryGetValue(clause, out var target))
+        {
+            (targetId, targetName) = (target.PrincipalId, clause);
+        }
+        else
+        {
+            throw SimulatedSqlException.CannotExecuteAsUser(clause);
+        }
+        var security = context.Batch.Connection.Security;
+        if (!security.EffectiveIsDbo && security.Effective.DatabasePrincipalId != targetId
+            && !PermissionChecker.IsGranted(database, security.Effective.DatabasePrincipalId, Permission.Impersonate, PermissionChecker.ClassDatabasePrincipal, targetId, schemaId: 0))
+        {
+            throw SimulatedSqlException.CannotExecuteAsUser(targetName);
+        }
     }
 
     /// <summary>

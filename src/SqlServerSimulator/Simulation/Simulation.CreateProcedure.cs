@@ -185,7 +185,7 @@ partial class Simulation
         // regular BEGIN…END flow.
         var options = ParseModuleOptions(context, ModuleOptionHost.Procedure, procName.Leaf);
         var executeAsClause = options.ExecuteAs;
-        RequireExecuteAsUser(context, executeAsClause);
+        RequireExecuteAsUser(context, executeAsClause, schema.Procedures.GetValueOrDefault(key) is { } altered ? Ownership.EffectiveOwnerId(context.CurrentDatabase, altered) : schema.PrincipalId);
         var nativelyCompiled = options.NativeCompilation;
         if (nativelyCompiled && temporary)
             throw SimulatedSqlException.NativeTemporaryProcedure();

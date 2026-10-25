@@ -140,6 +140,14 @@ partial class Simulation
     }
 
     /// <summary>
+    /// The owner <c>WITH EXECUTE AS OWNER</c> names for the function
+    /// <paramref name="name"/> in <paramref name="schema"/>: the altered
+    /// function's, or for a new one its schema's.
+    /// </summary>
+    private static int ModuleOwnerId(ParserContext context, Schema schema, string name) =>
+        schema.Functions.GetValueOrDefault(name) is { } altered ? Ownership.EffectiveOwnerId(context.CurrentDatabase, altered) : schema.PrincipalId;
+
+    /// <summary>
     /// Runs the shared CREATE / ALTER / CREATE OR ALTER existence rules for a
     /// function tail, narrowing the stored object to <typeparamref name="T"/>
     /// first: a function of any <em>other</em> kind reaches
@@ -353,7 +361,7 @@ partial class Simulation
                 violation.ResolveDiagnostics(line, 0, functionName.Leaf);
             throw SimulatedSqlException.Aggregate([.. returnTableShape.Violations.Select(static violation => violation.Error)]);
         }
-        RequireExecuteAsUser(context, options.ExecuteAs);
+        RequireExecuteAsUser(context, options.ExecuteAs, ModuleOwnerId(context, schema, functionName.Leaf));
         var replaced = ResolveFunctionAlterTarget<MultiStatementTableValuedFunction>(context, schema, functionName, isAlter, createOrAlter);
         RejectTimestampParameters(parameters);
 
@@ -521,7 +529,7 @@ partial class Simulation
         // Server 2025).
         if (options.Inline == true && (!ModuleInlining.IsInlineableScalar(bodyText, functionName.Leaf, executeAsClause) || parameters.Exists(static parameter => parameter.TableType is not null)))
             throw SimulatedSqlException.InlineOptionNotValid();
-        RequireExecuteAsUser(context, executeAsClause);
+        RequireExecuteAsUser(context, executeAsClause, ModuleOwnerId(context, schema, functionName.Leaf));
         var replaced = ResolveFunctionAlterTarget<ScalarFunction>(context, schema, functionName, isAlter, createOrAlter);
         RejectTimestampParameters(parameters);
 

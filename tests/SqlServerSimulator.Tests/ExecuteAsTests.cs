@@ -399,6 +399,68 @@ public sealed class ExecuteAsTests
             "create procedure dbo.p_ghost with execute as 'ghost' as select 1", 15151,
             "Cannot execute as the user 'ghost', because it does not exist or you do not have permission.");
 
+    // A module's EXECUTE AS a user other than its creator's own needs
+    // IMPERSONATE on that user — for OWNER, on the module's owner — or a
+    // db_ddladmin could run a module of its own as dbo (probed 2026-10-25
+    // against SQL Server 2025, for procedures, functions, triggers and ALTER).
+    private static SimulatedDbConnection AsDdlAdmin(Simulation sim)
+    {
+        sim.ExecuteBatches(
+            "create user pu without login; alter role db_ddladmin add member pu; create user other without login",
+            "create schema s authorization pu",
+            "create table s.t (id int)",
+            "create procedure s.existing as select 1");
+        var connection = (SimulatedDbConnection)sim.CreateOpenConnection();
+        _ = connection.CreateCommand("execute as user = 'pu'").ExecuteNonQuery();
+        return connection;
+    }
+
+    [TestMethod]
+    [DataRow("create procedure s.p with execute as 'dbo' as select 1", "dbo")]
+    [DataRow("create procedure s.p with execute as 'other' as select 1", "other")]
+    [DataRow("create function s.f() returns int with execute as 'dbo' as begin return 1 end", "dbo")]
+    [DataRow("create trigger s.tr on s.t with execute as 'dbo' after insert as select 1", "dbo")]
+    [DataRow("create trigger s.tr on s.t with execute as 'ghost' after insert as select 1", "ghost")]
+    [DataRow("create procedure dbo.p with execute as owner as select 1", "dbo")]
+    [DataRow("alter procedure s.existing with execute as 'dbo' as select 1", "dbo")]
+    public void Module_ExecuteAsAnotherUserWithoutImpersonate_Raises15151(string definition, string named)
+    {
+        using var connection = AsDdlAdmin(new Simulation());
+        var refused = Throws<SimulatedSqlException>(() => connection.CreateCommand(definition).ExecuteNonQuery());
+        AreEqual(15151, refused.Number);
+        AreEqual($"Cannot execute as the user '{named}', because it does not exist or you do not have permission.", refused.Errors[0].Message);
+    }
+
+    [TestMethod]
+    [DataRow("create procedure s.p with execute as self as select 1")]
+    [DataRow("create procedure s.p with execute as 'pu' as select 1")]
+    [DataRow("create procedure s.p with execute as owner as select 1")]
+    [DataRow("create trigger s.tr on s.t with execute as owner after insert as select 1")]
+    public void Module_ExecuteAsItselfOrItsOwnSchemasOwner_IsCreated(string definition)
+    {
+        using var connection = AsDdlAdmin(new Simulation());
+        _ = connection.CreateCommand(definition).ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public void Module_ExecuteAsAUserItMayImpersonate_IsCreated()
+    {
+        var sim = new Simulation();
+        using var connection = AsDdlAdmin(sim);
+        _ = sim.ExecuteNonQuery("grant impersonate on user::other to pu");
+        _ = connection.CreateCommand("create procedure s.p with execute as 'other' as select current_user").ExecuteNonQuery();
+        AreEqual("other", sim.ExecuteScalar("exec s.p"));
+    }
+
+    [TestMethod]
+    public void DdlAdmin_CannotReachDbOwnerThroughAModuleExecutingAsDbo()
+    {
+        var sim = new Simulation();
+        using var connection = AsDdlAdmin(sim);
+        _ = Throws<SimulatedSqlException>(() => connection.CreateCommand("create procedure s.escalate with execute as 'dbo' as alter role db_owner add member pu").ExecuteNonQuery());
+        AreEqual(0, sim.ExecuteScalar("select is_rolemember('db_owner', 'pu')"));
+    }
+
     // ----- sys.sql_modules.execute_as_principal_id -----
     //
     // Real records the clause's resolved principal at CREATE: -2 for OWNER
