@@ -126,6 +126,9 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
 
         public FullTextNode ParseOr()
         {
+            // A parenthesized group nests through here, so one deeper than the
+            // thread's stack allows is Msg 8631 rather than the process's end.
+            Expression.EnsureParseStack();
             var left = ParseAnd();
             while (true)
             {

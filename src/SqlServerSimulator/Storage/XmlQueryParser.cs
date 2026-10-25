@@ -154,6 +154,11 @@ internal sealed class XmlQueryParser(
     /// </summary>
     private XmlQueryExpr ParseExprSingle()
     {
+        // Every nested expression passes here, so a nesting deeper than the
+        // thread's stack allows is real's Msg 8631 rather than the process's
+        // end (real's own reaches past 3,000 parentheses, probed 2026-10-25
+        // against SQL Server 2025).
+        Parser.Expression.EnsureParseStack();
         this.SkipWhitespace();
         var word = this.PeekWord();
         return word switch
@@ -716,6 +721,7 @@ internal sealed class XmlQueryParser(
 
     private XmlQueryExpr ParseUnary()
     {
+        Parser.Expression.EnsureParseStack();
         this.SkipWhitespace();
         if (this.Current is not ('-' or '+'))
             return this.ParsePathExpr();

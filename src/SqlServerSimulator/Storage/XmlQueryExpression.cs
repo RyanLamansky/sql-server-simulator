@@ -162,8 +162,20 @@ internal abstract class XmlQueryExpr(XmlStaticKind kind, XmlOccurrence occurrenc
         : this.TypeName.StartsWith("xs:", StringComparison.Ordinal) && XmlAtomicTypes.Resolve(this.TypeName[3..]) is { } type ? XmlAtomicTypes.KindOf(type)
         : XmlStaticKind.Untyped;
 
+    /// <summary>
+    /// Appends this expression's result sequence to <paramref name="results"/>.
+    /// Every nested expression evaluates through here, so a tree deeper than
+    /// the thread's stack allows is real's Msg 8631 rather than the process's
+    /// end — evaluating takes more stack per level than parsing did.
+    /// </summary>
+    public void Evaluate(in XmlQueryFrame frame, List<object> results)
+    {
+        Parser.Expression.EnsureParseStack();
+        this.EvaluateCore(frame, results);
+    }
+
     /// <summary>Appends this expression's result sequence to <paramref name="results"/>.</summary>
-    public abstract void Evaluate(in XmlQueryFrame frame, List<object> results);
+    protected abstract void EvaluateCore(in XmlQueryFrame frame, List<object> results);
 
     /// <summary>Evaluates into a fresh list.</summary>
     public List<object> Evaluate(in XmlQueryFrame frame)
@@ -268,7 +280,7 @@ internal sealed class XmlLiteralExpr(object value, XmlStaticKind kind, string ty
     /// </summary>
     public readonly object Value = value;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results) => results.Add(this.Value);
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results) => results.Add(this.Value);
 }
 
 /// <summary>
@@ -286,7 +298,7 @@ internal sealed class XmlContextItemExpr(string? typeName = null, XmlSchemaPathT
 
     public override string? AtomizedDisplay() => this.display;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results) => results.Add(frame.Context.Clone());
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results) => results.Add(frame.Context.Clone());
 
     public override XmlSchemaPathType? SchemaPathType() => this.schemaType;
 
@@ -330,7 +342,7 @@ internal sealed class XmlSequenceExpr(XmlQueryExpr[] items)
     /// <summary>The items as written.</summary>
     public readonly XmlQueryExpr[] Items = items;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results)
     {
         foreach (var item in this.Items)
             item.Evaluate(frame, results);
@@ -356,7 +368,7 @@ internal sealed class XmlFilterExpr(XmlQueryExpr source, XmlQueryExpr[] predicat
     private readonly XmlQueryExpr source = source;
     private readonly XmlQueryExpr[] predicates = predicates;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results)
     {
         var items = this.source.Evaluate(frame);
         XmlStep.ApplyPredicates(items, this.predicates, results, frame.Variables);
@@ -374,7 +386,7 @@ internal sealed class XmlFilterExpr(XmlQueryExpr source, XmlQueryExpr[] predicat
 /// <summary>The document root of the instance being queried — an absolute path's start.</summary>
 internal sealed class XmlRootExpr() : XmlQueryExpr(XmlStaticKind.Node, XmlOccurrence.ExactlyOne, "xdt:untypedAtomic")
 {
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results)
     {
         var root = frame.Context.Clone();
         root.MoveToRoot();
@@ -389,7 +401,7 @@ internal sealed class XmlPathExpr(XmlQueryExpr start, XmlStep[] steps)
     private readonly XmlQueryExpr start = start;
     private readonly XmlStep[] steps = steps;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results)
     {
         var current = this.start.Evaluate(frame);
         foreach (var step in this.steps)
@@ -767,7 +779,7 @@ internal sealed class XmlComparisonExpr(XmlQueryExpr left, XmlQueryExpr right, s
     private readonly string op = op;
     private readonly bool isValueComparison = isValueComparison;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results)
     {
         var leftItems = this.left.Evaluate(frame);
         var rightItems = this.right.Evaluate(frame);
@@ -801,7 +813,7 @@ internal sealed class XmlLogicalExpr(XmlQueryExpr left, XmlQueryExpr right, bool
     private readonly XmlQueryExpr right = right;
     private readonly bool isAnd = isAnd;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results)
     {
         var leftValue = XmlQueryValues.EffectiveBoolean(this.left.Evaluate(frame));
         results.Add(this.isAnd
@@ -825,7 +837,7 @@ internal sealed class XmlArithmeticExpr(XmlQueryExpr left, XmlQueryExpr? right, 
     private readonly XmlQueryExpr? right = right;
     private readonly char op = op;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results)
     {
         var leftItems = this.left.Evaluate(frame);
         if (leftItems.Count == 0)
@@ -995,7 +1007,7 @@ internal sealed class XmlSqlAccessorExpr(int slot, XmlStaticKind kind = XmlStati
     /// </summary>
     public readonly bool TypeUnknown = typeName is null;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results) =>
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results) =>
         results.AddRange(frame.Variables!.Read(this.slot));
 }
 
@@ -1005,7 +1017,7 @@ internal sealed class XmlVariableRefExpr(XmlVariableBinding binding)
 {
     private readonly XmlVariableBinding binding = binding;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results) =>
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results) =>
         results.AddRange(frame.Variables!.Read(this.binding.Slot));
 
     public override string NodeTypeBase() => this.binding.NodeType;
@@ -1068,7 +1080,7 @@ internal sealed class XmlFlworExpr(
     private readonly XmlOrderSpec[] orderBy = orderBy;
     private readonly XmlQueryExpr body = body;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results)
     {
         var scope = frame.Variables ?? new XmlVariableScope();
         var inner = new XmlQueryFrame(frame.Context, frame.Position, frame.Size, scope);
@@ -1190,7 +1202,7 @@ internal sealed class XmlQuantifiedExpr(XmlVariableBinding[] bindings, XmlQueryE
     private readonly XmlQueryExpr satisfies = satisfies;
     private readonly bool isEvery = isEvery;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results)
     {
         var scope = frame.Variables ?? new XmlVariableScope();
         var inner = new XmlQueryFrame(frame.Context, frame.Position, frame.Size, scope);
@@ -1225,7 +1237,7 @@ internal sealed class XmlConditionalExpr(XmlQueryExpr condition, XmlQueryExpr th
     private readonly XmlQueryExpr thenBranch = thenBranch;
     private readonly XmlQueryExpr elseBranch = elseBranch;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results)
     {
         var taken = XmlQueryValues.EffectiveBoolean(this.condition.Evaluate(frame)) ? this.thenBranch : this.elseBranch;
         taken.Evaluate(frame, results);
@@ -1276,7 +1288,7 @@ internal sealed class XmlConstructedNodeExpr(string[] literals, XmlQueryExpr[] e
     /// </summary>
     private readonly string[] prologDeclarations = prologDeclarations;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results)
     {
         var text = new System.Text.StringBuilder(this.literals[0]);
         List<XPathNavigator>? attributes = null;
@@ -1406,7 +1418,7 @@ internal sealed class XmlListAtomizeExpr(XmlQueryExpr source)
 {
     private readonly XmlQueryExpr source = source;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results)
     {
         foreach (var item in this.source.Evaluate(frame))
         {
@@ -1428,7 +1440,7 @@ internal sealed class XmlFunctionCallExpr(XmlFunctionId id, XmlQueryExpr[] argum
     /// <summary>Whether this is <c>last()</c>, which narrows a predicated sequence as a literal position does.</summary>
     public readonly bool IsLast = id == XmlFunctionId.Last;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results)
     {
         switch (this.id)
         {

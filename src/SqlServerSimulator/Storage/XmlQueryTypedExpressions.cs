@@ -85,7 +85,7 @@ internal sealed class XmlInstanceOfExpr(XmlQueryExpr operand, XmlSequenceType ty
     private readonly XmlQueryExpr operand = operand;
     private readonly XmlSequenceType type = type;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results)
     {
         var items = this.operand.Evaluate(frame);
         results.Add(items.Count switch
@@ -145,7 +145,7 @@ internal sealed class XmlCastExpr(XmlQueryExpr operand, XmlSchemaSimpleType? tar
     private readonly XmlSchemaSimpleType? target = target;
     private readonly string targetName = targetName;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results)
     {
         var items = this.operand.Evaluate(frame);
         if (items.Count == 0)
@@ -177,7 +177,7 @@ internal sealed class XmlNodeComparisonExpr(XmlQueryExpr left, XmlQueryExpr righ
     private readonly XmlQueryExpr right = right;
     private readonly string op = op;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results)
     {
         var leftItems = this.left.Evaluate(frame);
         var rightItems = this.right.Evaluate(frame);
@@ -221,7 +221,7 @@ internal sealed class XmlComputedAttributeExpr(string prefix, string localName, 
     private readonly string namespaceUri = namespaceUri;
     private readonly XmlQueryExpr? content = content;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results)
     {
         var value = this.content is null ? string.Empty : XmlQueryValues.JoinAtomized(this.content.Evaluate(frame));
         var holder = new XElement("a");
@@ -249,7 +249,7 @@ internal sealed class XmlComputedTextExpr(XmlQueryExpr content)
 {
     private readonly XmlQueryExpr content = content;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results)
     {
         var items = this.content.Evaluate(frame);
         if (items.Count == 0)
@@ -280,7 +280,7 @@ internal sealed class XmlDirectLeafExpr(bool isComment, string target, string da
     private readonly string target = target;
     private readonly string data = data;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    protected override void EvaluateCore(in XmlQueryFrame frame, List<object> results)
     {
         XNode node = this.isComment ? new XComment(this.data) : new XProcessingInstruction(this.target, this.data);
         var navigator = new XElement("h", node).CreateNavigator();

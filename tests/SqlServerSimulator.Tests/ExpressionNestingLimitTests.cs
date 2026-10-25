@@ -332,4 +332,41 @@ public sealed class ExpressionNestingLimitTests
         IsNull(failure);
         AreEqual(3000, result);
     }
+
+    // --- Nesting inside another language's text: XQuery, full-text conditions. ---
+
+    private static string Nested(string open, string inner, string close, int depth) =>
+        string.Concat(Enumerable.Repeat(open, depth)) + inner + string.Concat(Enumerable.Repeat(close, depth));
+
+    /// <summary>
+    /// An XQuery expression nests as deep as real's — 3,000 parentheses read
+    /// (probed 2026-10-25 against SQL Server 2025) — and past the thread's
+    /// stack is Msg 8631, real's own answer at 10,000, never a process abort:
+    /// as it parses, and as it evaluates a tree the parse took in, which
+    /// needs more stack per level (a 3,000-sign chain on a 1 MB thread).
+    /// </summary>
+    [TestMethod]
+    [Timeout(60000)]
+    public void XQueryNesting_ReadsRealsDepth_AndRaisesMsg8631PastTheStack()
+    {
+        AreEqual("<r/>", Extensions.ExecuteScalarOnStack($"declare @x xml = N'<r/>'; select cast(@x.query('{Nested("(", "/r", ")", 3000)}') as nvarchar(max))", DeepStack).Result);
+        AreEqual(8631, Extensions.ExecuteScalarOnStack($"declare @x xml = N'<r/>'; select cast(@x.query('{Nested("(", "/r", ")", 10000)}') as nvarchar(max))", SmallStack).Failure.ErrorNumber());
+        AreEqual(8631, Extensions.ExecuteScalarOnStack($"declare @x xml = N'<r/>'; select @x.value('{Nested("- ", "1", "", 10000)}', 'int')", SmallStack).Failure.ErrorNumber());
+        AreEqual(8631, Extensions.ExecuteScalarOnStack($"declare @x xml = N'<r/>'; select @x.value('{Nested("- ", "1", "", 3000)}', 'int')", 1024 * 1024).Failure.ErrorNumber());
+    }
+
+    /// <summary>
+    /// A full-text condition's parentheses nest through the stack probe too:
+    /// real's 497 levels read, and past the thread's stack is Msg 8631 rather
+    /// than a process abort (real refuses a condition nested past its own
+    /// limit as too complex, Msg 9937, which isn't modeled yet).
+    /// </summary>
+    [TestMethod]
+    [Timeout(60000)]
+    public void ContainsNesting_RaisesMsg8631PastTheStack()
+    {
+        const string Setup = "create table t (id int not null constraint pk_t primary key, c nvarchar(100)); insert t values (1, N'alpha beta'); create fulltext catalog cat as default; create fulltext index on t (c) key index pk_t; ";
+        AreEqual(1, Extensions.ExecuteScalarOnStack(Setup + $"select count(*) from t where contains(c, '{Nested("(", "alpha", ")", 497)}')", DeepStack).Result);
+        AreEqual(8631, Extensions.ExecuteScalarOnStack(Setup + $"select count(*) from t where contains(c, '{Nested("(", "alpha", ")", 1900)}')", SmallStack).Failure.ErrorNumber());
+    }
 }
