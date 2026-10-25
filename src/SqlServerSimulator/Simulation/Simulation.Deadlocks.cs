@@ -26,20 +26,20 @@ partial class Simulation
     internal int BlockedProcessReportCount;
 
     /// <summary>
-    /// Whether <paramref name="waiter"/>'s lock wait has passed one more
-    /// multiple of the blocked process threshold, counting it when so; asked
-    /// between the wait's slices, so a session taking
-    /// <c>blocked_process_report</c> and a nonzero threshold must both be
-    /// in place before the configuration is read.
+    /// Whether <paramref name="waiter"/>'s lock wait had passed one more
+    /// multiple of the blocked process threshold by <paramref name="asOfTicks"/>,
+    /// counting it when so; asked between the wait's slices and as it times
+    /// out, so a session taking <c>blocked_process_report</c> and a nonzero
+    /// threshold must both be in place before the configuration is read.
     /// </summary>
-    internal bool DueBlockedProcessReport(SessionToken waiter)
+    internal bool DueBlockedProcessReport(SessionToken waiter, long asOfTicks)
     {
         if (!XeEvents.Takes(this, XeEventKind.BlockedProcessReport))
             return false;
         var threshold = this.BlockedProcessThresholdSeconds;
         if (threshold <= 0)
             return false;
-        if (Environment.TickCount64 - waiter.WaitStartedTicks < (waiter.BlockedProcessReports + 1) * 1000L * threshold)
+        if (asOfTicks - waiter.WaitStartedTicks < (waiter.BlockedProcessReports + 1) * 1000L * threshold)
             return false;
         waiter.BlockedProcessReports++;
         return true;

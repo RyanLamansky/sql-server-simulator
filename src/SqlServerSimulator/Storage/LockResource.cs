@@ -369,6 +369,30 @@ internal sealed class LockManager
     private void SweepAbandonedSessions() => _ = this.OwningSimulation?.ReclaimAbandonedSessions();
 
     /// <summary>
+    /// Sends the blocked-process reports <paramref name="owner"/>'s wait
+    /// earned by its <paramref name="deadline"/> and hasn't sent, as it times
+    /// out: a thread woken late keeps the ones real's lock monitor would have
+    /// made while it slept. Called holding the gate, which they go out of.
+    /// </summary>
+    private void ReportOwedBlockedProcesses(SessionToken owner, LockResource resource, LockMode mode, long deadline)
+    {
+        if (this.OwningSimulation is not { } reporting)
+            return;
+        while (reporting.DueBlockedProcessReport(owner, deadline))
+        {
+            Monitor.Exit(this.gate);
+            try
+            {
+                reporting.ReportBlockedProcess(owner, resource, mode);
+            }
+            finally
+            {
+                Monitor.Enter(this.gate);
+            }
+        }
+    }
+
+    /// <summary>
     /// Acquires <paramref name="mode"/> on <paramref name="resource"/>
     /// for <paramref name="owner"/>, blocking up to
     /// <paramref name="timeoutMillis"/> if the request conflicts with
@@ -564,7 +588,11 @@ internal sealed class LockManager
 
                     var remaining = deadline < 0 ? Timeout.Infinite : (int)Math.Max(0, deadline - Environment.TickCount64);
                     if (timeoutMillis > 0 && remaining == 0)
+                    {
+                        if (waited)
+                            this.ReportOwedBlockedProcesses(owner, resource, mode, deadline);
                         return LockAcquireOutcome.TimedOut;
+                    }
 
                     // Mark the caller as waiting on this resource so other
                     // connections' cycle walks can see the edge. Written once
@@ -604,14 +632,17 @@ internal sealed class LockManager
                     if (cancellation.IsCancellationRequested)
                         return LockAcquireOutcome.Cancelled;
                     if (quiet && timeoutMillis > 0 && Environment.TickCount64 >= deadline)
+                    {
+                        this.ReportOwedBlockedProcesses(owner, resource, mode, deadline);
                         return LockAcquireOutcome.TimedOut;
+                    }
                     if (quiet || Environment.TickCount64 >= periodicDue)
                     {
                         periodicDue = Environment.TickCount64 + CancellationPollMillis;
                         // A wait past each multiple of the blocked process
                         // threshold reports itself, as real's lock monitor
                         // does, outside the gate as the sweep runs.
-                        if (this.OwningSimulation is { } reporting && reporting.DueBlockedProcessReport(owner))
+                        if (this.OwningSimulation is { } reporting && reporting.DueBlockedProcessReport(owner, Environment.TickCount64))
                         {
                             Monitor.Exit(this.gate);
                             try
