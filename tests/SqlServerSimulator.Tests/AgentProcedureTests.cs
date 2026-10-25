@@ -177,6 +177,22 @@ public sealed class AgentProcedureTests
             exec msdb.dbo.sp_add_jobserver @job_name = N'j'
             """));
 
+    /// <summary>
+    /// A schedule a targeted job uses tells the stopped Agent of its update
+    /// and of its detachment, once each (probed 2026-10-25 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    public void ScheduleOfATargetedJob_NotifiesAsItChanges()
+        => CollectionAssert.AreEqual(new[] { "22022", "22022", "22022" }, Messages(new Simulation(), """
+            exec msdb.dbo.sp_add_schedule @schedule_name = N's', @freq_type = 4, @freq_interval = 1;
+            exec msdb.dbo.sp_add_job @job_name = N'j';
+            exec msdb.dbo.sp_attach_schedule @job_name = N'j', @schedule_name = N's';
+            exec msdb.dbo.sp_add_jobserver @job_name = N'j';
+            exec msdb.dbo.sp_update_schedule @name = N's', @freq_interval = 2;
+            exec msdb.dbo.sp_detach_schedule @job_name = N'j', @schedule_name = N's'
+            """).ConvertAll(static message => message.Split(':')[0]));
+
     [TestMethod]
     public void JobServer_OnlyTheLocalServer_Once()
     {

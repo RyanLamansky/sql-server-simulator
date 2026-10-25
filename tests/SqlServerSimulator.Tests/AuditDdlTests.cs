@@ -150,6 +150,10 @@ public sealed class AuditDdlTests
         AreEqual(0, Scalar(connection, "select count(*) from sys.server_audits"));
         Run(connection, "create server audit a to application_log; begin tran; drop server audit a; rollback");
         AreEqual(1, Scalar(connection, "select count(*) from sys.server_audits"));
+        Run(connection, "begin tran; alter server audit a with (queue_delay = 2000); alter server audit a modify name = b; rollback");
+        AreEqual("a|1000", Scalar(connection, "select concat(name, '|', queue_delay) from sys.server_audits"));
+        Run(connection, "create server audit specification s for server audit a add (failed_login_group); begin tran; alter server audit specification s add (successful_login_group); alter server audit specification s drop (failed_login_group); rollback");
+        AreEqual("FAILED_LOGIN_GROUP", Scalar(connection, "select string_agg(audit_action_name, ',') from sys.server_audit_specification_details"));
         Refuse(connection, "begin tran; alter server audit a with (state = on)", 574);
         Run(connection, "if @@trancount > 0 rollback");
     }
