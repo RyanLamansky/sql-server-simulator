@@ -1149,9 +1149,28 @@ partial class Simulation
             // confirmed: c AS v * 2 appears in INSERTED with the computed
             // result, not NULL).
             EvaluateComputedColumns(destinationTable, rowValues, context.Batch);
+            SqlValue[]? storedValues = null;
             if (!insteadOfActive)
             {
                 EnforceNotNull(destinationTable, rowValues, plan.Verb);
+                // Real meets a row's duplicate key as the row reaches the
+                // index, ahead of its CHECKs, so a row breaking both reports
+                // the key, and an IGNORE_DUP_KEY key drops it unjudged (probed
+                // 2026-10-07 and 2026-10-25 against SQL Server 2025).
+                if (!context.Batch.IsSkipping)
+                {
+                    storedValues = ProjectStoredValues(destinationTable, rowValues);
+                    if (keyGuard?.Restart() == true)
+                        ForgetComputedKeySets(context.Batch, destinationTable);
+                    // A duplicate against an IGNORE_DUP_KEY key drops this row and
+                    // the statement carries on: no heap write, no OUTPUT row, no
+                    // trigger row, and it doesn't count toward rows-affected.
+                    // Real does emit the identity value it burned on the way (the
+                    // sequence is consumed whether or not the row lands), which is
+                    // why lastIdentityValue is already assigned above.
+                    if (EnforceRowKeys(destinationTable, rowValues, storedValues, context.Batch) == RowKeyVerdict.SkipDuplicate)
+                        return false;
+                }
                 EnforceCheckConstraints(destinationTable, rowValues, context.Batch, plan.Verb, deferFunctionChecks: true);
                 if (!context.Batch.IsSkipping)
                     RowSecurity.EnforceBlock(context.Batch, destinationTable, BlockOperation.AfterInsert, rowValues);
@@ -1167,22 +1186,8 @@ partial class Simulation
 
             if (!context.Batch.IsSkipping)
             {
-                if (!insteadOfActive)
+                if (storedValues is not null)
                 {
-                    var storedValues = ProjectStoredValues(destinationTable, rowValues);
-                    if (keyGuard?.Restart() == true)
-                        ForgetComputedKeySets(context.Batch, destinationTable);
-                    // A duplicate against an IGNORE_DUP_KEY key drops this row and
-                    // the statement carries on: no heap write, no OUTPUT row, no
-                    // trigger row, and it doesn't count toward rows-affected.
-                    // Real does emit the identity value it burned on the way (the
-                    // sequence is consumed whether or not the row lands), which is
-                    // why lastIdentityValue is already assigned above.
-                    if (EnforceRowKeys(destinationTable, rowValues, storedValues, context.Batch) == RowKeyVerdict.SkipDuplicate)
-                    {
-                        return false;
-                    }
-
                     EnforceOutgoingForeignKeys(destinationTable, [rowValues], context, plan.Verb, selfReferencing: selfReferencingRows is null ? null : false);
                     EnforceEdgeConstraints(destinationTable, rowValues, context, plan.Verb);
                     destinationTable.OwningDatabase?.RejectWriteWhenReadOnly();

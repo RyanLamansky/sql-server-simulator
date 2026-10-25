@@ -539,6 +539,33 @@ public sealed class CheckConstraintTests
             begin try insert t values (9, 10) end try begin catch select error_number() end catch
             """));
 
+    /// <summary>
+    /// An INSERT meets a row's duplicate key as the row reaches the index,
+    /// ahead of its CHECKs: a row breaking both reports the key, and a
+    /// duplicate an IGNORE_DUP_KEY key drops is never judged (probed
+    /// 2026-10-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert c values (1, -1, 99)", 2627, "Violation of PRIMARY KEY constraint")]
+    [DataRow("insert c values (9, -1, 10)", 2627, "Violation of UNIQUE KEY constraint")]
+    [DataRow("insert c select 9, -1, 10", 2627, "Violation of UNIQUE KEY constraint")]
+    [DataRow("insert c values (1, null, 99)", 515, "Cannot insert the value NULL into column 'v'")]
+    public void Insert_BreakingAKeyAndACheck_ReportsTheKey(string statement, int number, string message)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table c (id int primary key, v int not null check (v > 0), u int null unique); insert c values (1, 5, 10)");
+        Assert.Contains(message, simulation.AssertSqlError(statement, number).Errors[0].Message);
+    }
+
+    [TestMethod]
+    public void Insert_IgnoredDuplicateBreakingACheck_IsDroppedUnjudged() =>
+        Assert.AreEqual(1, new Simulation().ExecuteScalar("""
+            create table g (id int primary key with (ignore_dup_key = on), v int check (v > 0));
+            insert g values (1, 5);
+            insert g values (1, -1);
+            select count(*) from g
+            """));
+
     private static Simulation DuplicateCheckedTable()
     {
         var simulation = new Simulation();
