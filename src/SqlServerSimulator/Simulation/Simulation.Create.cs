@@ -145,6 +145,8 @@ partial class Simulation
         if (BatchContext.IsLocalTempName(tableName.Leaf) && tableName.Leaf.Length > 116)
             throw SimulatedSqlException.TempTableNameTooLong(tableName.Leaf);
 
+        var columnCollation = ColumnCollationFor(context.Batch, tableName.Leaf, context.Batch.DatabaseForName(tableName));
+
         // `AS NODE` / `AS EDGE` follows the column list, which an edge table
         // may leave out altogether.
         var hasColumnList = context.GetNextRequired() is Operator { Character: '(' };
@@ -164,9 +166,10 @@ partial class Simulation
         {
             graphKind = PeekGraphTableKind(context);
             if (graphKind != GraphTableKind.None)
-                heapColumns.AddRange(GraphColumns.Create(graphKind, tableName.Leaf, context.Batch.Connection.CurrentDatabase.Collation));
+                heapColumns.AddRange(GraphColumns.Create(graphKind, tableName.Leaf, columnCollation));
             using (ParserScope.Enter(ref context.VariablesRefusedIn, "CREATE TABLE"))
             using (ParserScope.Enter(ref context.ColumnIndexOptions, IndexOptionStatement.CreateTable))
+            using (ParserScope.Enter(ref context.ColumnCollation, columnCollation))
             {
                 if (!ParseColumnList(context, tableName.Leaf, isTableVariable: false, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys, pendingIndexes, pendingEdgeConstraints))
                     return false;
@@ -183,7 +186,7 @@ partial class Simulation
         else
         {
             graphKind = ConsumeGraphTableClause(context, hasColumnList: false);
-            heapColumns.AddRange(GraphColumns.Create(graphKind, tableName.Leaf, context.Batch.Connection.CurrentDatabase.Collation));
+            heapColumns.AddRange(GraphColumns.Create(graphKind, tableName.Leaf, columnCollation));
         }
         // A CONNECTION constraint on a table that isn't an edge table stops
         // the batch while it compiles, so nothing ahead of it runs and an
@@ -2581,6 +2584,18 @@ partial class Simulation
     }
 
     /// <summary>
+    /// The collation a string column defined without <c>COLLATE</c> takes in
+    /// a table named <paramref name="tableName"/> going in <paramref name="database"/>:
+    /// tempdb's for a temporary table and the database's own otherwise, as a
+    /// table created through a three-part name compares by its target's
+    /// (probed 2026-10-25 against SQL Server 2025).
+    /// </summary>
+    internal static Collation ColumnCollationFor(BatchContext batch, string tableName, Database database) =>
+        BatchContext.IsLocalTempName(tableName) || BatchContext.IsGlobalTempName(tableName)
+            ? batch.Connection.Simulation.Databases[TempdbDatabaseName].Collation
+            : database.Collation;
+
+    /// <summary>
     /// Parses a single column definition starting at the column-name token
     /// and appends a <see cref="HeapColumn"/> entry to <paramref name="heapColumns"/>
     /// (or a <c>null</c> placeholder when the column is a non-persisted
@@ -3160,14 +3175,12 @@ partial class Simulation
             // Pin the column's declared collation onto its SqlType so values
             // decoded from this column carry it through to comparison / sort
             // / hash, and so expression resolution sees Implicit-rank
-            // coercibility on column references. Columns without an explicit
-            // COLLATE clause inherit the current database's default
-            // collation — temp tables (which dispatch through this same
-            // routine) inherit whatever database is active when they're
-            // created, avoiding the EF #temp-vs-user-table join footgun
-            // when BACPAC-loaded databases declare a non-default collation.
+            // coercibility on column references. A column without an explicit
+            // COLLATE clause takes its table's database's default
+            // (ParserContext.ColumnCollation), or the session database's.
             var resolvedCollation =
                 (columnCollation is not null ? Collation.TryGet(columnCollation) : null)
+                ?? context.ColumnCollation
                 ?? context.Batch.Connection.CurrentDatabase.Collation;
             // text keeps the shared baseline collation instead of interning a
             // per-column instance, so its Msg 459 gate can't ride the char /

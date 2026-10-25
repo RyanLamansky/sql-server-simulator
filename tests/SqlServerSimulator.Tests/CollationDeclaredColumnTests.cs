@@ -445,22 +445,42 @@ public sealed class CollationDeclaredColumnTests
     }
 
     /// <summary>
-    /// Temp table inherits the active database's default collation —
-    /// solves the EF Core join footgun where a BACPAC-loaded non-default
-    /// database would otherwise cross-collation-conflict against #temp.
+    /// A temporary table's string columns take tempdb's collation whatever
+    /// database the session is in, so one joined to a table of a database
+    /// with another collation is Msg 468 until its column says
+    /// <c>COLLATE database_default</c>, while a table variable's take the
+    /// session database's (probed 2026-10-25 against SQL Server 2025).
     /// </summary>
     [TestMethod]
-    public void TempTable_InheritsActiveDatabaseDefaultCollation()
+    public void TempTable_TakesTempdbsCollation()
     {
         var sim = new Simulation();
         using var conn = sim.CreateOpenConnection();
         _ = conn.CreateCommand("alter database simulated collate Latin1_General_CS_AS").ExecuteNonQuery();
-        _ = conn.CreateCommand("create table u (s varchar(20)); insert u values ('Apple')").ExecuteNonQuery();
-        _ = conn.CreateCommand("create table #t (s varchar(20)); insert #t values ('Apple')").ExecuteNonQuery();
-        // Both inherit CS_AS — join works without Msg 468.
-        var n = conn.CreateCommand("select count(*) from u join #t on u.s = #t.s").ExecuteScalar();
-        AreEqual(1, n);
+        _ = conn.CreateCommand("""
+            create table u (s varchar(20)); insert u values ('Apple');
+            create table #t (s varchar(20)); insert #t values ('Apple');
+            create table #d (s varchar(20) collate database_default); insert #d values ('Apple')
+            """).ExecuteNonQuery();
+        AreEqual(468, Throws<SimulatedSqlException>(() => conn.CreateCommand("select count(*) from u join #t on u.s = #t.s").ExecuteScalar()).Number);
+        AreEqual(1, conn.CreateCommand("select count(*) from u join #d on u.s = #d.s").ExecuteScalar());
+        AreEqual(1, conn.CreateCommand("select count(*) from #t where s = 'apple'").ExecuteScalar());
+        AreEqual(0, conn.CreateCommand("declare @t table (s varchar(20)); insert @t values ('Apple'); select count(*) from @t where s = 'apple'").ExecuteScalar());
     }
+
+    /// <summary>
+    /// A table created through a three-part name compares by its target
+    /// database's collation, as its catalog row says (probed 2026-10-25
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void CrossDatabaseCreate_TakesTheTargetsCollation()
+        => AreEqual(0, new Simulation().ExecuteScalar("""
+            create database cs collate Latin1_General_CS_AS;
+            create table cs.dbo.t (a nvarchar(10), b varchar(10));
+            insert cs.dbo.t values (N'abc', 'abc');
+            select count(*) from cs.dbo.t where a = N'ABC' or b = 'ABC'
+            """));
 
     /// <summary>
     /// <c>COLLATE database_default</c> in a table-variable column definition

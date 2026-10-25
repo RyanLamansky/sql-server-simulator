@@ -171,6 +171,14 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public string? VariablesRefusedIn;
 
     /// <summary>
+    /// The collation a string column defined without <c>COLLATE</c> takes in
+    /// the table whose columns are parsing — its database's, tempdb's for a
+    /// temporary table — and null where it is the session database's, as in
+    /// a table variable or a table type.
+    /// </summary>
+    public Collation? ColumnCollation;
+
+    /// <summary>
     /// The statement whose option names a key's or inline index's
     /// <c>WITH (…)</c> list is checked against while column and constraint
     /// definitions parse — <c>CREATE TABLE</c> (a table variable's and a

@@ -229,8 +229,8 @@ Containment isn't modeled, so the contained-database catalog collation never app
 
 ## Database default and `#temp` inheritance
 
-`Simulation.Create.cs`'s column wiring (shared by CREATE TABLE / ALTER TABLE ADD / DECLARE @t / CREATE TYPE AS TABLE / temp-table paths) resolves the column's pinned collation as: explicit `COLLATE` clause first, else the active database's `Database.CollationName`, else `Collation.Baseline`.
-So `#temp` tables created while a BACPAC-loaded non-default-collation database is active inherit that database's collation — avoiding the EF temp-join footgun (real SQL Server's tempdb is independent, but the common shape — tempdb matches server default which matches user DB — collapses to the same behavior).
+`Simulation.Create.cs`'s column wiring (shared by CREATE TABLE / ALTER TABLE ADD / DECLARE @t / CREATE TYPE AS TABLE / temp-table paths) resolves the column's pinned collation as: explicit `COLLATE` clause first, else the default of the database its table goes in (`ParserContext.ColumnCollation`, from `ColumnCollationFor`), else the session database's.
+A temporary table goes in tempdb, so its columns take tempdb's collation — the server's — whatever database the session is in, and one joined to a table of a database with another collation is Msg 468 unless its column says `COLLATE database_default`; a table created through a three-part name takes its target's; a table variable and a table type take the session database's (probed 2026-10-25 against SQL Server 2025).
 
 ## Server-level seed: `Simulation.ServerCollationName`
 

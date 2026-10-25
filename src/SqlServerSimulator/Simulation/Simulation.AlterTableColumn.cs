@@ -144,6 +144,7 @@ partial class Simulation
         public void ParseOne(ParserContext context)
         {
             using var declared = ParserScope.Enter(ref context.DeclaredColumnTypes, DeclaredColumnTypesOf(context, this.Table.Columns, this.HeapColumns));
+            using var collation = ParserScope.Enter(ref context.ColumnCollation, ColumnCollationFor(context.Batch, this.Table.Name, this.Table.OwningDatabase ?? context.Batch.CurrentDatabase));
             ParseOneColumnIntoLists(
                 context,
                 this.Table.Name,
