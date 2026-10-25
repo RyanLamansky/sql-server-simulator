@@ -1121,6 +1121,37 @@ internal sealed partial class BatchContext
     /// recorded list again as the replaying session.
     /// </summary>
     public List<ReplayedLock>? ReplayLockLog;
+
+    /// <summary>
+    /// Set while the batch compile walk parses a statement as the run would,
+    /// for the run to replay rather than parse again (see
+    /// <c>Simulation.TryParseQueryForRun</c>): a lock, a permission check or a
+    /// statistic the parse would take is only logged, and anything else that
+    /// would act on the server rather than bind declines the attempt
+    /// (<see cref="RunParseDeclinedException"/>).
+    /// </summary>
+    public bool ParsesForRun;
+
+    /// <summary>The statistics a parse under <see cref="ParsesForRun"/> would have loaded, each a table and a column ordinal.</summary>
+    public List<(HeapTable Table, int Ordinal)>? DeferredStatistics;
+
+    /// <summary>
+    /// The plans of the statements the compile walk parsed for this batch's
+    /// run (see <see cref="ParsesForRun"/>), keyed by where each starts in the
+    /// memoized token sequence: the run's first execution of the statement
+    /// replays one as it replays a cached plan and files it in the plan cache
+    /// as its own parse would have been — so a statement the run never
+    /// reaches, in a branch not taken, is parsed afresh by a later run as it
+    /// would have been.
+    /// </summary>
+    public Dictionary<int, StatementPlanEntry>? WalkPlans;
+
+    /// <summary>
+    /// What the compile walk deferred of the statements it parsed for this
+    /// batch's run, keyed by where each starts in the memoized token
+    /// sequence: the statistics the statement loads as it replays.
+    /// </summary>
+    public Dictionary<int, List<(HeapTable Table, int Ordinal)>>? RunParseStatistics;
 #if DEBUG
 
     /// <summary>

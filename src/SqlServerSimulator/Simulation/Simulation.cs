@@ -4276,6 +4276,11 @@ public sealed partial class Simulation
             selection = cached;
             replayLocks = entry.Locks;
         }
+        else if (batch.IsSkipping && batch.CompilingForRun && prefix is null && this.TryParseQueryForRun(batch, statementStart) is { } forRun)
+        {
+            selection = forRun;
+            replayLocks = null;
+        }
         else
         {
             // A plan the prefix found that doesn't replay parses as a statement
@@ -4786,6 +4791,9 @@ public sealed partial class Simulation
     /// </summary>
     private bool ReplaysSelectParse(ParserContext context, StatementPlanEntry entry, ParserContext.Checkpoint start)
     {
+        var batch = context.Batch;
+        // The compile walk's parse of the statement serves its first run alone.
+        var walked = batch.WalkPlans is { } walkPlans && walkPlans.Remove(start.MemoPosition, out var walkEntry) && ReferenceEquals(walkEntry, entry);
         if (!context.CanJumpTo(entry.End))
             return false;
         context.JumpTo(entry.End);
@@ -4793,6 +4801,19 @@ public sealed partial class Simulation
         {
             context.RestoreCheckpoint(start);
             return false;
+        }
+        if (walked)
+        {
+            // The compile walk's parse stands in for the run's own: it loads
+            // the statistics that would have, and is filed as it would have been.
+            if (batch.RunParseStatistics?.Remove(start.MemoPosition, out var statistics) == true)
+            {
+                foreach (var (table, ordinal) in statistics)
+                    LoadQueryStatistics(batch, table, ordinal);
+            }
+            this.PublishStatementPlan(batch, start.MemoPosition, entry);
+            _ = Interlocked.Increment(ref this.WalkPlanReplays);
+            return true;
         }
         _ = Interlocked.Increment(ref this.SelectPlanHits);
         return true;

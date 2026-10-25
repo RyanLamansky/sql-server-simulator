@@ -1615,6 +1615,127 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     }
 
     /// <summary>
+    /// Tokenizes the whole text before its parse when no memoized sequence
+    /// serves it, as the batch compile walk does, so a statement it parses for
+    /// the run ends at a token the run's own parse reads (see
+    /// <see cref="CanJumpTo"/>). A text the tokenizer refuses, or whose
+    /// tokenization inputs change partway, is left to tokenize as it parses.
+    /// </summary>
+    public void TokenizeAhead()
+    {
+        if (this.memoBound)
+            return;
+        this.BindTokenMemo();
+        if (this.memoCollector is null)
+            return;
+        var database = this.CurrentDatabase;
+        var collected = new List<Token>();
+        var at = 0;
+        try
+        {
+            while (Tokenizer.NextTokenPastBlanks(this.commandText, ref at, database.Collation, this.QuotedIdentifiers, database.CompatibilityLevel) is Token token)
+            {
+                if (token is not (Whitespace or Comment))
+                    collected.Add(token);
+            }
+        }
+        catch (SimulatedSqlException)
+        {
+            return;
+        }
+        if (RewritesTokenizationInputs(collected))
+            return;
+        Token[] sequence = [.. collected];
+        this.memoCollector = null;
+        this.memoTokens = sequence;
+        this.Simulation.TokenMemo.Publish(this.memoKey, sequence);
+        if (this.Batch.CompiledFor is { } running)
+            running.Parser.walkedTokens = (this.memoKey, sequence);
+    }
+
+    /// <summary>
+    /// What a statement's parse leaves in this context besides its cursor,
+    /// saved before the parse so that one abandoned partway — the batch compile
+    /// walk's parse of a statement for the run, which declines by throwing — can
+    /// be put back for the walk's own parse to begin over (see
+    /// <see cref="RestoreStatementState"/>).
+    /// </summary>
+    public readonly struct StatementState(ParserContext context)
+    {
+        public readonly List<ReferencedSecurable>? SecurableSink = context.SecurableSink;
+        public readonly int SecurablesSunk = context.SecurableSink?.Count ?? 0;
+        public readonly Dictionary<int, ColumnReadTarget>? ReadColumnSink = context.ReadColumnSink;
+
+        /// <summary>
+        /// A sink's entries as they stood, where a statement begins with one
+        /// open — a statement before it that failed partway left it so.
+        /// </summary>
+        public readonly KeyValuePair<int, ColumnReadTarget>[]? ReadColumnsSunk = context.ReadColumnSink?.ToArray();
+        public readonly List<FromSource>? BodySeekShapeHolders = context.BodySeekShapeHolders;
+        public readonly SimulatedSqlException? PendingBindError = context.PendingBindError;
+        public readonly Expressions.Reference? ScalarOnlyColumnReference = context.ScalarOnlyColumnReference;
+        public readonly List<Expressions.Reference>? FromSourceColumnSink = context.FromSourceColumnSink;
+        public readonly List<Selection.JoinHintSite>? JoinHintSites = context.JoinHintSites;
+        public readonly Token? LastToken = context.LastToken;
+        public readonly RecursiveMemberConstructs RecursiveBranchConstructs = context.RecursiveBranchConstructs;
+        public readonly int ColumnReferencesParsed = context.ColumnReferencesParsed;
+        public readonly int AggregatesParsed = context.AggregatesParsed;
+        public readonly int SubqueriesParsed = context.SubqueriesParsed;
+        public readonly int GroupingCallsParsed = context.GroupingCallsParsed;
+        public readonly int SequenceDrawsParsed = context.SequenceDrawsParsed;
+        public readonly int UnwindowedSequenceDrawsParsed = context.UnwindowedSequenceDrawsParsed;
+        public readonly int StatementVariablesStart = context.StatementVariablesStart;
+        public readonly int PendingNamedWindows = context.PendingNamedWindows.Count;
+        public readonly bool ReadsRowLocators = context.ReadsRowLocators;
+        public readonly bool ForBrowseSeen = context.ForBrowseSeen;
+        public readonly bool SimpleParameterizationBlocked = context.SimpleParameterizationBlocked;
+        public readonly bool JoinOrderEnforced = context.JoinOrderEnforced;
+        public readonly bool ReadPastLexError = context.ReadPastLexError;
+    }
+
+    /// <summary>Saves what a statement's parse may leave behind, for <see cref="RestoreStatementState"/>.</summary>
+    public StatementState SaveStatementState() => new(this);
+
+    /// <summary>Puts back what <paramref name="state"/> saved, and the cursor at <paramref name="start"/>.</summary>
+    public void RestoreStatementState(in StatementState state, Checkpoint start)
+    {
+        this.SecurableSink = state.SecurableSink;
+        state.SecurableSink?.RemoveRange(state.SecurablesSunk, state.SecurableSink.Count - state.SecurablesSunk);
+        this.ReadColumnSink = state.ReadColumnSink;
+        if (state.ReadColumnSink is { } readColumns)
+        {
+            readColumns.Clear();
+            foreach (var (objectId, target) in state.ReadColumnsSunk!)
+                readColumns[objectId] = target;
+        }
+        this.BodySeekShapeHolders = state.BodySeekShapeHolders;
+        this.PendingBindError = state.PendingBindError;
+        this.ScalarOnlyColumnReference = state.ScalarOnlyColumnReference;
+        this.FromSourceColumnSink = state.FromSourceColumnSink;
+        this.JoinHintSites = state.JoinHintSites;
+        this.RecursiveBranchConstructs = state.RecursiveBranchConstructs;
+        this.ColumnReferencesParsed = state.ColumnReferencesParsed;
+        this.AggregatesParsed = state.AggregatesParsed;
+        this.SubqueriesParsed = state.SubqueriesParsed;
+        this.GroupingCallsParsed = state.GroupingCallsParsed;
+        this.SequenceDrawsParsed = state.SequenceDrawsParsed;
+        this.UnwindowedSequenceDrawsParsed = state.UnwindowedSequenceDrawsParsed;
+        this.StatementVariablesStart = state.StatementVariablesStart;
+        this.PendingNamedWindows.RemoveRange(state.PendingNamedWindows, this.PendingNamedWindows.Count - state.PendingNamedWindows);
+        this.ReadsRowLocators = state.ReadsRowLocators;
+        this.ForBrowseSeen = state.ForBrowseSeen;
+        this.SimpleParameterizationBlocked = state.SimpleParameterizationBlocked;
+        this.JoinOrderEnforced = state.JoinOrderEnforced;
+        this.ReadPastLexError = state.ReadPastLexError;
+        this.RestoreCheckpoint(start);
+        this.LastToken = state.LastToken;
+    }
+
+    /// <summary>The memoized tokens from the current one on; empty while the text tokenizes as it parses.</summary>
+    public ReadOnlySpan<Token> MemoizedTokensAhead() =>
+        this.memoTokens is { } sequence && this.memoPosition > 0 ? sequence.AsSpan(this.memoPosition - 1) : default;
+
+    /// <summary>
     /// Whether the tokenization inputs still match the ones
     /// <see cref="BindTokenMemo"/> captured. <c>QUOTED_IDENTIFIER</c> flips
     /// mid-batch at the textual position of its <c>SET</c>, and <c>USE</c>

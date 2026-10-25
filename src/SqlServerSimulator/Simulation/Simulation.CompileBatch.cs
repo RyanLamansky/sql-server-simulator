@@ -74,6 +74,10 @@ partial class Simulation
         var connection = compileBatch.Connection;
         var enteredDatabase = connection.CurrentDatabase;
         compileBatch.Parser.ReadsPastLexErrors = true;
+        // A run that may replay a statement's plan reads the tokens the walk's
+        // parse for it ended at (see TryParseQueryForRun).
+        if (compileBatch.CompiledFor is { PlanCacheKey: not null })
+            compileBatch.Parser.TokenizeAhead();
         var walkedToEnd = true;
         try
         {

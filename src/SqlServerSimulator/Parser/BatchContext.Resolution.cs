@@ -561,7 +561,18 @@ internal sealed partial class BatchContext
     private bool LockResolved<T>(ConcurrentDictionary<string, T> slots, string leaf, T found)
         where T : SchemaObject
     {
-        this.AcquireStatementLock(found.SchemaLock, LockMode.SchemaStability);
+        // The compile walk waits on a name's Sch-S as it binds the name, so its
+        // parse for the run takes the lock too, besides logging it for the run.
+        var defers = this.ParsesForRun;
+        this.ParsesForRun = false;
+        try
+        {
+            this.AcquireStatementLock(found.SchemaLock, LockMode.SchemaStability);
+        }
+        finally
+        {
+            this.ParsesForRun = defers;
+        }
         if (slots.TryGetValue(leaf, out var current) && ReferenceEquals(current, found))
             return true;
         this.ReleaseStatementLock(found.SchemaLock, LockMode.SchemaStability);

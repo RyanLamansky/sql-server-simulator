@@ -151,6 +151,10 @@ internal sealed class InlinedScalarCalls(List<SimulatedSqlException>? errors, bo
     public static void Note(ParserContext context, UserDefinedFunction function)
     {
         var batch = context.Batch;
+        // A compile settles the call's inlining, as the compile walk's own
+        // parse records it.
+        if (batch.ParsesForRun)
+            throw new RunParseDeclinedException();
         if (batch.InlinedCalls is not { } calls || context.InliningClause == InliningClause.OrderBy)
             return;
         if (!calls.Body

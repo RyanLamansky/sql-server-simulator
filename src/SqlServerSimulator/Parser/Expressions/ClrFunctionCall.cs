@@ -102,6 +102,9 @@ internal sealed class ClrFunctionCall(ClrScalarFunction function, Expression?[] 
     /// </summary>
     public static ClrFunctionCall ParseCall(ClrScalarFunction function, ParserContext context)
     {
+        // Whether CLR runs is settled compiling, by the compile walk's own parse.
+        if (context.Batch.ParsesForRun)
+            throw new RunParseDeclinedException();
         context.SecurableSink?.Add(new ReferencedSecurable(function.Schema.Database, function, function.Schema.Name, "EXECUTE"));
         Simulation.RequireClrWhileCompiling(context.Batch);
         return new(function, UserFunctionCall.ParseFunctionArguments(function, context));

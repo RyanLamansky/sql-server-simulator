@@ -29,6 +29,9 @@ partial class Simulation
     /// <summary>Test-observable: <c>SELECT</c> statements that recorded a statement plan as they parsed.</summary>
     internal long SelectPlanRecordings;
 
+    /// <summary>Test-observable: statements whose run replayed the compile walk's parse of them rather than parsing again.</summary>
+    internal long WalkPlanReplays;
+
     /// <summary>
     /// Runs one DML statement, from its cached plan when one is
     /// current, otherwise by parsing it — recording the plan the parse builds
@@ -219,8 +222,17 @@ partial class Simulation
     /// replay wouldn't.
     /// </summary>
     private StatementPlanEntry? CurrentStatementPlan(ParserContext context, ParserContext.Checkpoint start) =>
-        context.Batch.InlinedCalls is null
-            && context.Batch.StatementPlans?.Find(start.MemoPosition) is { } entry
+        context.Batch.InlinedCalls is not null ? null
+            : this.Current(context, context.Batch.WalkPlans?.GetValueOrDefault(start.MemoPosition))
+                ?? this.Current(context, context.Batch.StatementPlans?.Find(start.MemoPosition));
+
+    /// <summary>
+    /// <paramref name="entry"/> when it was recorded under the current schema
+    /// version, in the database the batch is in and over the pseudo-tables its
+    /// firing holds (see <see cref="CurrentStatementPlan"/>); otherwise null.
+    /// </summary>
+    private StatementPlanEntry? Current(ParserContext context, StatementPlanEntry? entry) =>
+        entry is not null
             && entry.SchemaVersion == Volatile.Read(ref this.SchemaVersion)
             && ReferenceEquals(entry.Database, context.CurrentDatabase)
             && (entry.PseudoTables is null || ReferenceEquals(entry.PseudoTables, context.Batch.TriggerFrame?.PseudoTables))

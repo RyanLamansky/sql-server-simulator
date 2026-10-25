@@ -47,6 +47,19 @@ internal sealed partial class BatchContext
     private HashSet<HeapTable>? pageLockedWrites;
 
     /// <summary>
+    /// Whether a lock this batch's parse takes is only logged, for the run to
+    /// take as it replays the parse (<see cref="ParsesForRun"/>); a lock no log
+    /// would carry declines the parse instead of going untaken.
+    /// </summary>
+    private bool DefersLock()
+    {
+        if (!this.ParsesForRun)
+            return false;
+        _ = this.ReplayLockLog ?? throw new RunParseDeclinedException();
+        return true;
+    }
+
+    /// <summary>
     /// Acquires <paramref name="mode"/> on <paramref name="resource"/> for
     /// the current connection, honoring the connection's
     /// <see cref="SimulatedDbConnection.LockTimeoutMillis"/>, and records the
@@ -60,6 +73,8 @@ internal sealed partial class BatchContext
     public void AcquireStatementLock(LockResource resource, LockMode mode, bool noWait = false)
     {
         this.ReplayLockLog?.Add(new ReplayedLock(resource, mode, noWait, transactionScoped: false));
+        if (this.DefersLock())
+            return;
         var connection = this.Connection;
         if (mode == LockMode.SchemaModification)
             connection.RefuseDefinitionBesideSuspendedRead(resource);
@@ -271,6 +286,9 @@ internal sealed partial class BatchContext
     {
         if (registry.IsEmptyLockFree() || !registry.TryGetValue(leaf, out var nameLock))
             return;
+        // The compile walk doesn't wait on another session's change for the run.
+        if (this.ParsesForRun)
+            throw new RunParseDeclinedException();
         var connection = this.Connection;
         var owner = connection.LockOwner;
         var locks = connection.Simulation.LockManager;
@@ -351,6 +369,8 @@ internal sealed partial class BatchContext
     public void AcquireTransactionLock(LockResource resource, LockMode mode, bool noWait = false)
     {
         this.ReplayLockLog?.Add(new ReplayedLock(resource, mode, noWait, transactionScoped: true));
+        if (this.DefersLock())
+            return;
         var connection = this.Connection;
         if (mode == LockMode.SchemaModification)
             connection.RefuseDefinitionBesideSuspendedRead(resource);
@@ -447,6 +467,9 @@ internal sealed partial class BatchContext
                 return DataLockPlan.Bypass;
             if (this.IsSkipping)
                 return DataLockPlan.Bypass;
+            // The check reads the transaction the statement runs in.
+            if (this.ParsesForRun)
+                throw new RunParseDeclinedException();
             this.CheckMemoryOptimizedIsolation(table, hints, readsRows);
             // No table lock and no reader lock: every read is a snapshot read
             // (ResolveSnapshotXidForRead), and a write's row lock only detects

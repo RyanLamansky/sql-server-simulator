@@ -9,8 +9,18 @@ namespace SqlServerSimulator;
 /// </summary>
 internal sealed class PendingMessageQueue(SimulatedDbConnection connection) : Queue<SimulatedError>
 {
+    /// <summary>
+    /// Set while the batch compile walk parses a statement as the run would
+    /// (<c>BatchContext.ParsesForRun</c>): a message that parse would send
+    /// belongs to the run, so the attempt is declined rather than the message
+    /// sent ahead of it.
+    /// </summary>
+    public bool RefusesMessages;
+
     public new void Enqueue(SimulatedError message)
     {
+        if (this.RefusesMessages)
+            throw new Parser.RunParseDeclinedException();
         if (!message.ExtendedEventReported)
         {
             message.ExtendedEventReported = true;

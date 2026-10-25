@@ -1146,6 +1146,13 @@ internal static class PermissionEnforcement
         if (batch.IsSkipping)
             return;
         batch.ReplayLockLog?.Add(new ReplayedLock(check));
+        // The compile walk's parse for the run leaves the check, and whatever
+        // it audits, to the replay.
+        if (batch.ParsesForRun)
+        {
+            _ = batch.ReplayLockLog ?? throw new RunParseDeclinedException();
+            return;
+        }
 #if DEBUG
         // The check reads the principal, which the replay reads again.
         using var recorded = PlanCacheCaptureAudit.SuspendPrincipalWatch();

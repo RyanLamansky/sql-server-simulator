@@ -739,8 +739,29 @@ A throwaway build that skipped `CompileBatch` outright bounds what sharing the w
 | A repeated procedure call, as text or as an RPC | 26.0 / 23.4 µs | 26.7 / 23.5 µs | none |
 
 The last two already skip the walk (`compiledBatches`, `ModulePlan`), paying at most the memo's lookup, and the repeated `sp_executesql` now does too: remembering a dynamic batch's compile (`DynamicBatchKey`) took it from 21.7 to 15.3 µs, the bound.
-The ad hoc and `#temp` rows are what's left, and the walk can't simply be skipped or shared there — see the [backlog entry](backlog.md#complex-query-execution--perf-residuals) for why; [one-off texts](#one-off-texts-a-cpu-profile-of-the-parse) below took the parse's constant factors instead.
+The ad hoc and `#temp` rows are what's left, and the walk can't simply be skipped there — see the [backlog entry](backlog.md#complex-query-execution--perf-residuals) for why; [one-off texts](#one-off-texts-a-cpu-profile-of-the-parse) below took the parse's constant factors first.
 Those rows didn't move (ad hoc `SELECT` 21.3 → 21.5 µs, join 51.6 → 51.2 µs, `UPDATE` 13.0 → 13.0 µs, the `#temp` batch 81.6 → 80.6 µs).
+
+**A first compile's plain queries run on the walk's own parse.**
+The walk's skip-mode parse can't serve the run — it binds lock plans as `Bypass`, a missing table as a placeholder, and settles what only a compile does — so for a `SELECT` it parses the statement as the run would instead (`Simulation.TryParseQueryForRun`): skip mode and create-time binding set aside, under `BatchContext.ParsesForRun`, which makes every lock, parse-time permission check and statistic the parse would take a logged step rather than an act, and declines anything else that would act on the server rather than bind — a wait on another session's change, a message, a memory-optimized table's isolation check.
+The parse is filed on the running batch (`BatchContext.WalkPlans`), and the statement's first execution replays it where it would have parsed the statement again, exactly as it replays a cached plan, taking the logged locks and checks then, loading the deferred statistics where its own parse would have loaded them, and filing the plan in the cache as its own parse would have been filed, which a loop's later executions replay — so a query in a branch the run never takes is left to the run that does.
+The walk still takes a name's Sch-S as it binds, as it always has, so a batch still waits at compile on another session's redefinition.
+
+What the walk's own parse settles beyond binding is why some statements decline, parsed by the walk its way and by the run again: a hint (a join hint's warning, an optimizer refusal), a user or CLR function call (its inlining, settled compiling), a temporary table or table variable, a sequence, a FROM-less query (evaluated as it parses), `SELECT … INTO`, three- and four-part names, `FIPS_FLAGGER`, a security policy (bound with the batch), and a session under the settings a cached plan stays out of.
+A token pre-scan (`ReadsAsPlainQuery`) turns most of those away before the parse begins, since an attempt abandoned partway costs its parse; what it can't see — a view's body bound as the query parses, an error — abandons by throwing (`RunParseDeclinedException`), and the parser's statement state is put back (`ParserContext.StatementState`) for the walk's own parse to begin as if the attempt never ran, which `RunParseAudit` checks field by field in a Debug build.
+A write, a statement under a `WITH` prefix and a module body still parse twice (see the [backlog](backlog.md#complex-query-execution--perf-residuals)).
+
+ADO.NET over the one-off harness, medians of three processes per build alternating, the baseline the commit before (measured 2026-10-25):
+
+| Shape | Before | After | KB per execution |
+|---|---|---|---|
+| Point `SELECT` by key | 20.3 µs | 15.3 µs | 34.0 → 25.5 |
+| Three-table join with `WHERE` and `ORDER BY` | 72.6 µs | 54.1 µs | 73.5 → 56.2 |
+| EF-style parameterized `SELECT` | 59.5 µs | 46.5 µs | 59.4 → 44.8 |
+| SMO-style `sys.tables` query | 90.1 µs | 57.6 µs | 105.4 → 62.7 |
+| SMO's column query | 184.5 µs | 123.7 µs | 143.8 → 95.0 |
+| `INSERT … VALUES` of 10 columns | 21.0 µs | 20.0 µs | 29.4 → 26.8 |
+| `UPDATE` of two columns by key | 15.1 µs | 14.8 µs | 29.7 → 28.9 |
 
 ### Trigger bodies over their pseudo-tables, and function calls
 

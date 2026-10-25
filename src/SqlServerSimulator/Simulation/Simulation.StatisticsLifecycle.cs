@@ -256,6 +256,13 @@ partial class Simulation
     {
         if (table.IsTableVariable || table.IsTypeTable || table.IsMemoryOptimized || (uint)columnOrdinal >= (uint)table.Columns.Length)
             return;
+        // The compile walk's parse for the run leaves the load to the replay,
+        // which runs where the run's own parse would have loaded it.
+        if (batch.ParsesForRun)
+        {
+            (batch.DeferredStatistics ??= []).Add((table, columnOrdinal));
+            return;
+        }
         var database = table.OwningDatabase ?? batch.Connection.Simulation.Databases[TempdbDatabaseName];
         if (database.IsReadOnly)
             return;

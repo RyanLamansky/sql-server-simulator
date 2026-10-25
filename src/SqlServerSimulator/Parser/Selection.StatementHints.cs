@@ -599,6 +599,9 @@ partial class Selection
     /// </summary>
     internal static void SendJoinOrderEnforced(BatchContext batch)
     {
+        // What a compile sends is the compile walk's own parse's to send.
+        if (batch.ParsesForRun)
+            throw new RunParseDeclinedException();
         if (batch.Connection.InlinedBodyDepth > 0)
         {
             batch.Parser.JoinOrderEnforced = true;
