@@ -297,6 +297,116 @@ internal sealed class CachedPlan
 }
 
 /// <summary>
+/// What each handle named as one statement first looked one up
+/// (<see cref="Simulation.HandleIndexFor"/>): the live cached plans by plan
+/// handle, and the batches running and cached by SQL handle.
+/// <c>sys.dm_exec_sql_text</c> and the plan functions read a handle per row of
+/// whatever they are applied to — every cached plan's, for a monitoring
+/// query — which a walk of every plan and session per row made quadratic.
+/// </summary>
+internal sealed class HandleIndex(Simulation simulation)
+{
+    private Dictionary<HandleKey, CachedPlan>? plansByPlanHandle;
+
+    private Dictionary<HandleKey, CachedPlan>? batchPlansBySqlHandle;
+
+    /// <summary>The running batches' texts by SQL handle, null for a text that stays hidden.</summary>
+    private Dictionary<HandleKey, string?>? runningBySqlHandle;
+
+    /// <summary>The plan whose plan handle <paramref name="handle"/> begins with, or null.</summary>
+    public CachedPlan? FindPlan(byte[] handle)
+    {
+        this.IndexPlans();
+        return this.plansByPlanHandle!.GetValueOrDefault(new(handle));
+    }
+
+    /// <summary>A cached batch plan whose SQL handle <paramref name="handle"/> begins with, or null.</summary>
+    public CachedPlan? FindBatchPlan(byte[] handle)
+    {
+        this.IndexPlans();
+        return this.batchPlansBySqlHandle!.GetValueOrDefault(new(handle));
+    }
+
+    /// <summary>
+    /// Whether a running batch — a session's, a statement's simply
+    /// parameterized text, a parked MARS request's — has the SQL handle
+    /// <paramref name="handle"/> begins with, and its <paramref name="text"/>,
+    /// null when the batch carries a secret.
+    /// </summary>
+    public bool FindRunning(byte[] handle, out string? text)
+    {
+        if (this.runningBySqlHandle is null)
+            this.IndexRunning();
+        return this.runningBySqlHandle!.TryGetValue(new(handle), out text);
+    }
+
+    /// <summary>
+    /// Indexes the live plans, the first in their order holding a handle
+    /// keeping it, as a walk of them in that order found it.
+    /// </summary>
+    private void IndexPlans()
+    {
+        if (this.plansByPlanHandle is not null)
+            return;
+        var byPlanHandle = new Dictionary<HandleKey, CachedPlan>();
+        var batchesBySqlHandle = new Dictionary<HandleKey, CachedPlan>();
+        foreach (var plan in simulation.LiveCachedPlans())
+        {
+            _ = byPlanHandle.TryAdd(new(plan.PlanHandle), plan);
+            if (plan.IsBatch)
+                _ = batchesBySqlHandle.TryAdd(new(plan.SqlHandle), plan);
+        }
+        this.batchPlansBySqlHandle = batchesBySqlHandle;
+        this.plansByPlanHandle = byPlanHandle;
+    }
+
+    /// <summary>
+    /// Indexes the running batches session by session — a session's batch,
+    /// then the prepared text it runs under, then its parked requests' — the
+    /// first to hold a handle keeping it, as a walk in that order found it.
+    /// </summary>
+    private void IndexRunning()
+    {
+        var running = new Dictionary<HandleKey, string?>();
+        foreach (var connection in simulation.SnapshotConnections())
+        {
+            if (connection.Session.BatchText is { } text)
+            {
+                _ = running.TryAdd(new(BuiltInResources.SqlHandleOf(text)), simulation.HidesBatchText(text) ? null : text);
+                var reported = simulation.ReportedStatement(connection, text, connection.Session.StatementStartIndex, connection.CurrentDatabase);
+                if (!ReferenceEquals(reported.Text, text))
+                    _ = running.TryAdd(new(reported.SqlHandle), reported.Text);
+            }
+            foreach (var parked in connection.ParkedRequests())
+            {
+                if (parked.BatchText is { } parkedText)
+                    _ = running.TryAdd(new(BuiltInResources.SqlHandleOf(parkedText)), simulation.HidesBatchText(parkedText) ? null : parkedText);
+            }
+        }
+        this.runningBySqlHandle = running;
+    }
+
+    /// <summary>A handle's first <see cref="BuiltInResources.SqlHandleLength"/> bytes, compared by content.</summary>
+    private readonly struct HandleKey(byte[] bytes) : IEquatable<HandleKey>
+    {
+        private readonly byte[] bytes = bytes;
+
+        private ReadOnlySpan<byte> Handle => this.bytes.AsSpan(0, BuiltInResources.SqlHandleLength);
+
+        public bool Equals(HandleKey other) => this.Handle.SequenceEqual(other.Handle);
+
+        public override bool Equals(object? obj) => obj is HandleKey other && this.Equals(other);
+
+        public override int GetHashCode()
+        {
+            var hash = new HashCode();
+            hash.AddBytes(this.Handle);
+            return hash.ToHashCode();
+        }
+    }
+}
+
+/// <summary>
 /// A simulation's plan cache as <c>sys.dm_exec_cached_plans</c> sees it:
 /// every batch and module real would have compiled and kept, with what their
 /// statements measured. Separate from the parse caches that speed the

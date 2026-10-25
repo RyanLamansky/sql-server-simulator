@@ -136,6 +136,12 @@ internal sealed class StatementContext
     public Dictionary<(Schemas.CatalogView View, Database Database), byte[][]>? CatalogViewRows;
 
     /// <summary>
+    /// What each plan or SQL handle named as the statement's run first looked
+    /// one up (<see cref="Simulation.HandleIndexFor"/>); cleared per run.
+    /// </summary>
+    public HandleIndex? HandleIndex;
+
+    /// <summary>
     /// The rows each user database's catalog base tables hold for what its
     /// user made, counted once per run for the system tables' rowsets
     /// (<c>BuiltInResources.UserCatalogRows</c>); cleared with the statement's
@@ -753,6 +759,7 @@ internal sealed class StatementContext
         this.AutoOpenedKeys = null;
         this.RowAddresses = null;
         this.CatalogViewRows = null;
+        this.HandleIndex = null;
         this.UserCatalogRowCounts = null;
 #if DEBUG
         this.AuditedCatalogRowSets = null;

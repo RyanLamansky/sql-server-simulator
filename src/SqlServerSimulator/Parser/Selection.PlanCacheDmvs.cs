@@ -263,13 +263,6 @@ partial class Selection
         var handle = value.CoerceTo(SqlType.VarbinaryMax).AsBytes;
         if (handle.Length < BuiltInResources.SqlHandleLength)
             throw SimulatedSqlException.InvalidDmvHandle(functionName, invalidState);
-        if (handle[0] is not (5 or 6))
-            return null;
-        foreach (var plan in batch.Connection.Simulation.LiveCachedPlans())
-        {
-            if (handle.AsSpan(0, BuiltInResources.SqlHandleLength).SequenceEqual(plan.PlanHandle))
-                return plan;
-        }
-        return null;
+        return handle[0] is 5 or 6 ? batch.Connection.Simulation.HandleIndexFor(batch).FindPlan(handle) : null;
     }
 }

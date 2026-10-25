@@ -122,56 +122,29 @@ partial class Selection
             case 3 when handle[2] != 0 || handle[3] != 0:
                 return ModuleSqlTextRow(batch.Connection.Simulation, handle);
             case 5 or 6:
-                foreach (var plan in batch.Connection.Simulation.LiveCachedPlans())
-                {
-                    if (handle.AsSpan(0, BuiltInResources.SqlHandleLength).SequenceEqual(plan.PlanHandle))
-                    {
-                        return [RowEncoder.EncodeRow(SqlTextSchema, [
-                            SqlValue.FromInt16(plan.Key.DatabaseId),
-                            plan.Module is null ? SqlValue.Null(SqlType.Int32) : SqlValue.FromInt32(plan.ObjectId),
-                            plan.Module is null ? SqlValue.Null(SqlType.SmallInt) : SqlValue.FromInt16(plan.Number),
-                            SqlValue.FromBoolean(plan.Module is not null && plan.Text is null),
-                            plan.Text is null ? SqlValue.Null(SqlType.NVarcharMax) : SqlValue.FromNVarchar(plan.Text),
-                        ])];
-                    }
-                }
-                return [];
+                return batch.Connection.Simulation.HandleIndexFor(batch).FindPlan(handle) is { } plan
+                    ? [RowEncoder.EncodeRow(SqlTextSchema, [
+                        SqlValue.FromInt16(plan.Key.DatabaseId),
+                        plan.Module is null ? SqlValue.Null(SqlType.Int32) : SqlValue.FromInt32(plan.ObjectId),
+                        plan.Module is null ? SqlValue.Null(SqlType.SmallInt) : SqlValue.FromInt16(plan.Number),
+                        SqlValue.FromBoolean(plan.Module is not null && plan.Text is null),
+                        plan.Text is null ? SqlValue.Null(SqlType.NVarcharMax) : SqlValue.FromNVarchar(plan.Text),
+                    ])]
+                    : [];
             case 9:
                 throw SimulatedSqlException.StatementSqlHandleNotProcessed();
             default:
                 throw SimulatedSqlException.InvalidSqlTextHandle();
         }
 
-        var simulation = batch.Connection.Simulation;
-        foreach (var connection in simulation.SnapshotConnections())
-        {
-            // A batch carrying a secret reports no text through its handle.
-            if (Matches(connection.Session.BatchText, handle))
-                return simulation.HidesBatchText(connection.Session.BatchText) ? [] : SqlTextRow(connection.Session.BatchText!);
-            // A running statement simple parameterization rewrote names its
-            // prepared text.
-            if (connection.Session.BatchText is { } running
-                && simulation.ReportedStatement(connection, running, connection.Session.StatementStartIndex, connection.CurrentDatabase) is var reported
-                && !ReferenceEquals(reported.Text, running) && Matches(reported.Text, handle))
-            {
-                return SqlTextRow(reported.Text);
-            }
-            // A MARS request parked between its statements is running too.
-            foreach (var parked in connection.ParkedRequests())
-            {
-                if (Matches(parked.BatchText, handle))
-                    return simulation.HidesBatchText(parked.BatchText) ? [] : SqlTextRow(parked.BatchText!);
-            }
-        }
-        foreach (var plan in batch.Connection.Simulation.LiveCachedPlans())
-        {
-            if (plan.IsBatch && handle.AsSpan(0, BuiltInResources.SqlHandleLength).SequenceEqual(plan.SqlHandle))
-                return SqlTextRow(plan.Text!);
-        }
-        return [];
-
-        static bool Matches(string? text, byte[] handle) =>
-            text is not null && BuiltInResources.SqlHandleOf(text).AsSpan().SequenceEqual(handle.AsSpan(0, BuiltInResources.SqlHandleLength));
+        // A running batch's text answers ahead of a cached one's: a session's,
+        // the prepared text simple parameterization runs one of its statements
+        // under, or a MARS request's parked between its statements — none for
+        // a batch carrying a secret.
+        var index = batch.Connection.Simulation.HandleIndexFor(batch);
+        if (index.FindRunning(handle, out var running))
+            return running is null ? [] : SqlTextRow(running);
+        return index.FindBatchPlan(handle) is { } cached ? SqlTextRow(cached.Text!) : [];
 
         static List<byte[]> SqlTextRow(string text) =>
             [RowEncoder.EncodeRow(SqlTextSchema, [

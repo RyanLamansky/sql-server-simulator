@@ -943,6 +943,7 @@ Offsets are bytes into the plan's text, the end offset the last character's, as 
 A batch's `sql_handle` is the one `sys.dm_exec_requests` reports for its text (real's MD5 bytes); a module's is the type byte 3, the database and object ids and the procedure number, eight bytes between standing in for real's unrecovered ones.
 A plan handle is the type byte (6 for a batch, 5 for a module), the database id, the object id and four bytes derived from the cache key, so a plan compiled again under the same key gets the handle it had, as real's did.
 `sys.dm_exec_sql_text` resolves a plan handle to the plan's text and database, a batch's SQL handle to its text with no database, and a module's SQL handle to its definition, number 1 for a procedure.
+A statement resolves handles through one index of what each named as its run first looked (`Simulation.HandleIndexFor`) — the live plans, the running batches, the cached ones — so a monitoring query applying `sys.dm_exec_sql_text` or a plan function to every cached plan probes a dictionary per row where it walked every plan and session, quadratic in the plans held (3,000 plans: 1.7 s to 29 ms, Release, measured 2026-10-25).
 
 **Plan functions.**
 `sys.dm_exec_plan_attributes` lists real's 29 attributes in real's order and base types: the cache key the plan compiled under (`dbid_execute` 0 for a batch), then one execution context reused at every later use, then the SQL handle.

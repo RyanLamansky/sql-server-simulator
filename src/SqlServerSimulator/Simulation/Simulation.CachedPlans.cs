@@ -507,6 +507,14 @@ partial class Simulation
         return [.. plans.Except(stale)];
     }
 
+    /// <summary>
+    /// The handles the plan cache and the running sessions hold, for the
+    /// statement <paramref name="batch"/> runs: indexed once per run of it, as
+    /// its first lookup asks.
+    /// </summary>
+    internal HandleIndex HandleIndexFor(BatchContext batch) =>
+        batch.CurrentStatement.HandleIndex ??= new(this);
+
     private static bool ModuleStillDefined(Database database, SchemaObject module)
     {
         foreach (var (_, schema) in database.Schemas)
