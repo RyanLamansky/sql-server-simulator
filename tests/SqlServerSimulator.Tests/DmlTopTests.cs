@@ -288,6 +288,33 @@ public sealed class DmlTopTests
         AreEqual("1:-5,2:-10,3:0", sim.ExecuteScalar("select string_agg(concat(id, ':', v), ',') within group (order by id) from t"));
     }
 
+    /// <summary>
+    /// <c>DELETE</c> and <c>UPDATE</c> stop walking their target once a
+    /// row-count <c>TOP</c> — or with none, <c>SET ROWCOUNT</c> — has its rows,
+    /// so a WHERE or SET only a later row would raise on never runs (probed
+    /// 2026-10-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("delete top (1) from d where 1 / x = 1", "2:0,3:2")]
+    [DataRow("set rowcount 1; delete from d where 1 / x >= 0; set rowcount 0", "2:0,3:2")]
+    [DataRow("set rowcount 2; delete top (1) from d where 1 / x >= 0; set rowcount 0", "2:0,3:2")]
+    [DataRow("set rowcount 1; update d set x = 10 / x; set rowcount 0", "1:10,2:0,3:2")]
+    [DataRow("set rowcount 1; update d set x = x + 100 where 1 / x >= 0; set rowcount 0", "1:101,2:0,3:2")]
+    public void DeleteAndUpdate_StopWalkingTheTarget(string statement, string expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table d (id int, x int); insert d values (1, 1), (2, 0), (3, 2)", statement);
+        AreEqual(expected, sim.ExecuteScalar("select string_agg(concat(id, ':', x), ',') within group (order by id) from d"));
+    }
+
+    /// <summary>A cap the walk meets only past the failing row raises its error, as real does.</summary>
+    [TestMethod]
+    [DataRow("delete top (2) from d where 1 / x >= 0")]
+    [DataRow("set rowcount 1; delete top (2) from d where 1 / x >= 0")]
+    [DataRow("delete top (50) percent from d where 1 / x >= 0")]
+    public void DeleteTop_NeedingALaterRow_RaisesItsError(string statement) =>
+        _ = new Simulation().AssertSqlError($"create table d (id int, x int); insert d values (1, 1), (2, 0), (3, 2); {statement}", 8134);
+
     private const string PercentSource = "create table src (k int primary key, v varchar(10)); insert src values (1, '1'), (2, '2'), (3, 'x'), (4, '4');";
 
     /// <summary>

@@ -289,10 +289,13 @@ partial class Simulation
         // before it deletes it, so the row a reader's window ends on is held,
         // not yet deleted.
         var sendsBeforeDeleting = writeOrder != WriteOrder.WholeFirst && SendsBeforeDeleting(context.Batch, table);
+        var rowCap = readsNoRow ? int.MaxValue : DmlWalkCap(top, context.Batch);
         if (writeOrder == WriteOrder.AsRead)
             return SentAsWritten(output!, DeleteAsRead());
         foreach (var (pageIndex, slotIndex, scannedBytes) in rowSource)
         {
+            if (deleted.Count >= rowCap)
+                break;
             context.Batch.PollCancellation();
             // Positioned DELETE (WHERE CURRENT OF): only the cursor's row.
             if (positionedCursor is { } positioned && !CursorRowMatches(positioned, (pageIndex, slotIndex)))
@@ -354,10 +357,6 @@ partial class Simulation
         IEnumerable<byte[]> DeleteAsRead()
         {
             CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
-            // A written TOP replaces SET ROWCOUNT (see ApplyDmlTopCap).
-            var cap = top is { } limit ? (limit.Percent ? int.MaxValue : Selection.ResolveDmlTopCap(limit, int.MaxValue, context.Batch))
-                : context.Connection.RowCountLimit is > 0 and var rowCountLimit ? (int)Math.Min(rowCountLimit, int.MaxValue)
-                : int.MaxValue;
             var written = 0;
             var walk = new TargetWalk();
             List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)> row = [];
@@ -365,7 +364,7 @@ partial class Simulation
             bool RejudgeRow(int at, byte[] current) => Rejudge(row, at, current);
             Func<int, byte[], bool> rejudge = RejudgeRow;
             using var rows = TargetRowsAsTheyStand(table, seek, context.Batch, walk).GetEnumerator();
-            while (written < cap)
+            while (written < rowCap)
             {
                 context.Batch.PollCancellation();
                 var generation = Volatile.Read(ref table.Heap.MutationGeneration);

@@ -836,10 +836,7 @@ partial class Simulation
         }
         var walkGeneration = Volatile.Read(ref table.Heap.MutationGeneration);
         var judgedRows = new List<(int PageIndex, int SlotIndex, byte[] Bytes)>();
-        // A row-count TOP stops the walk once it has its rows, so a SET value
-        // only a later row would raise never runs (probed 2026-10-06 against
-        // SQL Server 2025: `UPDATE TOP (1) t SET g.STSrid = 55` past a NULL g).
-        var rowCap = top is { Percent: false } countLimit && !readsNoRow ? Selection.ResolveDmlTopCap(countLimit, int.MaxValue, context.Batch) : int.MaxValue;
+        var rowCap = readsNoRow ? int.MaxValue : DmlWalkCap(top, context.Batch);
         if (writeOrder == WriteOrder.AsRead)
             return SentAsWritten(output!, UpdateAsRead());
         foreach (var (pageIndex, slotIndex, scannedBytes) in rowSource)
@@ -912,8 +909,6 @@ partial class Simulation
         IEnumerable<byte[]> UpdateAsRead()
         {
             CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
-            // A written TOP replaces SET ROWCOUNT (see ApplyDmlTopCap).
-            var cap = top is null && context.Connection.RowCountLimit is > 0 and var rowCountLimit && rowCountLimit < rowCap ? (int)rowCountLimit : rowCap;
             var written = 0;
             var walk = new TargetWalk();
             List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> row = [];
@@ -921,7 +916,7 @@ partial class Simulation
             bool RejudgeRow(int at, byte[] current) => Rejudge(row, at, current);
             Func<int, byte[], bool> rejudge = RejudgeRow;
             using var rows = TargetRowsAsTheyStand(table, seek, context.Batch, walk).GetEnumerator();
-            while (written < cap)
+            while (written < rowCap)
             {
                 context.Batch.PollCancellation();
                 var generation = Volatile.Read(ref table.Heap.MutationGeneration);
@@ -1612,6 +1607,22 @@ partial class Simulation
         }
         rows.RemoveRange(kept, rows.Count - kept);
     }
+
+    /// <summary>
+    /// How many qualifying rows a DML statement's target walk reads before it
+    /// stops: a row-count <c>TOP</c>'s, or with no <c>TOP</c> the
+    /// <c>SET ROWCOUNT</c> it replaces, where real's plan stops reading, so a
+    /// WHERE or SET only a later row would raise on never runs (probed
+    /// 2026-10-06 and 2026-10-25 against SQL Server 2025: <c>UPDATE TOP (1) t
+    /// SET g.STSrid = 55</c> past a NULL <c>g</c>, and <c>DELETE … WHERE 1 / x
+    /// &gt;= 0</c> under <c>ROWCOUNT 1</c> past an <c>x</c> of 0);
+    /// <see cref="int.MaxValue"/> for a <c>TOP … PERCENT</c>, which needs every
+    /// row counted.
+    /// </summary>
+    private static int DmlWalkCap(Selection.DmlTopLimit? top, BatchContext batch) =>
+        top is { } limit ? (limit.Percent ? int.MaxValue : Selection.ResolveDmlTopCap(limit, int.MaxValue, batch))
+            : batch.Connection.RowCountLimit is > 0 and var rowCountLimit ? (int)Math.Min(rowCountLimit, int.MaxValue)
+            : int.MaxValue;
 
     /// <summary>
     /// Trims an affected-row list to the DML <c>TOP</c> cap, or with no
