@@ -202,6 +202,7 @@ The check runs at parse, which a plan-cache hit skips — so a cached plan has t
 A non-string operand — xml and a bare `NULL` included — raises Msg 447 while compiling, and it outranks an unknown collation name's Msg 448, which real raises only over a string (probed 2026-09-26 against SQL Server 2025).
 
 A `varchar` / `char` moved to a collation of another code page converts there and then — best fit, else `?` — so what reads it next sees the converted text: `LOWER(CAST(CHAR(192) AS varchar(1)) COLLATE SQL_Latin1_General_CP437_CI_AS)` is `a`, the `À` having become `A` at the `COLLATE` (probed 2026-09-28 against SQL Server 2025).
+A `+` or `||` converts its operand whose collation loses the precedence the same way before the two join (`Add.TextInCodePageOf`), while `CONCAT` and `CONCAT_WS` copy a `varchar` argument's bytes through unconverted, read in the result's code page: over a Greek `s`, `'ßé' + s` is `?eαβ` and `CONCAT('ßé', s)` is `ίιαβ` (probed 2026-10-25 against SQL Server 2025).
 
 Chained `expr COLLATE A COLLATE B` rejects with Msg 156 at parse time (probe-confirmed).
 Unknown collation name raises Msg 448 at parse time.
@@ -756,6 +757,8 @@ A `CAST` does **not** resolve a conflict — the cast result inherits the source
 
 ## Known gaps
 
+- **A `CONCAT` into a UTF-8 result keeps bytes no .NET string holds.**
+  Real stores an argument's bytes as they are, so `CONCAT('ßé', s)` over a UTF-8 `s` holds `DF E9`, which isn't UTF-8; here each such byte reads as `?`, so `DATALENGTH` agrees but the bytes are `3F 3F`, `LEN` counts two characters where real counts one, and a client shows `?` where real's shows U+FFFD (probed 2026-10-25 against SQL Server 2025).
 - **A ligature doesn't expand outside the Latin1-General tables.**
   Real treats a ligature as equal to its expansion at the primary level under every non-binary collation probed, `Japanese_CI_AS` and `French_CI_AS` included (`N'æ' = N'ae'` and `N'ß' LIKE N'ss'` are true; probed 2026-10-02), and the [byte-exact tables](#the-latin1-general-names--byte-exact-sort) expand it; every other name runs through `CompareInfo`, which holds the two apart.
   The probed set: `Æ`→`AE`, `æ`→`ae`, `Þ`→`TH`, `þ`→`th`, `ß`→`ss`, `Ĳ`→`IJ`, `ĳ`→`ij`, `Œ`→`OE`, `œ`→`oe`, `Ǉ`→`LJ`, `ǈ`→`Lj`, `Ǌ`→`NJ`, `ǋ`→`Nj`, `Ǳ`→`DZ`, `ǲ`→`Dz`, `ﬀ`→`ff`, `ﬁ`→`fi`, `ﬂ`→`fl`, `ﬃ`→`ffi`, `ﬄ`→`ffl`, `ﬆ`→`st`.

@@ -98,11 +98,24 @@ internal sealed class Add : TwoSidedExpression
         // Only one NULL reads as empty: two NULLs still concatenate to NULL.
         // A bounded result past the family maximum is clipped to it.
         if (!concatNullYieldsNull && left.IsNull != right.IsNull)
-            return SqlValue.FromString(resultType, StringScalars.ClipToFamilyCap((left.IsNull ? "" : left.AsString) + (right.IsNull ? "" : right.AsString), resultType));
+            return SqlValue.FromString(resultType, StringScalars.ClipToFamilyCap((left.IsNull ? "" : TextInCodePageOf(left, resultType)) + (right.IsNull ? "" : TextInCodePageOf(right, resultType)), resultType));
         return left.IsNull || right.IsNull
             ? SqlValue.Null(resultType)
-            : SqlValue.FromString(resultType, StringScalars.ClipToFamilyCap(left.AsString + right.AsString, resultType));
+            : SqlValue.FromString(resultType, StringScalars.ClipToFamilyCap(TextInCodePageOf(left, resultType) + TextInCodePageOf(right, resultType), resultType));
     }
+
+    /// <summary>
+    /// <paramref name="operand"/>'s text as a <c>+</c> or <c>||</c> of
+    /// <paramref name="resultType"/> joins it: a <c>varchar</c> operand of
+    /// another code page converts into the result's first — best fit, else
+    /// <c>?</c> — so <c>'ß' + s</c> over a Greek <c>s</c> holds a <c>?</c>
+    /// wherever it goes next (probed 2026-10-25 against SQL Server 2025).
+    /// </summary>
+    internal static string TextInCodePageOf(SqlValue operand, SqlType resultType) =>
+        operand.Type is VarcharSqlType or CharSqlType && resultType is VarcharSqlType or CharSqlType
+            && resultType.Collation is { } result && operand.Type.Collation is { } own && own.StorageEncoding != result.StorageEncoding
+            ? operand.CoerceTo(operand.Type.WithCollation(result, resultType.Coercibility)).AsString
+            : operand.AsString;
 
     /// <summary>
     /// The type a <c>+</c> of two strings takes: <see cref="SqlType.PromoteForArithmetic"/>'s,

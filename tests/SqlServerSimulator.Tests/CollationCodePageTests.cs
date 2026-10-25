@@ -480,4 +480,32 @@ public sealed class CollationCodePageTests
     [DataRow(8218, "SQL_Latin1_General_CP850_CI_AS", 39)]
     public void NarrowingToACodePage_TakesWindowsBestFit(int codePoint, string collation, int expected) =>
         AreEqual(expected, new Simulation().ExecuteScalar($"select ascii(cast(nchar({codePoint}) collate {collation} as varchar(1)))"));
+
+    private const string GreekColumn = "create table g (id int, s varchar(10) collate Greek_CI_AS); insert g values (1, N'αβ'), (2, 'c'); declare @l varchar(10) = 'ßé';";
+
+    /// <summary>
+    /// A <c>varchar</c> operand of <c>+</c> or <c>||</c> in another code page
+    /// than the result's converts into it before the two join — best fit, else
+    /// <c>?</c> — so what reads the result next sees the converted text, where
+    /// <c>CONCAT</c> copies the operand's bytes through unconverted, read in the
+    /// result's code page (probed 2026-10-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("convert(varbinary(10), s + @l)", "E1E23F65")]
+    [DataRow("convert(varbinary(10), @l || s)", "3F65E1E2")]
+    [DataRow("convert(varbinary(10), @l collate Latin1_General_CI_AS + s)", "DFE961DF")]
+    [DataRow("convert(varbinary(10), concat(s, @l))", "E1E2DFE9")]
+    [DataRow("convert(varbinary(10), concat(@l collate Latin1_General_CI_AS, s))", "DFE9E1E2")]
+    [DataRow("convert(varbinary(10), concat_ws('-', @l, s))", "DFE92DE1E2")]
+    public void Concatenation_AcrossCodePages_StoresRealsBytes(string expression, string expected) =>
+        AreEqual(expected, Hex(new Simulation(), $"{GreekColumn} select {expression} from g where id = 1"));
+
+    [TestMethod]
+    [DataRow("select replace(@l + s, '?', '!') from g where id = 1", "!eαβ")]
+    [DataRow("select replace(@l || s, '?', '!') from g where id = 1", "!eαβ")]
+    [DataRow("select concat(@l, s) from g where id = 1", "ίιαβ")]
+    [DataRow("declare @v varchar(20); set @v = @l + (select s from g where id = 1); select @v", "?eaß")]
+    [DataRow("declare @v varchar(max) = 'x'; select @v = @v + s from g order by id; select @v", "xa?c")]
+    public void Concatenation_AcrossCodePages_ReadsAsReal(string query, string expected) =>
+        AreEqual(expected, Text(new Simulation(), $"{GreekColumn} {query}"));
 }

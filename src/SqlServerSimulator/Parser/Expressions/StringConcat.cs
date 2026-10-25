@@ -187,12 +187,18 @@ internal sealed class StringConcat : Expression
     /// returns the underlying string. String-category sources copy through;
     /// other categories pass through <see cref="SqlValue.CoerceTo"/>, which
     /// applies the same default formats as a <c>CAST(expr AS varchar)</c> /
-    /// <c>CAST(expr AS nvarchar)</c>.
+    /// <c>CAST(expr AS nvarchar)</c>. A <c>varchar</c> argument of another code
+    /// page than a <c>varchar</c> result's copies its bytes through unconverted,
+    /// read in the result's code page, where <c>+</c> converts them:
+    /// <c>CONCAT('ßé', s)</c> over a Greek <c>s</c> reads <c>ίι</c> (probed
+    /// 2026-10-25 against SQL Server 2025).
     /// </summary>
     private static string StringifyForConcat(SqlValue value, SqlType resultType) =>
-        SqlType.IsStringCategory(value.Type)
-            ? value.AsString
-            : value.CoerceTo(resultType).AsString;
+        !SqlType.IsStringCategory(value.Type) ? value.CoerceTo(resultType).AsString
+        : value.Type is VarcharSqlType or CharSqlType && resultType is VarcharSqlType
+            && resultType.Collation is { } result && value.Type.Collation is { } own && own.StorageEncoding != result.StorageEncoding
+            ? result.StorageEncoding.GetString(own.StorageEncoding.GetBytes(value.AsString))
+            : value.AsString;
 
 
     /// <summary>

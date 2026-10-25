@@ -15,9 +15,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// Every appended part is <see cref="Expression.ParallelSafe"/> — it reads only
 /// its row and writes nothing — so a step meeting anything an append doesn't
 /// reproduce declines before it changes anything, and the ordinary assignment
-/// evaluates the parts again: a NULL, a value other than a string, a result
+/// evaluates the parts again: a NULL, a value other than a string, a step
 /// short of MAX or in another code page than the variable's, or a
-/// <c>COALESCE</c> that would convert what it returns.
+/// <c>COALESCE</c> that would convert what it returns. A part in another code
+/// page than its step converts into it, as the step's <c>+</c> converts it.
 /// </remarks>
 internal sealed class StringAppend
 {
@@ -97,19 +98,24 @@ internal sealed class StringAppend
             if (value.IsNull || value.Type is not (VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType or SystemNameSqlType))
                 return false;
             type = Add.StringPairType(type, value.Type);
-            if (!IsMaxString(type))
+            if (!KeepsText(declared, type))
                 return false;
-            suffixes.Add(value.AsString);
+            suffixes.Add(Add.TextInCodePageOf(value, type));
         }
-
-        // The assignment converts the result to the variable's type, which
-        // keeps the text only within one family and, for varchar, one code page.
-        var keepsText = type is VarcharSqlType
-            ? declared is VarcharSqlType && type.Collation!.StorageEncoding == declared.Collation!.StorageEncoding
-            : declared is NVarcharSqlType;
-        if (!keepsText)
-            return false;
         slot.Append(suffixes);
         return true;
     }
+
+    /// <summary>
+    /// Whether a step resulting in <paramref name="type"/> keeps as it is the
+    /// text a variable of <paramref name="declared"/> holds: a MAX string of
+    /// the same family and, for <c>varchar</c>, the same code page — a
+    /// <c>+</c> into another code page converts the text it joins, and the
+    /// assignment converts a result of another family or code page.
+    /// </summary>
+    private static bool KeepsText(SqlType declared, SqlType type) =>
+        IsMaxString(type)
+        && (type is VarcharSqlType
+            ? declared is VarcharSqlType && type.Collation!.StorageEncoding == declared.Collation!.StorageEncoding
+            : declared is NVarcharSqlType);
 }

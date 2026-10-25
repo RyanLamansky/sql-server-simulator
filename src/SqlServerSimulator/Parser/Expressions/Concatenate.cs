@@ -116,7 +116,7 @@ internal sealed class Concatenate(Expression left, Expression right) : Expressio
     }
 
     private static string Stringify(SqlValue value, SqlType resultType) =>
-        SqlType.IsStringCategory(value.Type) ? value.AsString : value.CoerceTo(resultType).AsString;
+        SqlType.IsStringCategory(value.Type) ? Add.TextInCodePageOf(value, resultType) : value.CoerceTo(resultType).AsString;
 
     /// <summary>
     /// Whether a type can participate in <c>||</c>: any non-LOB string, any
