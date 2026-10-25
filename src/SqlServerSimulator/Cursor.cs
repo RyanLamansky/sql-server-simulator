@@ -934,27 +934,27 @@ internal sealed class Cursor(
         }
 
         var member = this.keysetIdentities[this.position];
-        foreach (var row in Selection.EnumerateForCursor(this.Plan!, batch))
-        {
-            if (Selection.CursorIdentityMatches(this.Plan!, row, member))
-            {
-                // A row whose select list raises fails the fetch and leaves
-                // the cursor where it was, so a NEXT meets the row again.
-                if (row.ProjectionError is { } error)
-                {
-                    this.position = from;
-                    throw error;
-                }
-                this.CurrentRids = row.Rids;
-                return (0, row.Values);
-            }
-        }
+        var plan = this.Plan!;
+        var row = Selection.TryReadKeysetMember(plan, batch, member)
+            ?? Selection.EnumerateForCursor(plan, batch).Find(live => Selection.CursorIdentityMatches(plan, live, member));
         // Member deleted out from under the keyset (or its key columns
         // changed, making the row no longer findable by the snapshotted key —
         // on a join, either side going away is enough): status -2, no current
         // row.
-        this.CurrentRids = null;
-        return (-2, null);
+        if (row is null)
+        {
+            this.CurrentRids = null;
+            return (-2, null);
+        }
+        // A row whose select list raises fails the fetch and leaves the cursor
+        // where it was, so a NEXT meets the row again.
+        if (row.ProjectionError is { } error)
+        {
+            this.position = from;
+            throw error;
+        }
+        this.CurrentRids = row.Rids;
+        return (0, row.Values);
     }
 
     /// <summary>

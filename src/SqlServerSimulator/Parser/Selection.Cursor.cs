@@ -807,13 +807,60 @@ internal sealed partial class Selection
         EnumerateCursorRows(plan, batch, outerResolver: null, applyRowLimit);
 
     /// <summary>
+    /// KEYSET member <paramref name="member"/>'s live row read at its own
+    /// address, rather than found in a walk of every live row
+    /// (<see cref="EnumerateForCursor"/>), for a cursor over one table whose
+    /// identity no two live rows share: the row there, passing the cursor's
+    /// WHERE under the member's identity, is the one the walk would match.
+    /// Null when that doesn't settle it — another shape, a row gone from the
+    /// address or no longer the member's, a WHERE it no longer passes, a
+    /// <c>STATISTICS IO</c> report counting the walk's reads — and the caller
+    /// walks.
+    /// </summary>
+    internal static CursorRow? TryReadKeysetMember(CursorSourcePlan plan, BatchContext batch, CursorRow member)
+    {
+        if (plan.Slots.Length != 1 || plan.Slots[0].Table is not { } table || member.Rids[0] is not { } address
+            || batch.Connection.StatementIo is not null || !IdentityIsUnique(table, plan.IdentityKeys[0]))
+        {
+            return null;
+        }
+        var rows = EnumerateCursorRows(plan, batch, outerResolver: null, applyRowLimit: false, onlyAddress: address);
+        return rows.Count == 1 && CursorIdentityMatches(plan, rows[0], member) ? rows[0] : null;
+    }
+
+    /// <summary>
+    /// Whether no two live rows of <paramref name="table"/> share an identity
+    /// under <paramref name="identity"/>: an address, a key a uniquifier and
+    /// an address join, or a key an enabled key constraint or unique index
+    /// enforces — a disabled unique index can be a cursor's identity (see
+    /// <see cref="CursorIdentityKey.For"/>) without keeping it unique.
+    /// </summary>
+    private static bool IdentityIsUnique(HeapTable table, CursorIdentityKey identity)
+    {
+        if (identity.Ordinals is not { } ordinals || identity.Uniquified)
+            return true;
+        foreach (var key in table.KeyConstraints)
+        {
+            if (!key.IsDisabled && key.StorageOrdinals.AsSpan().SequenceEqual(ordinals))
+                return true;
+        }
+        foreach (var index in table.Indexes)
+        {
+            if (index.IsUnique && !index.IsDisabled && index.KeyStorageOrdinals.AsSpan().SequenceEqual(ordinals))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
     /// The recursive body of <see cref="EnumerateForCursor"/>. A deferred
     /// slot re-enters here on its own plan, so its rows carry the addresses of
     /// the base tables its body read; <paramref name="outerResolver"/> is the
     /// enclosing tuple's resolver, non-null when this plan is an APPLY right
-    /// side (or sits under one).
+    /// side (or sits under one). <paramref name="onlyAddress"/> confines a
+    /// one-table plan's scan to the row at that address.
     /// </summary>
-    private static List<CursorRow> EnumerateCursorRows(CursorSourcePlan plan, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, bool applyRowLimit)
+    private static List<CursorRow> EnumerateCursorRows(CursorSourcePlan plan, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, bool applyRowLimit, (int Page, int Slot)? onlyAddress = null)
     {
         if (plan.InstallsRowAddresses)
             batch.CurrentStatement.RowAddresses ??= new();
@@ -845,7 +892,7 @@ internal sealed partial class Selection
         {
             scans[i] = new CursorSlotScan(plan.SlotIdentityWidth[i]);
             if (!IsApplySlot(plan, i))
-                AppendCursorSlotRows(scans[i], plan, i, batch, outerResolver, applyRowLimit);
+                AppendCursorSlotRows(scans[i], plan, i, batch, outerResolver, applyRowLimit, onlyAddress);
         }
 
         var tuples = FoldCursorTuples(plan, scans, current, runtime, batch, resolve, applyRowLimit);
@@ -943,6 +990,13 @@ internal sealed partial class Selection
         return rows.GetRange(start, length);
     }
 
+    /// <summary>The live row at <paramref name="address"/>, as the heap's walk would yield it there, or none.</summary>
+    private static IEnumerable<(int PageIndex, int SlotIndex, byte[] Bytes)> RowAt(Heap heap, (int Page, int Slot) address)
+    {
+        if (heap.ReadLiveRow(address.Page, address.Slot) is { } bytes)
+            yield return (address.Page, address.Slot, bytes);
+    }
+
     /// <summary>True when slot <paramref name="index"/> is the right side of a
     /// <c>CROSS</c> / <c>OUTER APPLY</c>, whose rows depend on the left tuple
     /// and so can't be scanned once up front.</summary>
@@ -967,7 +1021,8 @@ internal sealed partial class Selection
         int index,
         BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver,
-        bool applyRowLimit)
+        bool applyRowLimit,
+        (int Page, int Slot)? onlyAddress = null)
     {
         if (plan.Slots[index].Table is { } table)
         {
@@ -981,7 +1036,8 @@ internal sealed partial class Selection
             _ = counts?.ScanCount += 1;
             var lastPage = -1;
             var addresses = batch.CurrentStatement.RowAddresses;
-            foreach (var (page, slot, bytes) in RowSecurity.FilterAddressedRows(table, table.Heap.EnumerateRowsWithAddress(), batch))
+            var rows = onlyAddress is { } address ? RowAt(table.Heap, address) : table.Heap.EnumerateRowsWithAddress();
+            foreach (var (page, slot, bytes) in RowSecurity.FilterAddressedRows(table, rows, batch))
             {
                 counts?.Enter(page, ref lastPage);
                 addresses?.Record(bytes, page, slot);

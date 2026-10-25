@@ -45,6 +45,7 @@ A third gate converts KEYSET all the way to a read-only snapshot: every particip
 - **STATIC** snapshots projected rows once (`Selection.Execute` → decoded `SqlValue[]`); immune to later changes; covers every non-navigable query.
 - **KEYSET** snapshots an ordered list of members at OPEN.
   Each FETCH re-enumerates the live base tables (`EnumerateForCursor`) and matches the snapshotted member by the key each base table is identified by — see [What a keyset member keys on](#what-a-keyset-member-keys-on).
+  A cursor over one table whose identity no two live rows share reads the member's row at its address instead, falling back to the walk when that row is gone, no longer the member's or no longer passes the WHERE (`Selection.TryReadKeysetMember`): a fetch loop over 4,000 rows took 3.4 s and takes 57 ms (measured 2026-10-25, Release), against real's 53 ms.
   A value change to non-identity columns shows through (status 0); a deleted-or-key-changed member yields `@@FETCH_STATUS = -2`.
 - **DYNAMIC** stores no list; it tracks the last-emitted `(ORDER BY key, identity)` and re-enumerates live each FETCH to find the next/prior row by that total order.
   Deletes ahead are silently skipped; inserts ahead appear.
