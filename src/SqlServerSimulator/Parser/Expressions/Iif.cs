@@ -97,8 +97,10 @@ internal sealed class Iif : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         this.condition.Bind(batch, resolveColumnType);
-        this.cachedResultType = SettledArmType(this.settledArm, PromoteValueArms([this.trueValue, this.falseValue], batch, resolveColumnType), batch, resolveColumnType);
-        this.namingArm = FirstDecimalArm([this.trueValue, this.falseValue], batch, resolveColumnType);
+        Expression[] arms = [this.trueValue, this.falseValue];
+        var unified = PromoteValueArms(arms, batch, resolveColumnType, out var armTypes);
+        this.cachedResultType = SettledArmType(this.settledArm, unified, arms, armTypes);
+        this.namingArm = FirstDecimalArm(arms, armTypes);
         return this.cachedResultType;
     }
 

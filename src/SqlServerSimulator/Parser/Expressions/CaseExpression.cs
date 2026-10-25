@@ -169,8 +169,9 @@ internal sealed class CaseExpression : Expression
         }
 
         var arms = this.elseBranch is null ? this.thens : [.. this.thens, this.elseBranch];
-        this.cachedResultType = SettledArmType(this.settledArm, PromoteValueArms(arms, batch, resolveColumnType), batch, resolveColumnType);
-        this.namingArm = FirstDecimalArm(arms, batch, resolveColumnType);
+        var unified = PromoteValueArms(arms, batch, resolveColumnType, out var armTypes);
+        this.cachedResultType = SettledArmType(this.settledArm, unified, arms, armTypes);
+        this.namingArm = FirstDecimalArm(arms, armTypes);
         return this.cachedResultType;
     }
 

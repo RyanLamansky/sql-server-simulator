@@ -1225,12 +1225,17 @@ internal abstract class Expression : ExpressionNode
     /// numeric (probed 2026-09-24). Arithmetic differs — any numeric operand
     /// names its result. Null when no arm is decimal-family.
     /// </summary>
-    private protected static Expression? FirstDecimalArm(IEnumerable<Expression> arms, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    /// <remarks>
+    /// Takes the arms' types as the form's own typing computed them, since
+    /// typing an arm again here would type everything nested in it twice per
+    /// level, and a nested chain of these forms in exponential time.
+    /// </remarks>
+    private protected static Expression? FirstDecimalArm(ReadOnlySpan<Expression> arms, ReadOnlySpan<SqlType?> armTypes)
     {
-        foreach (var arm in arms)
+        for (var i = 0; i < arms.Length; i++)
         {
-            if (!IsUntypedNullLiteral(arm) && arm.GetSqlType(batch, resolveColumnType) is DecimalSqlType)
-                return arm;
+            if (!IsUntypedNullLiteral(arms[i]) && armTypes[i] is DecimalSqlType)
+                return arms[i];
         }
         return null;
     }
@@ -1418,11 +1423,14 @@ internal abstract class Expression : ExpressionNode
     /// sibling keeps the unification (probed 2026-10-06 against SQL Server
     /// 2025).
     /// </summary>
-    internal static SqlType SettledArmType(Expression? settledArm, SqlType unified, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    internal static SqlType SettledArmType(Expression? settledArm, SqlType unified, ReadOnlySpan<Expression> arms, ReadOnlySpan<SqlType?> armTypes)
     {
         if (settledArm is null || IsUntypedNullLiteral(settledArm) || SqlType.IsMaxLength(unified))
             return unified;
-        var armType = settledArm.GetSqlType(batch, resolveColumnType);
+        var at = 0;
+        while (!ReferenceEquals(arms[at], settledArm))
+            at++;
+        var armType = armTypes[at]!;
         return armType.PairClass != unified.PairClass || armType.PairClass is not (TypePairClass.AnsiString or TypePairClass.UnicodeString or TypePairClass.Binary) || SqlType.IsMaxLength(armType)
             ? unified
             : unified.Collation is { } collation ? armType.WithCollation(collation, unified.Coercibility) : armType;
@@ -1441,17 +1449,23 @@ internal abstract class Expression : ExpressionNode
     /// <c>CASE</c>), while <c>ISNULL</c>, which takes the first argument's
     /// collation outright rather than unifying, never conflicts. <c>CHOOSE</c>
     /// names itself (probed 2026-10-02 against SQL Server 2025).</para>
+    /// <para>Each arm's type comes back in <paramref name="armTypes"/> (null
+    /// for an untyped NULL) for the form's other reads of its arms
+    /// (<see cref="FirstDecimalArm"/>, <see cref="SettledArmType"/>), which
+    /// type nothing again.</para>
     /// </summary>
-    internal static SqlType PromoteValueArms(ReadOnlySpan<Expression> arms, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string operatorName = "CASE")
+    internal static SqlType PromoteValueArms(ReadOnlySpan<Expression> arms, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, out SqlType?[] armTypes, string operatorName = "CASE")
     {
         var branches = new (SqlType, int, Expression)[arms.Length];
+        armTypes = new SqlType?[arms.Length];
         var count = 0;
         SqlType? stringSoFar = null;
-        foreach (var arm in arms)
+        for (var i = 0; i < arms.Length; i++)
         {
+            var arm = arms[i];
             if (IsUntypedNullLiteral(arm))
                 continue;
-            var armType = arm.GetSqlType(batch, resolveColumnType);
+            var armType = armTypes[i] = arm.GetSqlType(batch, resolveColumnType);
             if (armType.Category == SqlTypeCategory.String)
             {
                 if (stringSoFar is { } accumulated && accumulated != armType)

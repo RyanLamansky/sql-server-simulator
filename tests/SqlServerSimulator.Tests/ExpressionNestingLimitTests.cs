@@ -258,6 +258,23 @@ public sealed class ExpressionNestingLimitTests
     }
 #endif
 
+    // A value-selecting form types each of its arms once, so one nested in its
+    // own first argument compiles in time linear in the depth, where typing the
+    // arms again to find the one naming the result made it exponential.
+    [TestMethod]
+    [Timeout(20000)]
+    [DataRow("isnull({0}, 0)")]
+    [DataRow("coalesce({0}, 0)")]
+    [DataRow("choose(1, {0}, 0)")]
+    [DataRow("greatest({0}, 0)")]
+    public void ValueSelectingForm_NestedInItsFirstArm_CompilesInLinearTime(string form)
+    {
+        var expression = "1";
+        for (var level = 0; level < 60; level++)
+            expression = string.Format(CultureInfo.InvariantCulture, form, expression);
+        AreEqual(1, new Simulation().ExecuteScalar($"select {expression}"));
+    }
+
     // A speculative read of a query's FROM ahead of its select list, retried in
     // order when it failed, read every nested level's FROM twice — an error at
     // the bottom of 30 nested derived tables raised 2^31 times.

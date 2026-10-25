@@ -69,7 +69,7 @@ internal sealed class IsNullExpression : Expression
         var replacementType = this.replacement.GetSqlType(batch, resolveColumnType);
         _ = UndeclaredParameterDeduction.NoteExact(this.check, replacementType);
         AssignmentRules.RequireAssignable(this.replacement, replacementType, t, this.check);
-        this.namingArm = FirstDecimalArm([this.check, this.replacement], batch, resolveColumnType);
+        this.namingArm = FirstDecimalArm([this.check, this.replacement], [t, replacementType]);
         return this.cachedResultType = t;
     }
 

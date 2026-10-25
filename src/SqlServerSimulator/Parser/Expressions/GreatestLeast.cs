@@ -46,10 +46,11 @@ internal sealed class GreatestLeast : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var branches = new (SqlType, int, Expression)[this.arguments.Length];
+        var argumentTypes = new SqlType?[this.arguments.Length];
         var count = 0;
         for (var i = 0; i < this.arguments.Length; i++)
         {
-            var type = this.arguments[i].GetSqlType(batch, resolveColumnType);
+            var type = argumentTypes[i] = this.arguments[i].GetSqlType(batch, resolveColumnType);
             // A bare NULL has no type to contribute (probed 2026-09-25 against
             // SQL Server 2025: LEAST(NULL, 'b') is 'b').
             if (IsUntypedNullLiteral(this.arguments[i]))
@@ -70,7 +71,7 @@ internal sealed class GreatestLeast : Expression
                 types[i] = branches[i].Item1;
             StringScalars.RequireResolvableCollations("GREATEST/LEAST", types);
         }
-        this.namingArm = FirstDecimalArm(this.arguments, batch, resolveColumnType);
+        this.namingArm = FirstDecimalArm(this.arguments, argumentTypes);
         return this.cachedResultType;
     }
 

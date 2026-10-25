@@ -154,8 +154,9 @@ internal sealed class Coalesce : Expression
     // by the shared PromoteValueArms seam.
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        this.cachedResultType = SettledArmType(this.settledArm, PromoteValueArms(this.Arguments, batch, resolveColumnType), batch, resolveColumnType);
-        this.namingArm = FirstDecimalArm(this.Arguments, batch, resolveColumnType);
+        var unified = PromoteValueArms(this.Arguments, batch, resolveColumnType, out var armTypes);
+        this.cachedResultType = SettledArmType(this.settledArm, unified, this.Arguments, armTypes);
+        this.namingArm = FirstDecimalArm(this.Arguments, armTypes);
         return this.cachedResultType;
     }
 
