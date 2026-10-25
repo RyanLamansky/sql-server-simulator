@@ -158,7 +158,7 @@ internal sealed class HeapSeekCache
     // end — and an unbounded walk is the entry's memoized key order, shared
     // with every reader until the next write, so the caller must not change
     // it.
-    public (int Page, int Slot)[] OrderedSeek(
+    public ArraySegment<(int Page, int Slot)> OrderedSeek(
         Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons,
         SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive)
     {
@@ -167,7 +167,7 @@ internal sealed class HeapSeekCache
             var entry = this.ResolveEntry(heap, schema, lobStore, ordinals, commons);
             return lower is null && upper is null
                 ? entry.KeyOrder()
-                : [.. entry.OrderedCandidates(lower, lowerInclusive, upper, upperInclusive)];
+                : entry.OrderedSlice(lower, lowerInclusive, upper, upperInclusive);
         }
     }
 
@@ -182,7 +182,7 @@ internal sealed class HeapSeekCache
     /// the sorted keys on every probe, which is what a correlated
     /// <c>TOP (1) … ORDER BY</c> pays once per outer row.
     /// </summary>
-    public (int Page, int Slot)[] OrderedGroup(
+    public ArraySegment<(int Page, int Slot)> OrderedGroup(
         Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons, SqlValueKey prefixKey)
     {
         lock (this.gate)
@@ -1059,6 +1059,26 @@ internal sealed class HeapSeekCache
         public List<(int Page, int Slot)> OrderedCandidates(
             SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive) =>
             this.CappedCandidates(lower, lowerInclusive, upper, upperInclusive, int.MaxValue)!;
+
+        // OrderedCandidates as a slice of the key order once the bounded walks
+        // have paid for the keyed order (see walkedKeys): found by binary search
+        // over its keys and copied nowhere, where copying the in-range addresses
+        // cost a correlated ordered TOP the whole rest of the range per outer
+        // row. The key order is replaced, never changed, by a write, so a
+        // reader still walking a slice keeps an intact one.
+        public ArraySegment<(int Page, int Slot)> OrderedSlice(
+            SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive)
+        {
+            if (this.walkedKeys < this.Buckets.Count)
+                return new([.. this.OrderedCandidates(lower, lowerInclusive, upper, upperInclusive)]);
+            IndexSeekDiagnostics.Sink?.Add("CacheSlice");
+            var (order, keyList) = this.KeyedOrder();
+            var addresses = this.keyOrder ??= [.. order];
+            var keys = CollectionsMarshal.AsSpan(keyList);
+            var start = lower is { } lk ? FirstPast(keys, lk, strictly: !lowerInclusive) : 0;
+            var end = upper is { } uk ? FirstPast(keys, uk, strictly: upperInclusive) : keys.Length;
+            return end <= start ? ArraySegment<(int Page, int Slot)>.Empty : new(addresses, start, end - start);
+        }
 
         // The walk above with an abort: returns null the moment the collected rid
         // count passes <paramref name="candidateCap"/>. A caller that knows the

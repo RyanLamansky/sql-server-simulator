@@ -1996,7 +1996,7 @@ internal sealed partial class Selection
         /// stand where the statement found them (see
         /// <see cref="BatchContext.OwnWritesOf"/>).
         /// </summary>
-        public (int Page, int Slot)[] After(byte[]? last, HeapTable table, BatchContext batch)
+        public ArraySegment<(int Page, int Slot)> After(byte[]? last, HeapTable table, BatchContext batch)
         {
             var (from, fromInclusive, to, toInclusive) = (lower, lowerInclusive, upper, upperInclusive);
             if (last is not null && HeapSeekCache.TryComputeKey(last, ordinals, commons, schema, lobStore, out var key))
@@ -2008,7 +2008,7 @@ internal sealed partial class Selection
             }
             var order = cache.OrderedSeek(heap, schema, lobStore, ordinals, commons, from, fromInclusive, to, toInclusive);
             return batch.OwnWritesOf(table) is { } own
-                ? BatchContext.WithOwnWrites(table, own, ordinals, commons, order, from, fromInclusive, to, toInclusive)
+                ? BatchContext.WithOwnWrites(table, own, ordinals, commons, [.. order], from, fromInclusive, to, toInclusive)
                 : order;
         }
 
@@ -2163,7 +2163,7 @@ internal sealed partial class Selection
     /// decode and projection of every row ahead of it.
     /// </summary>
     private static IEnumerable<byte[]> MaterializeOrderedWithLockChecks(
-        HeapTable table, BatchContext batch, DataLockPlan plan, (int Page, int Slot)[] order, bool descending, int skip, OrderedScanRest? rest = null)
+        HeapTable table, BatchContext batch, DataLockPlan plan, ArraySegment<(int Page, int Slot)> order, bool descending, int skip, OrderedScanRest? rest = null)
     {
         var io = batch.Connection.StatementIo?.Touch(table);
         _ = io?.ScanCount += 1;
@@ -2173,7 +2173,7 @@ internal sealed partial class Selection
         var heap = table.Heap;
         var ownWrites = new BatchContext.OwnWriteView(batch, table);
         rest?.Begin(batch);
-        for (var i = 0; i < order.Length; i++)
+        for (var i = 0; i < order.Count; i++)
         {
             if (rest is not null && rest.Moved())
             {
@@ -2181,7 +2181,7 @@ internal sealed partial class Selection
                 i = -1;
                 continue;
             }
-            var (page, slot) = order[descending ? order.Length - 1 - i : i];
+            var (page, slot) = order[descending ? order.Count - 1 - i : i];
             // A row another request of the statement's transaction wrote since
             // the statement began reads as the statement found it.
             var noted = ownWrites.TryRead(batch, table, (page, slot), out var found);
@@ -2219,7 +2219,7 @@ internal sealed partial class Selection
     // order holds every row the snapshot sees, so a statement waiting on its
     // client reads on from it as it stands.
     private static IEnumerable<byte[]> MaterializeOrderedSnapshot(
-        HeapTable table, BatchContext batch, long snapshotXid, (int Page, int Slot)[] order, bool descending, int skip)
+        HeapTable table, BatchContext batch, long snapshotXid, ArraySegment<(int Page, int Slot)> order, bool descending, int skip)
     {
         var io = batch.Connection.StatementIo?.Touch(table);
         _ = io?.ScanCount += 1;
@@ -2227,9 +2227,9 @@ internal sealed partial class Selection
         var reader = batch.Connection.LockOwner;
         var addresses = batch.CurrentStatement.RowAddresses;
         var ownWrites = new BatchContext.OwnWriteView(batch, table);
-        for (var i = 0; i < order.Length; i++)
+        for (var i = 0; i < order.Count; i++)
         {
-            var (page, slot) = order[descending ? order.Length - 1 - i : i];
+            var (page, slot) = order[descending ? order.Count - 1 - i : i];
             _ = table.Heap.TryReadSlot(page, slot, out var current, out var sequence);
             if ((ownWrites.TryRead(batch, table, (page, slot), out var found) ? found : Storage.VersionStore.ReadSnapshotSlot(table, (page, slot), current, sequence, snapshotXid, reader)) is not { } bytes)
                 continue;
