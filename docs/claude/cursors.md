@@ -48,6 +48,8 @@ A third gate converts KEYSET all the way to a read-only snapshot: every particip
   A cursor over one table whose identity no two live rows share reads the member's row at its address instead, falling back to the walk when that row is gone, no longer the member's or no longer passes the WHERE (`Selection.TryReadKeysetMember`): a fetch loop over 4,000 rows took 3.4 s and takes 57 ms (measured 2026-10-25, Release), against real's 53 ms.
   A value change to non-identity columns shows through (status 0); a deleted-or-key-changed member yields `@@FETCH_STATUS = -2`.
 - **DYNAMIC** stores no list; it tracks the last-emitted `(ORDER BY key, identity)` and re-enumerates live each FETCH to find the next/prior row by that total order.
+  Over one table with no ORDER BY, row limit or row-level security filter, a single step (`FIRST`, `LAST`, `NEXT`, `PRIOR`) instead searches the table's live rows in the cursor's order, by identity alone and kept while the heap is unchanged (`Selection.CursorOrder`), and evaluates rows from the last one read until one passes the WHERE: a forward-only default's fetch loop over 4,000 rows took 3.4 s and takes 48 ms (measured 2026-10-25, Release), against real's 53 ms.
+  A loop that writes the table reads its live rows again at each fetch, so its `WHERE CURRENT OF` update loop gains little (3.8 s to 3.3 s over the same rows, real's 221 ms).
   Deletes ahead are silently skipped; inserts ahead appear.
 
 A cursor's *position* rides the row's stable `(page, slot)` heap address — one per base table the plan reads, however many layers of view / derived table / CTE sit above it.

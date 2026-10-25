@@ -829,6 +829,80 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// A one-table DYNAMIC cursor's live rows in its order, by identity alone
+    /// — no WHERE, no select list — as of a generation of the table's heap
+    /// (<see cref="DynamicOrder"/>). A fetch searches it for the last row
+    /// read and evaluates rows from there until one passes the WHERE, which
+    /// is the row the walk of every live row (<see cref="EnumerateForCursor"/>)
+    /// would find next, the two sharing <see cref="CompareCursorRows"/>.
+    /// </summary>
+    internal sealed class CursorOrder(CursorSourcePlan plan, long generation, CursorRow[] rows)
+    {
+        public readonly long Generation = generation;
+
+        public int Count => rows.Length;
+
+        /// <summary>
+        /// The first position past <paramref name="last"/> in the order, or
+        /// with <paramref name="before"/> the last position ahead of it.
+        /// </summary>
+        public int IndexAfter(CursorRow last, bool before = false)
+        {
+            var (lo, hi) = (0, rows.Length);
+            while (lo < hi)
+            {
+                var mid = (lo + hi) >>> 1;
+                var c = CompareCursorRows(plan, rows[mid], last);
+                if (before ? c < 0 : c <= 0)
+                    lo = mid + 1;
+                else
+                    hi = mid;
+            }
+            return before ? lo - 1 : lo;
+        }
+
+        /// <summary>The first row from position <paramref name="from"/> on, stepping by <paramref name="step"/>, that passes the cursor's WHERE, evaluated as the walk would.</summary>
+        public CursorRow? FirstPassing(BatchContext batch, int from, int step)
+        {
+            for (var i = from; i >= 0 && i < rows.Length; i += step)
+            {
+                var read = EnumerateCursorRows(plan, batch, outerResolver: null, applyRowLimit: false, onlyAddress: rows[i].Rids[0]);
+                if (read.Count == 1)
+                    return read[0];
+            }
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// <paramref name="cached"/> while the table's heap hasn't changed since
+    /// it was read, else the live rows read again, for a DYNAMIC cursor over
+    /// one table with no ORDER BY, row limit or row-level security filter;
+    /// null for any other, and while a <c>STATISTICS IO</c> report counts the
+    /// walk's reads.
+    /// </summary>
+    internal static CursorOrder? DynamicOrder(CursorSourcePlan plan, BatchContext batch, CursorOrder? cached)
+    {
+        if (plan.Slots.Length != 1 || plan.Slots[0].Table is not { } table || plan.OrderBy.Count != 0 || plan.RowLimit is not null
+            || batch.Connection.StatementIo is not null || RowSecurity.For(batch, table) is { Filter: not null })
+        {
+            return null;
+        }
+        // Read before the scan, so a write landing during it leaves the order
+        // a generation behind and the next fetch reads it again.
+        var generation = Volatile.Read(ref table.Heap.MutationGeneration);
+        if (cached is not null && cached.Generation == generation)
+            return cached;
+        var scan = new CursorSlotScan(identityWidth: 1);
+        AppendCursorSlotRows(scan, plan, 0, batch, outerResolver: null, applyRowLimit: false);
+        var rows = new CursorRow[scan.Bytes.Count];
+        for (var i = 0; i < rows.Length; i++)
+            rows[i] = new CursorRow([], [], [scan.IdentityKeys[i]], [scan.Uniquifiers[i]], [scan.Rids[i]]);
+        Array.Sort(rows, (a, b) => CompareCursorRows(plan, a, b));
+        return new CursorOrder(plan, generation, rows);
+    }
+
+    /// <summary>
     /// Whether no two live rows of <paramref name="table"/> share an identity
     /// under <paramref name="identity"/>: an address, a key a uniquifier and
     /// an address join, or a key an enabled key constraint or unique index

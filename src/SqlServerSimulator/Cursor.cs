@@ -369,6 +369,10 @@ internal sealed class Cursor(
     private bool dynamicBeforeFirst;
     private bool dynamicAfterLast;
 
+    // DYNAMIC over one table: its live rows in the cursor's order, as of a
+    // generation of the table's heap (see Selection.DynamicOrder).
+    private Selection.CursorOrder? dynamicOrder;
+
     /// <summary>
     /// Each <see cref="BaseTables"/> entry's <see cref="HeapTable.DefinitionVersion"/>
     /// as the cursor opened, which a FETCH checks (Msg 16943).
@@ -407,6 +411,7 @@ internal sealed class Cursor(
                 this.dynamicLast = null;
                 this.dynamicBeforeFirst = true;
                 this.dynamicAfterLast = false;
+                this.dynamicOrder = null;
                 batch.Connection.LastCursorRows = -1;
                 break;
         }
@@ -452,6 +457,7 @@ internal sealed class Cursor(
         this.staticRows = null;
         this.keysetIdentities = null;
         this.dynamicLast = null;
+        this.dynamicOrder = null;
         this.CurrentRids = null;
         this.optimisticSnapshot = null;
         this.OnKeysetHole = false;
@@ -990,15 +996,19 @@ internal sealed class Cursor(
 
     private (int, SqlValue[]?) FetchDynamic(BatchContext batch, FetchDirection direction, long offset)
     {
-        var live = Selection.EnumerateForCursor(this.Plan!, batch);
-        var target = direction switch
-        {
-            FetchDirection.First => live.Count > 0 ? live[0] : null,
-            FetchDirection.Last => live.Count > 0 ? live[^1] : null,
-            FetchDirection.Prior => this.DynamicPrior(live),
-            FetchDirection.Relative => this.DynamicRelative(live, offset),
-            _ => this.DynamicNext(live), // Next
-        };
+        // A one-table cursor's single steps search its live rows in order and
+        // evaluate only the rows they pass, where the walk below projects and
+        // sorts every live row to find one.
+        var target = direction is not FetchDirection.Relative
+            && (this.dynamicOrder = Selection.DynamicOrder(this.Plan!, batch, this.dynamicOrder)) is { } order
+            ? direction switch
+            {
+                FetchDirection.First => order.FirstPassing(batch, 0, step: 1),
+                FetchDirection.Last => order.FirstPassing(batch, order.Count - 1, step: -1),
+                FetchDirection.Prior => this.DynamicPrior(order, batch),
+                _ => this.DynamicNext(order, batch), // Next
+            }
+            : this.DynamicByWalk(Selection.EnumerateForCursor(this.Plan!, batch), direction, offset);
 
         if (target is null)
         {
@@ -1013,6 +1023,42 @@ internal sealed class Cursor(
         this.dynamicAfterLast = false;
         this.CurrentRids = target.Rids;
         return (0, target.Values);
+    }
+
+    private Selection.CursorRow? DynamicByWalk(List<Selection.CursorRow> live, FetchDirection direction, long offset) => direction switch
+    {
+        FetchDirection.First => live.Count > 0 ? live[0] : null,
+        FetchDirection.Last => live.Count > 0 ? live[^1] : null,
+        FetchDirection.Prior => this.DynamicPrior(live),
+        FetchDirection.Relative => this.DynamicRelative(live, offset),
+        _ => this.DynamicNext(live), // Next
+    };
+
+    /// <summary><see cref="DynamicNext(List{Selection.CursorRow})"/> over the table's live rows in order, evaluating only the rows it passes.</summary>
+    private Selection.CursorRow? DynamicNext(Selection.CursorOrder order, BatchContext batch)
+    {
+        if (this.dynamicAfterLast)
+            return null;
+        var start = this.dynamicBeforeFirst || this.dynamicLast is null ? 0 : order.IndexAfter(this.dynamicLast);
+        if (order.FirstPassing(batch, start, step: 1) is { } row)
+            return row;
+        this.dynamicAfterLast = true;
+        return null;
+    }
+
+    /// <summary><see cref="DynamicPrior(List{Selection.CursorRow})"/> over the table's live rows in order, evaluating only the rows it passes.</summary>
+    private Selection.CursorRow? DynamicPrior(Selection.CursorOrder order, BatchContext batch)
+    {
+        if (this.dynamicBeforeFirst)
+            return null;
+        if (this.dynamicAfterLast)
+            return order.FirstPassing(batch, order.Count - 1, step: -1);
+        if (this.dynamicLast is null)
+            return null;
+        if (order.FirstPassing(batch, order.IndexAfter(this.dynamicLast, before: true), step: -1) is { } row)
+            return row;
+        this.dynamicBeforeFirst = true;
+        return null;
     }
 
     /// <summary>
