@@ -9,7 +9,8 @@ namespace SqlServerSimulator;
 /// an UPDATE or put back by a rollback, and an IN list's values in ascending
 /// order. Each setup seeks once before the write it tests, so the seek cache
 /// is maintained across that write rather than built after it. Every
-/// expectation probed 2026-10-10 against SQL Server 2025.
+/// expectation probed against SQL Server 2025, on 2026-10-10 unless its test
+/// says otherwise.
 /// </summary>
 [TestClass]
 public sealed class SeekRowOrderTests
@@ -66,6 +67,43 @@ public sealed class SeekRowOrderTests
     {
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery(setup);
+        AreEqual(expected, Rows(simulation, query));
+    }
+
+    private const string Customers = """
+        create table o (id int primary key, c nvarchar(5) not null, d int not null);
+        create index ix_c on o(c);
+        insert o values (5, N'FAMIA', 50), (1, N'FOLKO', 10), (6, N'FRANK', 60), (2, N'FAMIA', 20), (4, N'GREAL', 40), (3, N'FOLKO', 30);
+        create table h (id int not null, c nvarchar(5) not null, d int not null);
+        create index ix_c on h(c);
+        insert h values (5, N'FAMIA', 50), (1, N'FOLKO', 10), (6, N'FRANK', 60), (2, N'FAMIA', 20), (4, N'GREAL', 40), (3, N'FOLKO', 30)
+        """;
+
+    /// <summary>
+    /// A range seek — a comparison or a <c>LIKE</c> prefix — of an index that
+    /// doesn't cover what the query reads returns its rows in the scan's order,
+    /// as real's plan scans the table rather than look each row up, and in the
+    /// order of an index leading on the column that does cover them; a column
+    /// a derived table's reader never reads doesn't count (probed 2026-10-25
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select top (1) id, d from o where c like N'F%'", "1:10")]
+    [DataRow("select id, d from o where c like N'F%'", "1:10,2:20,3:30,5:50,6:60")]
+    [DataRow("select id, c from o where c like N'F%'", "2:FAMIA,5:FAMIA,1:FOLKO,3:FOLKO,6:FRANK")]
+    [DataRow("select id from (select id, d from o where c like N'F%') x", "2,5,1,3,6")]
+    [DataRow("select x.id, x.d from (select top (1) id, d from o where c like N'F%') x", "1:10")]
+    [DataRow("exec sp_executesql N'select id, d from o where c like @p escape N''\\''', N'@p nvarchar(10)', N'F%'", "1:10,2:20,3:30,5:50,6:60")]
+    [DataRow("select id, d from o where c >= N'F' and c < N'G'", "1:10,2:20,3:30,5:50,6:60")]
+    [DataRow("select id from o where c >= N'F' and c < N'G'", "2,5,1,3,6")]
+    [DataRow("select id, d from h where c like N'F%'", "5:50,1:10,6:60,2:20,3:30")]
+    [DataRow("select c from h where c like N'F%'", "FAMIA,FAMIA,FOLKO,FOLKO,FRANK")]
+    [DataRow("create index ix_cd on o(c) include (d); select id, d from o where c like N'F%'", "2:20,5:50,1:10,3:30,6:60")]
+    [DataRow("create index ix_cd on h(c) include (d); select c, d from h where c like N'F%'", "FAMIA:50,FAMIA:20,FOLKO:10,FOLKO:30,FRANK:60")]
+    public void ARangeSeek_ReadsTheScanOrder_UnlessAnIndexCoversTheRead(string query, string expected)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(Customers);
         AreEqual(expected, Rows(simulation, query));
     }
 }

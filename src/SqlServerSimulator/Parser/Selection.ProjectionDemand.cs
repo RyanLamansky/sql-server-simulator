@@ -524,7 +524,7 @@ partial class Selection
         List<int> startupConstantOwners,
         OneRowAggregate[]? oneRowAggregates)
     {
-        var collector = new ProjectionDemand.Collector(sources, expressions.Count, aggregates, windows);
+        var collector = new ProjectionDemand.Collector(sources, expressions.Count, aggregates, windows, judgesCover: true);
         for (var i = 0; i < expressions.Count; i++)
             collector.Walk(expressions[i], ProjectionDemand.Collector.ProjectionSlot(i));
         foreach (var excluder in fromClause.Excluders)
@@ -636,6 +636,7 @@ internal sealed class ProjectionDemand
 
     private readonly FromSource[] sources;
     private readonly bool[] prunable;
+    private readonly bool[]? coverJudged;
     private readonly (int Slot, int Source, int Column)[] reads;
     private readonly List<Expression> projection;
     private readonly Expression[] written;
@@ -686,6 +687,7 @@ internal sealed class ProjectionDemand
         this.columnNames = columnNames;
         this.sources = collector.Sources;
         this.prunable = collector.Prunable;
+        this.coverJudged = collector.CoverJudged;
         this.reads = [.. collector.Reads];
         this.projection = projection;
         this.written = [.. projection];
@@ -745,6 +747,8 @@ internal sealed class ProjectionDemand
         var masks = new bool[this.sources.Length][];
         for (var s = 0; s < this.sources.Length; s++)
         {
+            if (this.coverJudged?[s] == true)
+                masks[s] = new bool[this.sources[s].Columns.Length];
             if (!this.prunable[s])
                 continue;
             var columns = this.sources[s].Columns;
@@ -766,8 +770,12 @@ internal sealed class ProjectionDemand
         }
         for (var s = 0; s < this.sources.Length; s++)
         {
-            if (masks[s] is { } mask)
+            if (masks[s] is not { } mask)
+                continue;
+            if (this.prunable[s])
                 Hand(this.sources[s], mask, this.DeferredAt(s, mask, slotLive));
+            else
+                this.sources[s].ReadColumns = mask;
         }
         this.Narrowed = narrowed;
         return narrowed;
@@ -1006,6 +1014,14 @@ internal sealed class ProjectionDemand
 
         public readonly bool[] Prunable;
 
+        /// <summary>
+        /// Per source, whether it is a base table a nonclustered index or key
+        /// could seek, whose reads <see cref="Apply"/> hands it as
+        /// <see cref="FromSource.ReadColumns"/> for a range seek to judge
+        /// whether the index covers them; null when no source's are gathered.
+        /// </summary>
+        public readonly bool[]? CoverJudged;
+
         public readonly List<(int Slot, int Source, int Column)> Reads = [];
 
         public readonly List<MultiPartName> FreeNames = [];
@@ -1023,7 +1039,7 @@ internal sealed class ProjectionDemand
 
         private readonly int projectionCount;
 
-        public Collector(FromSource[] sources, int projectionCount, List<AggregateExpression> aggregates, List<WindowExpression> windows)
+        public Collector(FromSource[] sources, int projectionCount, List<AggregateExpression> aggregates, List<WindowExpression> windows, bool judgesCover = false)
         {
             this.Sources = sources;
             this.projectionCount = projectionCount;
@@ -1033,8 +1049,29 @@ internal sealed class ProjectionDemand
             this.WindowOwners = new List<int>?[windows.Count];
             this.Prunable = new bool[sources.Length];
             for (var s = 0; s < sources.Length; s++)
+            {
                 this.Prunable[s] = sources[s] is { LateralPlan: not null, IsPlaceholder: false, ForPath: false, BrowseBody: null, MaterializeOnce: false };
+                if (judgesCover && sources[s] is { LateralPlan: null, BackingTable: { } table } && SeeksNonclustered(table))
+                    (this.CoverJudged ??= new bool[sources.Length])[s] = true;
+            }
         }
+
+        private static bool SeeksNonclustered(HeapTable table)
+        {
+            foreach (var key in table.KeyConstraints)
+            {
+                if (!key.IsClustered)
+                    return true;
+            }
+            foreach (var index in table.Indexes)
+            {
+                if (!index.IsClustered)
+                    return true;
+            }
+            return false;
+        }
+
+        private bool Tracks(int source) => this.Prunable[source] || this.CoverJudged?[source] == true;
 
         public static int ProjectionSlot(int index) => 1 + index;
 
@@ -1050,7 +1087,7 @@ internal sealed class ProjectionDemand
         {
             for (var s = 0; s < this.Sources.Length; s++)
             {
-                if (this.Prunable[s])
+                if (this.Tracks(s))
                     this.Reads.Add((slot, s, -1));
             }
         }
@@ -1066,7 +1103,7 @@ internal sealed class ProjectionDemand
                 this.FreeNames.Add(name);
                 return;
             }
-            if (this.Prunable[id.Source])
+            if (this.Tracks(id.Source))
                 this.Reads.Add((slot, id.Source, id.Column < this.Sources[id.Source].Columns.Length ? id.Column : -1));
         }
 

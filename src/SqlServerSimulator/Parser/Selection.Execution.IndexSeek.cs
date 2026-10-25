@@ -912,7 +912,7 @@ internal sealed partial class Selection
         out int candidateCount)
     {
         var keysPutBack = Volatile.Read(ref table.KeysPutBack);
-        if (!TryComputeRangeCandidates(source, table, batch, outerResolver, bounds, out var candidates))
+        if (!TryComputeRangeCandidates(source, table, batch, outerResolver, bounds, out var candidates, judgeCover: true))
         {
             seekRows = [];
             candidateCount = -1;
@@ -924,7 +924,7 @@ internal sealed partial class Selection
             if (!AwaitUncommittedDeletesInRange(table, batch, outerResolver, bounds) && Volatile.Read(ref table.KeysPutBack) == keysPutBack)
                 break;
             keysPutBack = Volatile.Read(ref table.KeysPutBack);
-            _ = TryComputeRangeCandidates(source, table, batch, outerResolver, bounds, out candidates);
+            _ = TryComputeRangeCandidates(source, table, batch, outerResolver, bounds, out candidates, judgeCover: true);
         }
         candidateCount = candidates.Count;
         seekRows = snapshotXid is { } sx
@@ -1116,20 +1116,31 @@ internal sealed partial class Selection
     // query path (TrySeekByRange) and the mutation path. Returns true with the
     // in-range (page, slot) candidates (possibly empty — a NULL bound seeks to
     // nothing), or false when no range bound lands on a leading key column or
-    // the interval spans too much of the table to be worth seeking.
+    // the interval spans too much of the table to be worth seeking. With
+    // judgeCover, a query's seek reads the order of an index covering what it
+    // reads, or the scan's when none does (CoveringRangeKey).
     private static bool TryComputeRangeCandidates(
         FromSource source,
         HeapTable table,
         BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver,
         Dictionary<int, RangeBoundExprs> bounds,
-        out List<(int Page, int Slot)> candidates)
+        out List<(int Page, int Slot)> candidates,
+        bool judgeCover = false)
     {
         candidates = [];
 
         if (bounds.Count == 0 || FindRangeLeadingKey(table, bounds, out var clustered) is not { } key)
             return false;
         var ordinal = key[0];
+        var asScanned = false;
+        if (judgeCover && !clustered)
+        {
+            if (CoveringRangeKey(table, ordinal, source.ReadColumns) is { } covering)
+                key = covering;
+            else
+                asScanned = true;
+        }
 
         var bound = bounds[ordinal];
         switch (EvaluateRangeBounds(bound, source.StoredSchema[ordinal].Type, batch, outerResolver,
@@ -1145,7 +1156,7 @@ internal sealed partial class Selection
             table.Heap, source.StoredSchema, source.LobStore, ordinal, common,
             hasLower, lowerValue, bound.LowerInclusive, hasUpper, upperValue, bound.UpperInclusive,
             rowCount >= RangeSpanGateMinRows ? rowCount / RangeSpanGateDivisor : int.MaxValue,
-            Array.IndexOf(key, -1) < 0 ? key : null);
+            asScanned || Array.IndexOf(key, -1) >= 0 ? null : key);
 
         if (found is null)
         {
@@ -1153,9 +1164,69 @@ internal sealed partial class Selection
             return false;
         }
 
-        if (!clustered)
+        if (asScanned)
+            ClusteredScan.OrderAsScanned(table, found);
+        else if (!clustered)
             ClusteredScan.OrderSeekCandidates(table, key, found);
         candidates = found;
+        return true;
+    }
+
+    /// <summary>
+    /// The key of the first nonclustered index or key leading on
+    /// <paramref name="ordinal"/> whose leaf carries every column
+    /// <paramref name="read"/> names (null: every column) — its key and
+    /// <c>INCLUDE</c> columns and the clustered key it locates rows by — which
+    /// real's plan seeks alone and so reads in its order; null when none does.
+    /// Real's plan then scans the table rather than look each row up, unless it
+    /// expects very few: a <c>LIKE</c> prefix, a comparison range or an
+    /// <c>IN</c> list over Northwind's <c>Orders.CustomerID</c> read in
+    /// <c>OrderID</c> order from 13 matching rows up and in the index's from 4
+    /// down, and every one of them over a one-page table in the scan's (probed
+    /// 2026-10-25 against SQL Server 2025).
+    /// </summary>
+    private static int[]? CoveringRangeKey(HeapTable table, int ordinal, bool[]? read)
+    {
+        int[] locator = [];
+        foreach (var constraint in table.KeyConstraints)
+        {
+            if (constraint.IsClustered)
+                locator = constraint.FullOrdinals;
+        }
+        foreach (var index in table.Indexes)
+        {
+            if (index.IsClustered)
+                locator = index.KeyFullOrdinals;
+        }
+        foreach (var constraint in table.KeyConstraints)
+        {
+            if (constraint is { IsClustered: false, IsDisabled: false, StorageOrdinals: [var lead, ..] } && lead == ordinal
+                && LeafCovers(table, constraint.FullOrdinals, [], locator, read))
+            {
+                return constraint.StorageOrdinals;
+            }
+        }
+        foreach (var index in table.Indexes)
+        {
+            if (index is { IsClustered: false, IsDisabled: false, Filter: null, IsColumnstore: false, KeyStorageOrdinals: [var lead, ..] } && lead == ordinal
+                && LeafCovers(table, index.KeyFullOrdinals, index.IncludedColumnOrdinals, locator, read))
+            {
+                return index.KeyStorageOrdinals;
+            }
+        }
+        return null;
+    }
+
+    private static bool LeafCovers(HeapTable table, int[] key, int[] included, int[] locator, bool[]? read)
+    {
+        for (var c = 0; c < table.Columns.Length; c++)
+        {
+            if ((read is null || (c < read.Length && read[c]))
+                && Array.IndexOf(key, c) < 0 && Array.IndexOf(included, c) < 0 && Array.IndexOf(locator, c) < 0)
+            {
+                return false;
+            }
+        }
         return true;
     }
 
@@ -3573,7 +3644,7 @@ internal sealed partial class Selection
                 : SettledCandidates(
                     table,
                     () => AwaitUncommittedDeletesInRange(table, batch, outer, bounds),
-                    () => TryComputeRangeCandidates(source, table, batch, outer, bounds, out var current) ? current : []);
+                    () => TryComputeRangeCandidates(source, table, batch, outer, bounds, out var current, judgeCover: true) ? current : []);
         }
     }
 

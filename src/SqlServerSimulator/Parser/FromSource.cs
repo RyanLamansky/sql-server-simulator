@@ -595,7 +595,9 @@ internal sealed class FromSource(
     /// (<see cref="DeferredColumns"/>) and plus the ones those read — set once
     /// that query has bound (<c>Selection.NoteProjectionDemand</c>); null when
     /// every column counts as read. A CTE's body is handed what all its
-    /// references read together.
+    /// references read together. Over a base table a nonclustered index could
+    /// seek, the columns the query reads of it, which a range seek judges the
+    /// index's cover by.
     /// </summary>
     public bool[]? ReadColumns;
 

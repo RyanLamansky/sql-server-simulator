@@ -257,6 +257,7 @@ The range is settled per execution from the pattern's value (`LikePrefixRange`):
 Under the binary collations and the Latin1-General tables (`Collation.SortsPrintableAsciiPrefixesTogether`) the run reads on through spaces and ASCII punctuation to the first wildcard and is cut after its last letter or digit, which alone is stepped (`Smith, J` → `Smith, I` and `Smith, K`, `A-9` → `B`), since a punctuation mark's place in a collation's primary order isn't its code point's; EF Core's `StartsWith` over names, codes and addresses carries such a prefix.
 The stepped-back lower bound is what keeps it sound under padded comparison: a binary collation pads the shorter operand with spaces and the `SQL_` names' `varchar` order weighs `CHAR(0)` and the controls below the space, so `'Sm' + CHAR(31)` sorts *before* `'Sm'` yet matches `'Sm%'`; every subject starting with the run carries the greater character at the stepped position in code-point and primary order alike.
 The `LIKE` stays residual, so the range only has to hold every match.
+The rows come back in the scan's order unless an index leading on the column covers what the query reads, as real's plan scans then ([An index that doesn't cover the read](#an-index-that-doesnt-cover-the-read)); EF Core's `StartsWith` with a `Take` over a non-covering index keeps the row real's scan finds first.
 
 The invariant-culture order the other `SQL_` names share keeps the letters-and-digits run: it weighs an ASCII hyphen or apostrophe at the final level only, but a fullwidth one, which `LIKE` matches to it, at the primary level.
 
@@ -910,8 +911,28 @@ Three pieces reproduce it, each free in the common case:
   The flag errs toward false after a rollback until the next ordered walk restores it, which costs those seeks a sort, never their order.
 
 Which index real reads is the optimizer's, and these orders are only real's when the simulator's choice (the longest equality prefix, keys before indexes) is real's too.
-A probed shape where it isn't, left alone: a heap whose index doesn't cover the select list, which real scans in RID order, so `SELECT * … WHERE a IN (3, 1)` reads by RID there.
+The main shape where it isn't is an index that doesn't cover the read, below.
 Nor is a heap's RID placement modeled: after a DELETE then INSERT in one transaction real's insert took the deleted row's RID, where the simulator's lands at the heap's end.
+
+### An index that doesn't cover the read
+
+Real seeks a nonclustered index alone only when its leaf carries every column the query reads: its key and `INCLUDE` columns, and the clustered key it locates rows by.
+Over any other index it weighs looking each row up against scanning the table, and scans unless it expects very few rows, so the rows come back in the scan's order.
+Over Northwind's 20-page `Orders`, a `LIKE` prefix, a comparison range or an `IN` list on `CustomerID` selecting `OrderDate` read in `OrderID` order from 13 matching rows up, and in the index's order from 4 down.
+Over a one-page table, every one of them read in the scan's order (probed 2026-10-25 against SQL Server 2025).
+
+A range seek, whether a comparison or a [`LIKE` prefix](#like-prefix-seeks), follows the scan side of that.
+When no index leading on its column covers the read, its candidates sort into the scan's order (`ClusteredScan.OrderAsScanned`): the clustered key's, or address order on a heap.
+When one does, the seek reads that index's order (`CoveringRangeKey`), even where another index leading on the column was the first the seek found.
+The covering is judged on what the query reads once its readers have narrowed it, so a derived table's column its reader never reads doesn't count: `SELECT id FROM (SELECT id, d FROM o WHERE c LIKE 'F%') x` reads `ix(c)`'s order, as real's does.
+Those reads reach the seek as the base-table source's `FromSource.ReadColumns`, gathered with the select-list demand.
+
+Not modeled yet:
+
+- **Real's tipping point.** A range real expects few rows from reads in the index's order there and in the scan's order here.
+  `LIKE 'SP%'` over `Orders` is one: real's string-summary estimate was 1.6 rows where 13 matched, so it seeked, while `GR%`, also matching 13, was estimated at 16 and scanned.
+- **Equality and `IN` seeks.** These keep the index's order whatever the query reads, so `IN (5, 1)` over a one-page table reads ids 9, 2 here and 2, 9 on real.
+  A heap's `SELECT * … WHERE a IN (3, 1)` likewise reads in index order here where real reads by RID.
 
 ## Columnstore indexes
 

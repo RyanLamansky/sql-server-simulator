@@ -145,23 +145,43 @@ internal static class ClusteredScan
     /// </remarks>
     public static void OrderSeekCandidates(HeapTable table, int[] indexOrdinals, List<(int Page, int Slot)> candidates)
     {
-        if (candidates.Count < 2 || ClusteredKey(table) is not var (ordinals, descending))
-            return;
-        var schema = table.StoredColumns;
-        var heap = table.Heap;
-        var commons = new SqlType[ordinals.Length];
-        var tracked = true;
-        for (var i = 0; i < ordinals.Length; i++)
-        {
-            tracked &= !schema[ordinals[i]].Nullable && !descending[i];
-            commons[i] = schema[ordinals[i]].Type;
-        }
-        if (tracked && HeapSeekCache.For(heap).HeapInKeyOrder(heap, schema, ordinals, commons))
-            return;
-        SortSeekCandidates(table, indexOrdinals, candidates, ordinals, descending);
+        if (candidates.Count >= 2 && ClusteredKey(table) is var (ordinals, descending) && !HeapFollowsKey(table, ordinals, descending))
+            SortSeekCandidates(table, indexOrdinals, candidates, ordinals, descending);
     }
 
-    // OrderSeekCandidates' sort, apart so the comparison's closure is
+    /// <summary>
+    /// Puts a seek's <paramref name="candidates"/> over <paramref name="table"/>
+    /// in the order a scan of the table reads them — by the clustered key, or
+    /// by address on a heap — for a seek standing in for the scan real's plan
+    /// takes instead.
+    /// </summary>
+    public static void OrderAsScanned(HeapTable table, List<(int Page, int Slot)> candidates)
+    {
+        if (candidates.Count < 2)
+            return;
+        if (ClusteredKey(table) is var (ordinals, descending) && !HeapFollowsKey(table, ordinals, descending))
+            SortSeekCandidates(table, [], candidates, ordinals, descending);
+        else
+            candidates.Sort();
+    }
+
+    // Whether the heap's addresses follow the clustered key, which the seek
+    // cache tracks for a key its ordered view serves — every column NOT NULL
+    // and ascending — and no other key is taken to.
+    private static bool HeapFollowsKey(HeapTable table, int[] ordinals, bool[] descending)
+    {
+        var schema = table.StoredColumns;
+        var commons = new SqlType[ordinals.Length];
+        for (var i = 0; i < ordinals.Length; i++)
+        {
+            if (schema[ordinals[i]].Nullable || descending[i])
+                return false;
+            commons[i] = schema[ordinals[i]].Type;
+        }
+        return HeapSeekCache.For(table.Heap).HeapInKeyOrder(table.Heap, schema, ordinals, commons);
+    }
+
+    // The two seek orders' sort, apart so the comparison's closure is
     // allocated only by a seek whose candidates need it: it was allocated on
     // entry, once per seek of a heap already in key order.
     private static void SortSeekCandidates(HeapTable table, int[] indexOrdinals, List<(int Page, int Slot)> candidates, int[] ordinals, bool[] descending)
