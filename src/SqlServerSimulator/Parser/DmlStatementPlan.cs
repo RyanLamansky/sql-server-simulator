@@ -151,25 +151,15 @@ internal sealed class StatementPlanEntry(StatementPlanRecording recording, long 
     public bool IsDeclined => this.Plan is null && this.Query is null;
 
     /// <summary>
-    /// Replays the DML statement against <paramref name="context"/>'s batch,
-    /// whose cursor already sits at <see cref="End"/>: what its parse did (see
-    /// <see cref="ReplayParse"/>), then the execution half.
-    /// </summary>
-    /// <remarks>
-    /// Null, nothing run, when a definition change the locks waited out made
-    /// the plan stale: the caller parses the statement instead.
-    /// </remarks>
-    public SimulatedStatementOutcome? Replay(ParserContext context) =>
-        this.ReplayParse(context) ? this.Plan!.Run(context) : null;
-
-    /// <summary>
     /// Repeats what the statement's parse did against <paramref name="context"/>'s
-    /// batch: the parse's locks and permission checks as this session, then the
-    /// flags its parse set on the statement frame. The locks come first because
+    /// batch, whose cursor already sits at <see cref="End"/>: the parse's locks
+    /// and permission checks as this session, then the flags its parse set on
+    /// the statement frame — for a DML statement, ahead of its plan's execution
+    /// half. The locks come first because
     /// a parse takes them before it reaches anything that sets one — a lock
     /// wait that ends the statement ends it with the frame the parse had at
     /// that point. False, with no flag set, when a definition change the locks
-    /// waited out made the plan stale.
+    /// waited out made the plan stale: the caller parses the statement instead.
     /// </summary>
     public bool ReplayParse(ParserContext context)
     {

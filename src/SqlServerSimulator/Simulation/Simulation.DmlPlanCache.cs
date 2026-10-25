@@ -42,6 +42,9 @@ partial class Simulation
     /// its errors and their order are the parsed statement's. A statement under
     /// a <c>WITH</c> prefix files its plan where the prefix starts, the
     /// prefix's parse part of its recording (see <see cref="PrepareCtePrefixPlan"/>).
+    /// The batch compile walk parses a plain write for the run instead
+    /// (<see cref="ParseWriteForRun"/>), whose first execution of it replays
+    /// that parse and files it as its own.
     /// </summary>
     private SimulatedStatementOutcome RunDmlStatement(ParserContext context, Func<ParserContext, SimulatedStatementOutcome> parse)
     {
@@ -52,22 +55,31 @@ partial class Simulation
         if (!cachesPlan)
         {
             DisarmCtePrefixPlan(context, prefix);
-            return RunMutation(context, parse);
+            return batch.IsSkipping && batch.CompilingForRun && prefix is null
+                ? this.ParseWriteForRun(context, parse)
+                : RunMutation(context, parse);
         }
 
         var statement = context.SaveCheckpoint();
         var start = prefix?.Start ?? statement;
         var entry = prefix is null ? this.CurrentStatementPlan(context, start) : prefix.Entry;
+        // The compile walk's parse of the statement serves its first run alone.
+        var walked = batch.WalkPlans is { } walkPlans && walkPlans.Remove(start.MemoPosition, out var walkEntry) && ReferenceEquals(walkEntry, entry);
         if (entry is { IsDeclined: true })
             return RunMutation(context, parse);
-        if (entry is { Plan: not null } && context.CanJumpTo(entry.End))
+        if (entry is { Plan: { } plan } && context.CanJumpTo(entry.End))
         {
-            _ = Interlocked.Increment(ref this.DmlPlanHits);
+            if (!walked)
+                _ = Interlocked.Increment(ref this.DmlPlanHits);
             return RunMutation(context, replaying =>
             {
                 replaying.JumpTo(entry.End);
-                if (entry.Replay(replaying) is { } replayed)
-                    return replayed;
+                if (entry.ReplayParse(replaying))
+                {
+                    if (walked)
+                        this.AdoptWalkPlan(batch, start, entry);
+                    return plan.Run(replaying);
+                }
                 // The schema locks the replay took waited out a definition
                 // change, so the statement parses as it would have.
                 if (prefix is not null)
@@ -351,6 +363,15 @@ partial class Simulation
         recording.Declined = true;
         if (admitted && recording.TakeParse(context, locks, batch.CurrentStatement))
             recording.Plan = plan;
+        // A write the compile walk parses for its run ends that parse here:
+        // its plan taken, the walk takes the execution half back; otherwise
+        // the walk parses the statement its own way (see ParseWriteForRun).
+        if (batch.WriteParseForRun is { } scope)
+        {
+            if (recording.Plan is null)
+                throw new RunParseDeclinedException();
+            scope.Leave(batch);
+        }
     }
 
 #if DEBUG

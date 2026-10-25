@@ -4803,19 +4803,9 @@ public sealed partial class Simulation
             return false;
         }
         if (walked)
-        {
-            // The compile walk's parse stands in for the run's own: it loads
-            // the statistics that would have, and is filed as it would have been.
-            if (batch.RunParseStatistics?.Remove(start.MemoPosition, out var statistics) == true)
-            {
-                foreach (var (table, ordinal) in statistics)
-                    LoadQueryStatistics(batch, table, ordinal);
-            }
-            this.PublishStatementPlan(batch, start.MemoPosition, entry);
-            _ = Interlocked.Increment(ref this.WalkPlanReplays);
-            return true;
-        }
-        _ = Interlocked.Increment(ref this.SelectPlanHits);
+            this.AdoptWalkPlan(batch, start, entry);
+        else
+            _ = Interlocked.Increment(ref this.SelectPlanHits);
         return true;
     }
 

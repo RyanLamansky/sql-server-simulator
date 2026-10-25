@@ -16,7 +16,7 @@ namespace SqlServerSimulator;
 public sealed class WalkPlanTests
 {
     private const string Setup = """
-        create table t (id int primary key, v int not null);
+        create table t (id int primary key, v int not null default 0);
         insert t values (1, 1), (2, 2);
         create table u (id int primary key, t_id int not null);
         insert u values (10, 1);
@@ -89,6 +89,70 @@ public sealed class WalkPlanTests
         var (replays, hits) = (simulation.WalkPlanReplays, simulation.SelectPlanHits);
         Execute(connection, "declare @i int = 0; while @i < 3 begin select v from t where id = 1; set @i += 1 end");
         AreEqual((1, 2), (simulation.WalkPlanReplays - replays, simulation.SelectPlanHits - hits));
+    }
+
+    [TestMethod]
+    [DataRow("insert t values (3, 3)")]
+    [DataRow("insert into dbo.t (id, v) values (3, 3), (4, default)")]
+    [DataRow("insert t (id, v) select id + 10, v from t where v > (select min(t_id) from u)")]
+    [DataRow("update t set v = v + 1 where id = 1")]
+    [DataRow("update dbo.t set v = default where id = 1")]
+    [DataRow("delete from u where id = 10")]
+    [DataRow("delete u")]
+    [DataRow("insert t values (3, 3); update t set v = 0 where id = 3; delete t where id = 3")]
+    public void APlainWrite_RunsOnTheWalksParse(string text) => AreEqual(text.Split(';').Length, WalkReplays(text));
+
+    [TestMethod]
+    [DataRow("insert t with (tablock) values (3, 3)", DisplayName = "A table hint")]
+    [DataRow("update top (1) t set v = 0", DisplayName = "TOP")]
+    [DataRow("update t set v = 0 output inserted.id", DisplayName = "OUTPUT")]
+    [DataRow("update t set v = 0 from t join u on u.t_id = t.id", DisplayName = "A joined UPDATE")]
+    [DataRow("delete t from t join u on u.t_id = t.id", DisplayName = "A joined DELETE")]
+    [DataRow("insert t select 5, 5", DisplayName = "A FROM-less source, evaluated as it parses")]
+    [DataRow("insert t exec p", DisplayName = "An executed source")]
+    [DataRow("insert #s values (1)", DisplayName = "A temporary table")]
+    [DataRow("insert t values (dbo.f(3), 3)", DisplayName = "A user function")]
+    [DataRow("insert vt values (3, 3)", DisplayName = "A view")]
+    [DataRow("update vt set v = 0 where id = 1", DisplayName = "A view's UPDATE")]
+    [DataRow("delete vt where id = 1", DisplayName = "A view's DELETE")]
+    [DataRow("merge t using u on u.t_id = t.id when matched then delete;", DisplayName = "MERGE")]
+    public void AWriteACompileSettlesMore_ParsesAsItRuns(string text) =>
+        AreEqual(0, WalkReplays(text, "create function f (@v int) returns int as begin return @v end\ngo\ncreate table #s (a int)\ngo\ncreate procedure p as select 5, 5\ngo\ncreate view vt as select id, v from t"));
+
+    /// <summary>
+    /// A write the walk parsed for the run reads the session's state as it
+    /// runs, after the statements ahead of it changed it, as its own parse
+    /// would have left it to.
+    /// </summary>
+    [TestMethod]
+    public void AWriteOnTheWalksParse_RunsUnderWhatTheBatchSetAheadOfIt()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateDbConnection();
+        connection.Open();
+        Execute(connection, "create table d (id int identity primary key, v int not null)");
+        var replays = simulation.WalkPlanReplays;
+        Execute(connection, "set identity_insert d on; insert d (id, v) values (5, 5); set identity_insert d off");
+        AreEqual(1, simulation.WalkPlanReplays - replays);
+        using var command = connection.CreateCommand();
+        command.CommandText = "select id from d";
+        AreEqual(5, command.ExecuteScalar());
+    }
+
+    /// <summary>
+    /// A write in a loop runs on the walk's parse once, which files it in the
+    /// plan cache, so the loop's later iterations replay the cached plan.
+    /// </summary>
+    [TestMethod]
+    public void AWriteInALoop_RunsOnTheWalksParseOnce_ThenOnTheCachedPlan()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateDbConnection();
+        connection.Open();
+        Execute(connection, Setup);
+        var (replays, hits) = (simulation.WalkPlanReplays, simulation.DmlPlanHits);
+        Execute(connection, "declare @i int = 0; while @i < 3 begin update t set v = v + 1 where id = 1; set @i += 1 end");
+        AreEqual((1, 2), (simulation.WalkPlanReplays - replays, simulation.DmlPlanHits - hits));
     }
 
     /// <summary>

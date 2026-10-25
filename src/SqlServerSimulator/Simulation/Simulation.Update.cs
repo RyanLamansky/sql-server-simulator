@@ -132,8 +132,10 @@ partial class Simulation
         // per-row resolver through RuntimeContext; only the parse-time type
         // resolution was missing. The multi-table alias form has no target yet
         // at this point and keeps the enclosing scope.
-        // Restored right after the loop; a throw in between aborts the whole
-        // statement, so there is no later parse to see a stale scope.
+        // Restored right after the loop, and by the guard on a throw out of
+        // it, past which the compile walk parses the statement again its own
+        // way when it couldn't parse it for the run.
+        using var keepsOuterScope = ParserScope.Save(ref context.OuterTypeResolver);
         var savedOuterTypeResolver = context.OuterTypeResolver;
         if (leadingTable is { } scopeTable && !joinedView)
         {
@@ -148,6 +150,7 @@ partial class Simulation
 
         // The SET list owns no aggregate (Msg 157), a subquery's over the
         // target's columns included. Restored with the scope after the loop.
+        using var keepsCollector = ParserScope.Save(ref context.AggregateCollector);
         var savedCollector = context.AggregateCollector;
         var setAggregates = new List<AggregateExpression>();
         context.AggregateCollector = setAggregates;

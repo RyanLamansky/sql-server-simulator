@@ -1125,7 +1125,7 @@ internal sealed partial class BatchContext
     /// <summary>
     /// Set while the batch compile walk parses a statement as the run would,
     /// for the run to replay rather than parse again (see
-    /// <c>Simulation.TryParseQueryForRun</c>): a lock, a permission check or a
+    /// <c>Simulation.TryParseQueryForRun</c> and <c>ParseWriteForRun</c>): a lock, a permission check or a
     /// statistic the parse would take is only logged, and anything else that
     /// would act on the server rather than bind declines the attempt
     /// (<see cref="RunParseDeclinedException"/>).
@@ -1134,6 +1134,14 @@ internal sealed partial class BatchContext
 
     /// <summary>The statistics a parse under <see cref="ParsesForRun"/> would have loaded, each a table and a column ordinal.</summary>
     public List<(HeapTable Table, int Ordinal)>? DeferredStatistics;
+
+    /// <summary>
+    /// Set while the compile walk parses a write for its run (see
+    /// <c>Simulation.ParseWriteForRun</c>): the statement's split point leaves
+    /// it, handing the walk back the execution half, which runs as after the
+    /// walk's own parse.
+    /// </summary>
+    public RunParseScope? WriteParseForRun;
 
     /// <summary>
     /// The plans of the statements the compile walk parsed for this batch's

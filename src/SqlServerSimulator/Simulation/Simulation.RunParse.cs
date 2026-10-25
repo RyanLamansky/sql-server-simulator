@@ -32,12 +32,6 @@ partial class Simulation
             return null;
         }
 
-        var connection = walk.Connection;
-        var skips = walk.SkipModeFlag;
-        var createTime = walk.CreateTimeBinding;
-        var compiling = walk.CompilingForRun;
-        var gathered = walk.CreateTimeBindErrors;
-        var scoped = walk.HasSessionScopedReference;
         var schemaVersion = Volatile.Read(ref this.SchemaVersion);
         var database = context.CurrentDatabase;
 #if DEBUG
@@ -45,17 +39,9 @@ partial class Simulation
 #endif
         var parserState = context.SaveStatementState();
         var heldLocks = walk.StatementSchemaLocks.Count;
-        walk.SkipModeFlag = false;
-        walk.CreateTimeBinding = false;
-        walk.CompilingForRun = false;
-        walk.CreateTimeBindErrors = null;
-        walk.HasSessionScopedReference = false;
-        walk.DeferredStatistics = null;
-        walk.ParsesForRun = true;
-        connection.PendingMessages.RefusesMessages = true;
+        var scope = new RunParseScope(walk);
         var recording = BeginStatementRecording(walk);
         recording.Statement = start;
-        var taken = false;
         try
         {
             var selection = ParseSelectStatement(context, browse: false);
@@ -72,7 +58,6 @@ partial class Simulation
             (running.WalkPlans ??= [])[start.MemoPosition] = new StatementPlanEntry(recording, schemaVersion, database);
             if (walk.DeferredStatistics is { } statistics)
                 (running.RunParseStatistics ??= [])[start.MemoPosition] = statistics;
-            taken = true;
             return selection;
         }
         catch (Exception refused) when (refused is SimulatedSqlException or RunParseDeclinedException or NotSupportedException)
@@ -82,23 +67,110 @@ partial class Simulation
         }
         finally
         {
-            connection.PendingMessages.RefusesMessages = false;
-            walk.ParsesForRun = false;
-            walk.ReplayLockLog = null;
-            walk.DeferredStatistics = null;
-            walk.SkipModeFlag = skips;
-            walk.CreateTimeBinding = createTime;
-            walk.CompilingForRun = compiling;
-            walk.CreateTimeBindErrors = gathered;
-            walk.HasSessionScopedReference = scoped || (taken && walk.HasSessionScopedReference);
+            scope.Leave(walk);
 #if DEBUG
             EndPrincipalWatch(recording);
-            if (taken)
+            if (recording.Query is not null)
                 PlanCacheCaptureAudit.VerifyPrincipalIndependent(recording.PrincipalRead, key.CommandText);
             else
                 RunParseAudit.Verify(walk, before);
 #endif
         }
+    }
+
+    /// <summary>
+    /// Parses the <c>INSERT</c>, <c>UPDATE</c> or <c>DELETE</c> statement at
+    /// the compile walk's cursor as the run would, as
+    /// <see cref="TryParseQueryForRun"/> parses a query, inside the mutation
+    /// scope the walk's own parse runs in, and files the parse as the
+    /// statement's plan for the run to replay. The parse ends at the
+    /// statement's split point (<see cref="NoteDmlPlan"/>), which hands the
+    /// walk back the execution half, run skipped as after the walk's own
+    /// parse; a statement that turns the attempt away short of its split
+    /// point parses the walk's way instead, by <paramref name="parse"/>, from
+    /// where it began.
+    /// </summary>
+    private SimulatedStatementOutcome ParseWriteForRun(ParserContext context, Func<ParserContext, SimulatedStatementOutcome> parse)
+    {
+        var walk = context.Batch;
+        // A target the walk doesn't see as a table — one the batch creates
+        // ahead of the statement, a view, a synonym — would turn the attempt
+        // away as its parse resolved it.
+        if (walk.CompiledFor is not { PlanCacheKey: { } key, CachedPlanOrigin: CachedPlanOrigin.ClientBatch } running
+            || !ParsesForRunUnder(walk, key)
+            || PlainWriteTarget(context.MemoizedTokensAhead()) is not { } target
+            || !walk.TryResolveSchema(target, out var schema) || !schema.HeapTables.ContainsKey(target.Leaf))
+        {
+            return RunMutation(context, parse);
+        }
+
+        var start = context.SaveCheckpoint();
+        var schemaVersion = Volatile.Read(ref this.SchemaVersion);
+        var database = context.CurrentDatabase;
+#if DEBUG
+        var before = RunParseAudit.Snapshot(walk);
+#endif
+        var parserState = context.SaveStatementState();
+        var heldLocks = walk.StatementSchemaLocks.Count;
+        var scope = new RunParseScope(walk);
+        var recording = BeginStatementRecording(walk);
+        recording.Statement = start;
+        walk.DmlPlanRecording = recording;
+        walk.WriteParseForRun = scope;
+        SimulatedStatementOutcome outcome;
+        try
+        {
+            outcome = RunMutation(context, parse);
+        }
+        catch (Exception refused) when (!scope.Left && refused is SimulatedSqlException or RunParseDeclinedException or NotSupportedException)
+        {
+            walk.WriteParseForRun = null;
+            walk.DmlPlanRecording = null;
+            scope.Leave(walk);
+            Abandon(walk, start, parserState, heldLocks);
+#if DEBUG
+            EndPrincipalWatch(recording);
+            RunParseAudit.Verify(walk, before);
+#endif
+            return RunMutation(context, parse);
+        }
+        finally
+        {
+            walk.WriteParseForRun = null;
+            walk.DmlPlanRecording = null;
+            scope.Leave(walk);
+        }
+#if DEBUG
+        if (recording.Plan is null)
+            throw new InvalidOperationException("A write parsed for its run ran without reaching its split point.");
+        PlanCacheCaptureAudit.VerifyPrincipalIndependent(recording.PrincipalRead, key.CommandText);
+#endif
+        // A plan the schema changed under while the walk parsed it is the
+        // run's to parse.
+        if (recording.Plan is not null && Volatile.Read(ref this.SchemaVersion) == schemaVersion)
+        {
+            (running.WalkPlans ??= [])[start.MemoPosition] = new StatementPlanEntry(recording, schemaVersion, database);
+            if (scope.Statistics is { } statistics)
+                (running.RunParseStatistics ??= [])[start.MemoPosition] = statistics;
+        }
+        return outcome;
+    }
+
+    /// <summary>
+    /// Takes the compile walk's parse of the statement at <paramref name="start"/>,
+    /// whose replay has taken its locks, as the run's own: loads the
+    /// statistics its parse would have, and files it in the plan cache as
+    /// that parse would have been.
+    /// </summary>
+    private void AdoptWalkPlan(BatchContext batch, ParserContext.Checkpoint start, StatementPlanEntry entry)
+    {
+        if (batch.RunParseStatistics?.Remove(start.MemoPosition, out var statistics) == true)
+        {
+            foreach (var (table, ordinal) in statistics)
+                LoadQueryStatistics(batch, table, ordinal);
+        }
+        this.PublishStatementPlan(batch, start.MemoPosition, entry);
+        _ = Interlocked.Increment(ref this.WalkPlanReplays);
     }
 
     /// <summary>
@@ -115,6 +187,10 @@ partial class Simulation
         var serial = frame.DispatchSerial;
         frame.BeginDispatch();
         frame.DispatchSerial = serial;
+        // A write's target notes these as it resolves, which the statement's
+        // start cleared (StatementContext.BeginExecution).
+        frame.RemoteWrite = null;
+        frame.RemoteWriteAlias = null;
         walk.ReleaseStatementSchemaStabilitySince(heldLocks);
     }
 
@@ -160,15 +236,86 @@ partial class Simulation
     /// query, calling no function but a built-in one: nothing whose parse
     /// sends what a compile sends or touches what belongs to the session.
     /// </summary>
-    private static bool ReadsAsPlainQuery(ReadOnlySpan<Token> tokens)
+    private static bool ReadsAsPlainQuery(ReadOnlySpan<Token> tokens) =>
+        tokens is [ReservedKeyword { Keyword: Keyword.Select }, ..] && ReadsAsPlainClauses(tokens, 0, writes: false, out var readsFrom) && readsFrom;
+
+    /// <summary>
+    /// The table or view the statement <paramref name="tokens"/> open with
+    /// writes, named by one or two parts, when it writes it with no
+    /// <c>TOP</c>, hint, <c>OUTPUT</c> clause or <c>FROM</c> clause of its
+    /// own: an <c>INSERT</c> of a column list's <c>VALUES</c>, plain query or
+    /// <c>DEFAULT VALUES</c>, an <c>UPDATE</c>'s <c>SET</c> list and filter,
+    /// or a <c>DELETE</c>'s filter — each read as a plain query's clauses
+    /// (<see cref="ReadsAsPlainQuery"/>), a <c>DEFAULT</c> among them. Null
+    /// for any other statement.
+    /// </summary>
+    private static MultiPartName? PlainWriteTarget(ReadOnlySpan<Token> tokens)
     {
-        if (tokens is not [ReservedKeyword { Keyword: Keyword.Select }, ..])
-            return false;
+        if (tokens is not [ReservedKeyword { Keyword: Keyword.Insert or Keyword.Update or Keyword.Delete } verb, ..])
+            return null;
+        var at = 1;
+        if (at < tokens.Length && tokens[at] is ReservedKeyword { Keyword: var preposition }
+            && preposition == verb.Keyword switch { Keyword.Insert => Keyword.Into, Keyword.Delete => Keyword.From, _ => Keyword._ })
+        {
+            at++;
+        }
+        MultiPartName target = default;
+        for (var parts = 1; ; parts++)
+        {
+            if (at >= tokens.Length || tokens[at] is not Name name || name.Value.StartsWith('#'))
+                return null;
+            target = parts == 1 ? new MultiPartName(name.Value) : target.WithAddedPart(name.Value);
+            if (++at >= tokens.Length || tokens[at] is not Operator { Character: '.' })
+                break;
+            if (parts == 2)
+                return null;
+            at++;
+        }
+        if (verb.Keyword == Keyword.Insert && at < tokens.Length && tokens[at] is Operator { Character: '(' })
+        {
+            do
+            {
+                if (++at >= tokens.Length || tokens[at] is not Name column || column.Value.StartsWith('$'))
+                    return null;
+            }
+            while (++at < tokens.Length && tokens[at] is Operator { Character: ',' });
+            if (at >= tokens.Length || tokens[at] is not Operator { Character: ')' })
+                return null;
+            at++;
+        }
+        var plain = verb.Keyword switch
+        {
+            Keyword.Insert => at < tokens.Length && tokens[at] switch
+            {
+                ReservedKeyword { Keyword: Keyword.Values } => ReadsAsPlainClauses(tokens, at + 1, writes: true, out _),
+                ReservedKeyword { Keyword: Keyword.Select } => ReadsAsPlainClauses(tokens, at, writes: false, out var readsFrom) && readsFrom,
+                ReservedKeyword { Keyword: Keyword.Default } => at + 1 < tokens.Length && tokens[at + 1] is ReservedKeyword { Keyword: Keyword.Values }
+                    && ReadsAsPlainClauses(tokens, at + 2, writes: true, out _),
+                _ => false,
+            },
+            Keyword.Update => at < tokens.Length && tokens[at] is ReservedKeyword { Keyword: Keyword.Set } && ReadsAsPlainClauses(tokens, at + 1, writes: true, out _),
+            _ => ReadsAsPlainClauses(tokens, at, writes: true, out _),
+        };
+        return plain ? target : null;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="tokens"/> from <paramref name="start"/> to the
+    /// statement's end — a separator, a keyword starting another statement or
+    /// the text's end — read as a plain query's clauses: tables and views by
+    /// one- or two-part names, no function but a built-in one, no hint.
+    /// <paramref name="readsFrom"/> answers whether they hold a <c>FROM</c>
+    /// clause outside parentheses. With <paramref name="writes"/> they are
+    /// a write's, which takes a <c>DEFAULT</c> and neither an <c>OUTPUT</c>
+    /// clause nor a <c>FROM</c> clause of its own.
+    /// </summary>
+    private static bool ReadsAsPlainClauses(ReadOnlySpan<Token> tokens, int start, bool writes, out bool readsFrom)
+    {
         var depth = 0;
         var cases = 0;
-        var readsFrom = false;
+        readsFrom = false;
         Token? previous = null;
-        for (var i = 0; i < tokens.Length; previous = tokens[i++])
+        for (var i = start; i < tokens.Length; previous = tokens[i++])
         {
             switch (tokens[i])
             {
@@ -184,7 +331,7 @@ partial class Simulation
                         return false;
                     break;
                 case Operator { Character: ';' } when depth == 0:
-                    return readsFrom;
+                    return true;
                 case Operator { Character: '.' } when previous is Operator { Character: '.' } || (i >= 2 && tokens[i - 2] is Operator { Character: '.' }):
                     // A third name part: another database's, or a server's.
                     return false;
@@ -200,17 +347,27 @@ partial class Simulation
                     {
                         return false;
                     }
-                    if (depth == 0 && cases == 0 && i > 0 && EndsQuery(keyword, previous))
-                        return readsFrom;
-                    if (!IsPlainQueryKeyword(keyword))
+                    if (depth == 0 && cases == 0 && i > start && EndsQuery(keyword, previous))
+                        return true;
+                    if (!IsPlainQueryKeyword(keyword) && !(writes && keyword == Keyword.Default))
                         return false;
                     if (keyword == Keyword.Case)
+                    {
                         cases++;
+                    }
                     else if (keyword == Keyword.End)
+                    {
                         cases--;
+                    }
                     else if (keyword == Keyword.From && depth == 0)
+                    {
+                        if (writes)
+                            return false;
                         readsFrom = true;
+                    }
                     break;
+                case UnquotedString { ContextualKeyword: ContextualKeyword.Output } when writes && depth == 0:
+                    return false;
                 case AtPrefixedString when IsFromSourceLead(tokens, i):
                     return false;
                 case Name name when name.Value.StartsWith('#') || name.Value.StartsWith('$'):
@@ -219,7 +376,7 @@ partial class Simulation
                     return false;
             }
         }
-        return readsFrom;
+        return true;
     }
 
     /// <summary>Whether <paramref name="token"/> is a join's type, which a join hint follows.</summary>

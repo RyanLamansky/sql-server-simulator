@@ -749,7 +749,18 @@ The walk still takes a name's Sch-S as it binds, as it always has, so a batch st
 
 What the walk's own parse settles beyond binding is why some statements decline, parsed by the walk its way and by the run again: a hint (a join hint's warning, an optimizer refusal), a user or CLR function call (its inlining, settled compiling), a temporary table or table variable, a sequence, a FROM-less query (evaluated as it parses), `SELECT … INTO`, three- and four-part names, `FIPS_FLAGGER`, a security policy (bound with the batch), and a session under the settings a cached plan stays out of.
 A token pre-scan (`ReadsAsPlainQuery`) turns most of those away before the parse begins, since an attempt abandoned partway costs its parse; what it can't see — a view's body bound as the query parses, an error — abandons by throwing (`RunParseDeclinedException`), and the parser's statement state is put back (`ParserContext.StatementState`) for the walk's own parse to begin as if the attempt never ran, which `RunParseAudit` checks field by field in a Debug build.
-A write, a statement under a `WITH` prefix and a module body still parse twice (see the [backlog](backlog.md#complex-query-execution--perf-residuals)).
+
+**Writes run on it too.**
+A plain `INSERT`, `UPDATE` or `DELETE` parses for the run the same way (`Simulation.ParseWriteForRun`), inside the mutation scope the walk's own parse runs in, as far as its split point (`NoteDmlPlan`).
+There the plan is taken and the walk gets its skip mode back, so the execution half runs skipped as it does after the walk's own parse; a plan the split doesn't take declines.
+Fewer writes qualify than queries, because some routes run the statement without ever reaching a split point: an `INSTEAD OF` trigger or a partitioned view behind a view, an executed source.
+So the token pre-scan (`PlainWriteTarget`) takes only a one- or two-part target with no `TOP`, hint, `OUTPUT` or joined `FROM`, and the attempt starts only once that name finds a table.
+That check also spares a batch writing a table it creates ahead of the write the cost of an attempt bound to fail.
+A view or remote target the parse meets anyway declines (`RouteViewWrite`, `ParseDmlTargetName`), and a Debug build raises if a write parsed for the run ever returns without reaching its split.
+Measured as below, a ten-column `INSERT … VALUES` went from 20.3 µs and 26.8 KB to 17.8 µs and 24.5 KB, and an `UPDATE` of two columns by key from 14.3 µs and 28.9 KB to 13.4 µs and 26.7 KB (measured 2026-10-25).
+Of that `UPDATE`'s remaining walk, about 2.5 µs is its parse for the run, with the walk's per-statement scaffolding and Query Store's capture (about 2 µs) the rest of a one-off write's overhead.
+
+A `MERGE`, the writes above the walk turns away, a statement under a `WITH` prefix and a module body still parse twice (see the [backlog](backlog.md#complex-query-execution--perf-residuals)).
 
 ADO.NET over the one-off harness, medians of three processes per build alternating, the baseline the commit before (measured 2026-10-25):
 

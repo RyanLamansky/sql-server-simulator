@@ -120,6 +120,11 @@ partial class Simulation
             remote = RemoteWrite.ForTarget(context.Batch, name, writeKind);
         else if (context.Batch.ExpandSynonym(name).Count >= 4)
             throw SimulatedSqlException.MergeTargetIsRemote();
+        // A remote write is never a plan (StatementPlanRecording.TakeParse), so
+        // one the compile walk parses for its run goes no further (see
+        // ParseWriteForRun).
+        if (remote is not null && context.Batch.ParsesForRun)
+            throw new RunParseDeclinedException();
         return name;
     }
 
@@ -243,10 +248,13 @@ partial class Simulation
     /// A <c>DELETE</c> through a join view is refused: it removes a whole row
     /// and so reaches every base table (Msg 4405). A write through a view or
     /// CTE over a view carrying an <c>INSTEAD OF</c> trigger for it goes to
-    /// that trigger.
+    /// that trigger. A write the compile walk parses for its run goes no
+    /// further, since some routes run the statement without reaching its split
+    /// point (see <see cref="ParseWriteForRun"/>).
     /// </summary>
     private static DmlViewRoute RouteViewWrite(BatchContext batch, View view, TriggerActions action) =>
-        HasInsteadOfTrigger(batch, view, action) || InsteadOfTriggerViewUnder(batch, view, action) is not null ? DmlViewRoute.InsteadOf
+        batch.ParsesForRun ? throw new RunParseDeclinedException()
+        : HasInsteadOfTrigger(batch, view, action) || InsteadOfTriggerViewUnder(batch, view, action) is not null ? DmlViewRoute.InsteadOf
         : view.PartitionedBase is not null ? DmlViewRoute.Partitioned
         : view.BaseTable is not null ? DmlViewRoute.BaseTable
         : view.IsJoinUpdatable && action != TriggerActions.Delete ? DmlViewRoute.JoinView
