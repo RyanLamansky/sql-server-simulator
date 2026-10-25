@@ -37,7 +37,7 @@ internal sealed class ScalarSubqueryExpression(Selection inner) : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         PermissionEnforcement.CheckSubqueryReads(runtime.Batch, this.Inner);
-        var memo = UncorrelatedSubqueryCache.Open(runtime, this);
+        var memo = UncorrelatedSubqueryCache.Open(runtime, this, replaysByKey: true);
         if (memo.Result is { } cached)
             return (SqlValue)cached;
 

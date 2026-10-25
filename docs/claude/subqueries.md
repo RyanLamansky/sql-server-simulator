@@ -38,6 +38,13 @@ Probe-confirmed against SQL Server 2025: `SELECT COUNT(DISTINCT g) FROM (SELECT 
 The counter has a second consumer with the same reasoning: the once-per-enumeration materialization of a deferred FROM source, in [`joins.md`](joins.md#deferred-sources-materialize-once-per-enumeration).
 It also counts reads of a value the enclosing query binds per group — an aggregate that query owns, `GROUPING` — which differ from one outer row to the next without the plan consulting the outer row ([`query.md`](query.md#aggregate-ownership-across-scopes)).
 
+### A correlated plan replays for a row reading the same values
+
+A site whose first execution read the outer row keys its results by the values of the names it consulted (`UncorrelatedSubqueryCache.KeyedSite`), compared as they render (`SqlValue.IsIdenticalTo`), so a later row reading the same values replays the result rather than running the plan.
+A deterministic plan handed the same values takes the same path through its rows, so the replay is exact; a run that consults a name outside the key starts the memo over under the wider key, and one that draws a per-call value sends the site per row as above.
+Measured 2026-10-25 (Release, the faster of two runs): over 4,000 rows, `WHERE a.x > (SELECT AVG(b.x) FROM t b WHERE b.g = a.g)` across 10 groups took 1.7 s and takes 23 ms, and `WHERE a.id = (SELECT MAX(b.id) FROM t b WHERE b.s = a.s)` across 13 groups 2.6 s and 46 ms.
+A correlation reading a unique column gains nothing: every row is a new key, filed until the site's capacity.
+
 ## An equi-correlated body switches to a hash semi / anti-join
 
 A correlated `EXISTS` / `NOT EXISTS` / `[NOT] IN (SELECT …)` re-executes its inner plan per outer row.

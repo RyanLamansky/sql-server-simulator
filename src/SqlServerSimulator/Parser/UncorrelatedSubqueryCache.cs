@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser;
@@ -42,6 +43,18 @@ namespace SqlServerSimulator.Parser;
 /// same 100 rows.
 /// </para>
 /// <para>
+/// <b>A plan that read the outer row replays for a row that reads the same.</b>
+/// A deterministic plan handed the same values for the names it consults
+/// takes the same path through its rows, consulting the same names, and
+/// reaches the same result, so a scalar or quantified site whose first
+/// execution read the outer row keys its results by the values of the names
+/// it read (<see cref="KeyedSite"/>): a correlated aggregate over a handful of
+/// groups runs once per group rather than once per row. A later execution that
+/// reads a name outside the key starts the memo over under the wider key.
+/// <c>EXISTS</c> and <c>IN</c> keep their per-row runs for the switch to a
+/// hash semi-join that counts them (<c>SemiJoinProbe</c>).
+/// </para>
+/// <para>
 /// Results live on <see cref="StatementContext.SubqueryResults"/> rather than
 /// on the expression, per the shared-plan contract in
 /// <c>docs/claude/plan-cache.md</c>: one <c>Selection</c> is executed by many
@@ -65,30 +78,145 @@ internal static class UncorrelatedSubqueryCache
     /// <see cref="SubqueryMemo.Result"/> to return as-is, or — counting the
     /// inner-plan execution the caller is about to run — a
     /// <see cref="SubqueryMemo.Probe"/> to run it under, or neither when the
-    /// site is already known to need per-row execution.
+    /// site is already known to need per-row execution. With
+    /// <paramref name="replaysByKey"/> a run that read the outer row is filed
+    /// by the values it read, for a later row reading the same.
     /// </summary>
-    internal static SubqueryMemo Open(RuntimeContext runtime, object site)
+    internal static SubqueryMemo Open(RuntimeContext runtime, object site, bool replaysByKey = false)
     {
         var entry = runtime.Batch.CurrentStatement.SubqueryResults is { } memo && memo.TryGetValue(site, out var found)
             ? found
             : null;
+        if (entry is KeyedSite keyed)
+        {
+            var key = keyed.KeyOf(runtime.ResolveColumn);
+            if (keyed.Results.TryGetValue(key, out var replayed))
+                return new SubqueryMemo(replayed, null);
+            runtime.Batch.Connection.SubqueryPlanExecutions++;
+            return new SubqueryMemo(null, new OuterRowProbe(runtime, replaysByKey: true, key));
+        }
         if (entry is not null && !ReferenceEquals(entry, PerRowSite))
             return new SubqueryMemo(entry, null);
 
         runtime.Batch.Connection.SubqueryPlanExecutions++;
-        return new SubqueryMemo(null, entry is null ? new OuterRowProbe(runtime) : null);
+        return new SubqueryMemo(null, entry is null ? new OuterRowProbe(runtime, replaysByKey) : null);
     }
 
     /// <summary>
     /// Files the outcome of a probed execution: <paramref name="result"/> for
-    /// the rest of the statement when the execution proved replayable, and the
-    /// <see cref="PerRowSite"/> marker when it didn't.
+    /// the rest of the statement when the execution read nothing of the outer
+    /// row, under the values it read when the site replays by key and it read
+    /// them deterministically, and the <see cref="PerRowSite"/> marker
+    /// otherwise.
     /// </summary>
     internal static void Store(RuntimeContext runtime, object site, OuterRowProbe probe, object result)
     {
-        var frame = runtime.Batch.CurrentStatement;
-        (frame.SubqueryResults ??= new Dictionary<object, object>(ReferenceEqualityComparer.Instance))[site] =
-            probe.CanReplay(runtime) ? result : PerRowSite;
+        var memo = runtime.Batch.CurrentStatement.SubqueryResults ??= new Dictionary<object, object>(ReferenceEqualityComparer.Instance);
+        memo[site] = probe.DrewVolatile(runtime) ? PerRowSite
+            : probe.Key is null && probe.ConsultedNothing ? result
+            : probe.ReplaysByKey ? KeyedSite.File(memo.GetValueOrDefault(site) as KeyedSite, probe, runtime, result) ?? PerRowSite
+            : PerRowSite;
+    }
+
+    /// <summary>
+    /// A site whose plan read the outer row: its results by the values of the
+    /// <see cref="Names"/> its executions consulted, compared as
+    /// <see cref="SqlValue.IsIdenticalTo"/> does — a plan may hand a consulted
+    /// value back, so a row equal to another only under the collation or the
+    /// trailing-space rule is a different key.
+    /// </summary>
+    private sealed class KeyedSite(MultiPartName[] names)
+    {
+        /// <summary>The most names a key reads before the site runs per row.</summary>
+        public const int MaxNames = 8;
+
+        /// <summary>The most results a site keeps; a key past them runs its plan without filing it.</summary>
+        private const int Capacity = 1024;
+
+        public readonly MultiPartName[] Names = names;
+
+        public readonly Dictionary<SqlValue[], object> Results = new(IdenticalValues.Instance);
+
+        /// <summary>The key of the row <paramref name="resolve"/> reads.</summary>
+        public SqlValue[] KeyOf(Func<MultiPartName, SqlValue> resolve)
+        {
+            var key = new SqlValue[this.Names.Length];
+            for (var i = 0; i < key.Length; i++)
+                key[i] = resolve(this.Names[i]);
+            return key;
+        }
+
+        /// <summary>
+        /// Files <paramref name="result"/> in <paramref name="site"/> under the
+        /// key <paramref name="probe"/>'s miss looked up, or — on the site's
+        /// first execution, or once an execution consulted a name outside the
+        /// site's — in a site keyed by both names, its results starting over
+        /// since their keys are too short; null when that key would read more
+        /// than <see cref="MaxNames"/> names or a value whose identity
+        /// <see cref="SqlValue.IsIdenticalTo"/> doesn't settle (see
+        /// <see cref="Keys"/>).
+        /// </summary>
+        public static KeyedSite? File(KeyedSite? site, OuterRowProbe probe, RuntimeContext runtime, object result)
+        {
+            if (site is not null && probe.Key is { } key && probe.ConsultedWithin(site.Names))
+            {
+                if (site.Results.Count < Capacity)
+                    site.Results[key] = result;
+                return site;
+            }
+
+            var names = new List<MultiPartName>(site?.Names ?? []);
+            probe.AddConsultedTo(names);
+            if (names.Count > MaxNames)
+                return null;
+            var grown = new KeyedSite([.. names]);
+            var grownKey = grown.KeyOf(runtime.ResolveColumn);
+            foreach (var value in grownKey)
+            {
+                if (!Keys(value.Type))
+                    return null;
+            }
+            grown.Results[grownKey] = result;
+            return grown;
+        }
+
+        /// <summary>
+        /// Whether a name of <paramref name="type"/> can key a result: the
+        /// numbers, the date and time types, <c>uniqueidentifier</c> and the
+        /// character strings, whose values <see cref="SqlValue.IsIdenticalTo"/>
+        /// tells apart exactly. <c>xml</c> and the spatial types share the
+        /// string category without being compared as strings, and a
+        /// <c>sql_variant</c> compares its inner value by equality.
+        /// </summary>
+        private static bool Keys(SqlType type) =>
+            type.Category is not (SqlTypeCategory.Other or SqlTypeCategory.String) || SqlType.IsCollatedString(type);
+    }
+
+    /// <summary>Compares two keys value by value under <see cref="SqlValue.IsIdenticalTo"/>.</summary>
+    private sealed class IdenticalValues : IEqualityComparer<SqlValue[]>
+    {
+        public static readonly IdenticalValues Instance = new();
+
+        public bool Equals(SqlValue[]? x, SqlValue[]? y)
+        {
+            if (x!.Length != y!.Length)
+                return false;
+            for (var i = 0; i < x.Length; i++)
+            {
+                if (!x[i].IsIdenticalTo(y[i]))
+                    return false;
+            }
+            return true;
+        }
+
+        // Identical values are equal values, so equality's hash serves identity.
+        public int GetHashCode(SqlValue[] obj)
+        {
+            var hash = new HashCode();
+            foreach (var value in obj)
+                hash.Add(value.GetHashCode());
+            return hash.ToHashCode();
+        }
     }
 }
 
@@ -122,7 +250,8 @@ internal readonly struct SubqueryMemo(object? result, OuterRowProbe? probe)
 
 /// <summary>
 /// One subquery execution's correlation probe: the resolver to run the plan
-/// under, plus the evidence <see cref="CanReplay"/> weighs afterwards.
+/// under, plus the evidence <see cref="UncorrelatedSubqueryCache.Store"/>
+/// weighs afterwards.
 /// </summary>
 internal sealed class OuterRowProbe
 {
@@ -132,26 +261,79 @@ internal sealed class OuterRowProbe
     /// </summary>
     internal readonly Func<MultiPartName, SqlValue> Resolver;
 
+    /// <summary>Whether the site files a run that read the outer row by the values it read.</summary>
+    internal readonly bool ReplaysByKey;
+
+    /// <summary>The key a keyed site missed on for this execution's row; null on a site's first execution.</summary>
+    internal readonly SqlValue[]? Key;
+
     private readonly long volatileEvaluationsAtStart;
 
-    private bool consulted;
+    /// <summary>The names the execution consulted, each once; null while it has consulted none.</summary>
+    private List<MultiPartName>? consulted;
 
-    internal OuterRowProbe(RuntimeContext runtime)
+    internal OuterRowProbe(RuntimeContext runtime, bool replaysByKey = false, SqlValue[]? key = null)
     {
         var outer = runtime.ResolveColumn;
+        this.ReplaysByKey = replaysByKey;
+        this.Key = key;
         this.Resolver = name =>
         {
-            this.consulted = true;
+            this.Note(name);
             return outer(name);
         };
         this.volatileEvaluationsAtStart = runtime.Batch.Connection.VolatileEvaluations;
     }
+
+    /// <summary>Whether the execution read nothing of the outer row.</summary>
+    internal bool ConsultedNothing => this.consulted is null;
 
     /// <summary>
     /// Whether the execution this probe watched can stand in for every later
     /// row: it neither read the outer row nor evaluated a built-in that draws
     /// a fresh value per call.
     /// </summary>
-    internal bool CanReplay(RuntimeContext runtime) =>
-        !this.consulted && runtime.Batch.Connection.VolatileEvaluations == this.volatileEvaluationsAtStart;
+    internal bool CanReplay(RuntimeContext runtime) => this.ConsultedNothing && !this.DrewVolatile(runtime);
+
+    /// <summary>Whether the execution evaluated a built-in that draws a fresh value per call.</summary>
+    internal bool DrewVolatile(RuntimeContext runtime) =>
+        runtime.Batch.Connection.VolatileEvaluations != this.volatileEvaluationsAtStart;
+
+    /// <summary>Whether every name the execution consulted is one of <paramref name="names"/>.</summary>
+    internal bool ConsultedWithin(MultiPartName[] names)
+    {
+        foreach (var name in this.consulted ?? [])
+        {
+            if (IndexOf(names, name) < 0)
+                return false;
+        }
+        return true;
+    }
+
+    /// <summary>Adds to <paramref name="names"/> each name the execution consulted that it lacks.</summary>
+    internal void AddConsultedTo(List<MultiPartName> names)
+    {
+        foreach (var name in this.consulted ?? [])
+        {
+            if (IndexOf(CollectionsMarshal.AsSpan(names), name) < 0)
+                names.Add(name);
+        }
+    }
+
+    private void Note(MultiPartName name)
+    {
+        var consulted = this.consulted ??= [];
+        if (IndexOf(CollectionsMarshal.AsSpan(consulted), name) < 0)
+            consulted.Add(name);
+    }
+
+    private static int IndexOf(ReadOnlySpan<MultiPartName> names, MultiPartName name)
+    {
+        for (var i = 0; i < names.Length; i++)
+        {
+            if (DeferredColumn.SameName(names[i], name))
+                return i;
+        }
+        return -1;
+    }
 }

@@ -25,6 +25,44 @@ public sealed class UncorrelatedSubqueryTests
         return sim;
     }
 
+    // ---- a correlated plan replayed by the values it read ----------------
+
+    /// <summary>
+    /// A correlated plan's result replays only for a row reading the same
+    /// values for every name the plan consults: a name a later row's run
+    /// consults for the first time — here once the group's first conjunct
+    /// holds and the second has to be asked — widens the key, so the eighth
+    /// row, sharing its group with the second, gets its own answer (probed
+    /// 2026-10-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void CorrelatedPlan_ConsultingANameOnlySomeRowsReach_AnswersPerRow()
+        => AreEqual("1:3,2:1,3:3,4:1,5:3,6:1,7:3,8:0", new Simulation().ExecuteScalar("""
+            create table g (id int primary key, grp int);
+            insert g values (1, 1), (2, 2), (3, 1), (4, 2), (5, 1), (6, 2), (7, 1), (8, 2);
+            create table inner_rows (v int);
+            insert inner_rows values (20), (40), (60), (80);
+            select string_agg(concat(id, ':', n), ',') within group (order by id)
+            from (select g.id, (select count(*) from inner_rows i where i.v > g.grp * 30 and (g.grp = 1 or i.v > g.id * 10)) as n from g) d
+            """));
+
+    /// <summary>
+    /// The values a replayed plan read compare as they render, so rows equal
+    /// only under the collation or the trailing-space rule each get back the
+    /// value their own row hands the plan (probed 2026-10-25 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void CorrelatedPlan_HandingBackItsOuterValue_AnswersEachRowsOwn()
+        => AreEqual("[a|],[A|],[a |],[a|]", new Simulation().ExecuteScalar("""
+            create table c (id int primary key, code varchar(5));
+            insert c values (1, 'a'), (2, 'A'), (3, 'a '), (4, 'a');
+            create table inner_rows (v int);
+            insert inner_rows values (20);
+            select string_agg(concat('[', s, ']'), ',') within group (order by id)
+            from (select c.id, (select top 1 c.code + '|' from inner_rows) as s from c) d
+            """));
+
     // ---- scalar (SELECT ...) --------------------------------------------
 
     /// <summary>

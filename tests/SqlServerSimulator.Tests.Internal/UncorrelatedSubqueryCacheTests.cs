@@ -31,6 +31,19 @@ public sealed class UncorrelatedSubqueryCacheTests
         return connection;
     }
 
+    /// <summary><see cref="OpenWithRows"/> plus eight rows over two groups.</summary>
+    private static SimulatedDbConnection OpenWithGroups()
+    {
+        var connection = OpenWithRows();
+        using var setup = connection.CreateCommand();
+        setup.CommandText = """
+            create table g (id int not null primary key, grp int not null);
+            insert g values (1, 1), (2, 2), (3, 1), (4, 2), (5, 1), (6, 2), (7, 1), (8, 2);
+            """;
+        _ = setup.ExecuteNonQuery();
+        return connection;
+    }
+
     /// <summary>
     /// Runs <paramref name="sql"/> to completion — every result set, every row,
     /// so nothing is left unexecuted behind a paused iterator — and reports
@@ -117,6 +130,20 @@ public sealed class UncorrelatedSubqueryCacheTests
     {
         using var connection = OpenWithRows();
         AreEqual((4, 8L), Measure(connection, "select id from outer_rows o where o.k = any (select v from inner_rows i where i.v = o.k)"));
+    }
+
+    /// <summary>
+    /// A correlated plan runs once per distinct value of the names it reads:
+    /// eight outer rows over two groups run it twice, in the scalar and the
+    /// quantified forms alike.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select g.id, (select max(i.v) from inner_rows i where i.v < g.grp * 50) from g")]
+    [DataRow("select g.id from g where g.grp * 40 >= all (select i.v from inner_rows i where i.v < g.grp * 50)")]
+    public void Correlated_RunsOncePerValueItReads(string sql)
+    {
+        using var connection = OpenWithGroups();
+        AreEqual((8, 2L), Measure(connection, sql));
     }
 
     /// <summary>

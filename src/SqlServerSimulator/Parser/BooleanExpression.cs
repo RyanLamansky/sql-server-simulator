@@ -2887,7 +2887,7 @@ internal abstract class BooleanExpression : ExpressionNode
             var (operatorName, compare) = GetComparator(op);
 
             PermissionEnforcement.CheckSubqueryReads(runtime.Batch, inner);
-            var memo = UncorrelatedSubqueryCache.Open(runtime, this);
+            var memo = UncorrelatedSubqueryCache.Open(runtime, this, replaysByKey: true);
             if (memo.Result is { } cached)
                 return this.Combine((SqlValue[])cached, lhs, operatorName, compare);
 
