@@ -176,8 +176,23 @@ internal static class JsonText
             ? result.WithCollation(collation, documentType.Coercibility)
             : result.WithCollation(batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
 
-    /// <summary>Parses text a <see cref="Scan"/> already validated.</summary>
-    public static JsonDocument Parse(string scanned) => JsonDocument.Parse(scanned, DocumentOptions);
+    /// <summary>
+    /// Parses text a <see cref="Scan"/> already validated. An unpaired
+    /// surrogate, which real's reader keeps as the UTF-16 unit it is, can't
+    /// reach the UTF-8 object model this one builds: the transcoding refuses
+    /// it, the one argument the parse can refuse.
+    /// </summary>
+    public static JsonDocument Parse(string scanned)
+    {
+        try
+        {
+            return JsonDocument.Parse(scanned, DocumentOptions);
+        }
+        catch (ArgumentException)
+        {
+            throw new NotSupportedException("A JSON document holding an unpaired surrogate isn't modeled.");
+        }
+    }
 
     /// <summary>
     /// Raises what a read-only JSON scalar owes for a path that didn't

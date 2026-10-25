@@ -176,17 +176,13 @@ partial class Simulation
             int? declaredScale = null;
             if (context.Token is Operator { Character: '(' })
             {
-                declaredMaxLength = context.GetNextRequired() switch
-                {
-                    Numeric { Value: { IsNull: false } lengthValue } => lengthValue.AsInt32,
-                    UnquotedString { ContextualKeyword: ContextualKeyword.Max } => SqlType.MaxLengthSentinel,
-                    _ => throw SimulatedSqlException.SyntaxErrorNear(context),
-                };
+                _ = context.GetNextRequired();
+                declaredMaxLength = TypeNameSynonyms.ReadFirstTypeArgument(context, columnDefinition: true);
                 switch (context.GetNextRequired())
                 {
                     case Operator { Character: ',' }:
                         _ = context.GetNextRequired();
-                        declaredScale = TypeNameSynonyms.ReadSecondTypeArgument(context, typeLeaf);
+                        declaredScale = TypeNameSynonyms.ReadSecondTypeArgument(context, typeLeaf, columnDefinition: true);
                         if (context.GetNextRequired() is not Operator { Character: ')' })
                             throw SimulatedSqlException.SyntaxErrorNear(context);
                         break;

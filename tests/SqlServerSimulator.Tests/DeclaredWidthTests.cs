@@ -51,6 +51,42 @@ public sealed class DeclaredWidthTests
         => new Simulation().AssertSqlError(statement, number, message);
 
     /// <summary>
+    /// A type's width, precision or scale is an <c>int</c> literal: a decimal
+    /// one — a fraction, or a whole number past <c>int</c> — is Msg 1080
+    /// echoing it where a column is declared and Msg 102 near it in any other
+    /// type spec, and a float is Msg 102 everywhere (probed 2026-10-25 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select cast('a' as varchar({0}))", false)]
+    [DataRow("select cast(1 as decimal(5, {0}))", false)]
+    [DataRow("declare @v varchar({0})", false)]
+    [DataRow("create procedure p @x varchar({0}) as select 1", false)]
+    [DataRow("create function f(@x varchar({0})) returns int as begin return 1 end", false)]
+    [DataRow("create type t from varchar({0})", false)]
+    [DataRow("create sequence s as decimal({0}, 0)", false)]
+    [DataRow("create partition function pf (varchar({0})) as range left for values ('a')", false)]
+    [DataRow("exec sp_executesql N'select @p', N'@p varchar({0})', 'a'", false)]
+    [DataRow("create table t (c varchar({0}))", true)]
+    [DataRow("create table t (c decimal(5, {0}))", true)]
+    [DataRow("create table t (i int); alter table t add c varchar({0})", true)]
+    [DataRow("create table t (i int); alter table t alter column i varchar({0})", true)]
+    [DataRow("declare @t table (c varchar({0}))", true)]
+    [DataRow("create type t as table (c varchar({0}))", true)]
+    [DataRow("create function f() returns @t table (c varchar({0})) as begin return end", true)]
+    [DataRow("select * from openjson(N'[]') with (c varchar({0}))", true)]
+    [DataRow("exec sp_executesql N'select 1 a' with result sets ((a varchar({0})))", true)]
+    public void ANonIntegerWidth_IsWordedForItsSite(string statement, bool columnDefinition)
+    {
+        foreach (var literal in (ReadOnlySpan<string>)["1.5", "9999999999", "1e1"])
+        {
+            var number = columnDefinition && literal != "1e1" ? 1080 : 102;
+            var ex = new Simulation().AssertSqlError(string.Format(System.Globalization.CultureInfo.InvariantCulture, statement, literal), number);
+            AreEqual(number == 1080 ? $"The integer value {literal} is out of range." : $"Incorrect syntax near '{literal}'.", ex.Errors[0].Message);
+        }
+    }
+
+    /// <summary>
     /// Real reads a declaration's whole type spec — name, width list and the
     /// token that ends it — before it binds the name, so a malformed one is a
     /// syntax error ahead of a missing type, however many parts the name has

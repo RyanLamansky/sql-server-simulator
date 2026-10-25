@@ -326,21 +326,15 @@ partial class Simulation
         }
         else if (context.Token is Operator { Character: '(' })
         {
-            var lengthToken = context.GetNextRequired();
-            declaredMaxLength = lengthToken is Numeric { Value: { IsNull: false } numericValue }
-                ? numericValue.AsInt32
-                : lengthToken is UnquotedString { ContextualKeyword: ContextualKeyword.Max }
-                    ? SqlType.MaxLengthSentinel
-                    : throw SimulatedSqlException.SyntaxErrorNear(context);
+            _ = context.GetNextRequired();
+            declaredMaxLength = TypeNameSynonyms.ReadFirstTypeArgument(context, columnDefinition: false);
             context.MoveNextRequired();
             if (declaredMaxLength == SqlType.MaxLengthSentinel && context.Token is Operator { Character: ',' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             if (context.Token is Operator { Character: ',' })
             {
-                var scaleToken = context.GetNextRequired();
-                declaredScale = scaleToken is Numeric { Value: { IsNull: false } scaleNumeric }
-                    ? scaleNumeric.AsInt32
-                    : throw SimulatedSqlException.SyntaxErrorNear(context);
+                _ = context.GetNextRequired();
+                declaredScale = TypeNameSynonyms.ReadIntegerTypeArgument(context, columnDefinition: false);
                 context.MoveNextRequired();
             }
             if (context.Token is not Operator { Character: ')' })

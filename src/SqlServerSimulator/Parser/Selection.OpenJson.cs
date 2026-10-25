@@ -475,7 +475,11 @@ internal sealed partial class Selection
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        var columns = new List<OpenJsonColumn>();
+        // Each column's path is read once the whole list has parsed, so a
+        // syntax error anywhere in it is reported ahead of a malformed path,
+        // as real's compile reports it (probed 2026-10-25 against SQL Server
+        // 2025: `v int N'$.' + x` is Msg 102 near '+').
+        var columns = new List<(string Name, SqlType Type, string Path, bool AsJson, bool WrittenDecimal)>();
         while (true)
         {
             // A reserved table-hint word where a column name belongs is the
@@ -497,18 +501,14 @@ internal sealed partial class Selection
             int? declaredScale = null;
             if (context.Token is Operator { Character: '(' })
             {
-                var lengthToken = context.GetNextRequired();
-                declaredMaxLength = lengthToken is Numeric { Value: { IsNull: false } numericValue }
-                    ? numericValue.AsInt32
-                    : context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Max }
-                        ? SqlType.MaxLengthSentinel
-                        : throw SimulatedSqlException.SyntaxErrorNear(context);
+                _ = context.GetNextRequired();
+                declaredMaxLength = TypeNameSynonyms.ReadFirstTypeArgument(context, columnDefinition: true);
 
                 switch (context.GetNextRequired())
                 {
                     case Operator { Character: ',' }:
                         _ = context.GetNextRequired();
-                        declaredScale = TypeNameSynonyms.ReadSecondTypeArgument(context, typeNameToken);
+                        declaredScale = TypeNameSynonyms.ReadSecondTypeArgument(context, typeNameToken, columnDefinition: true);
                         if (context.GetNextRequired() is not Operator { Character: ')' })
                             throw SimulatedSqlException.SyntaxErrorNear(context);
                         break;
@@ -583,17 +583,17 @@ internal sealed partial class Selection
 
             // Optional per-column path literal; defaults to the column's own
             // name as a quoted member, escaped as a JSON string would be.
-            JsonPath path;
+            string path;
             if (context.Token is Literal literal && SqlType.IsStringCategory(literal.Value.Type))
             {
-                path = JsonPath.Parse(literal.Value.AsString);
+                path = literal.Value.AsString;
                 context.MoveNextRequired();
             }
             else
             {
-                var quoted = new System.Text.StringBuilder();
+                var quoted = new System.Text.StringBuilder("$.");
                 Expressions.JsonValueRender.AppendJsonString(quoted, columnName);
-                path = JsonPath.Parse("$." + quoted);
+                path = quoted.ToString();
             }
 
             // AS JSON modifier — real SQL Server accepts it only on
@@ -614,10 +614,8 @@ internal sealed partial class Selection
                 context.MoveNextRequired();
             }
 
-            columns.Add(new OpenJsonColumn(columnName, resolvedType, path, asJson)
-            {
-                WrittenDecimal = resolvedType is DecimalSqlType && typeNameToken.Value.Equals("decimal", StringComparison.OrdinalIgnoreCase),
-            });
+            columns.Add((columnName, resolvedType, path, asJson,
+                resolvedType is DecimalSqlType && typeNameToken.Value.Equals("decimal", StringComparison.OrdinalIgnoreCase)));
 
             if (context.Token is Operator { Character: ')' })
                 break;
@@ -625,7 +623,7 @@ internal sealed partial class Selection
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
 
-        return [.. columns];
+        return [.. columns.Select(static column => new OpenJsonColumn(column.Name, column.Type, JsonPath.Parse(column.Path), column.AsJson) { WrittenDecimal = column.WrittenDecimal })];
     }
 }
 

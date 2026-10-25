@@ -371,18 +371,14 @@ internal sealed partial class Selection
             int? declaredScale = null;
             if (context.Token is Operator { Character: '(' })
             {
-                var lengthToken = context.GetNextRequired();
-                declaredMaxLength = lengthToken is Numeric { Value: { IsNull: false } numericValue }
-                    ? numericValue.AsInt32
-                    : context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Max }
-                        ? SqlType.MaxLengthSentinel
-                        : throw SimulatedSqlException.SyntaxErrorNear(context);
+                _ = context.GetNextRequired();
+                declaredMaxLength = TypeNameSynonyms.ReadFirstTypeArgument(context, columnDefinition: true);
 
                 switch (context.GetNextRequired())
                 {
                     case Operator { Character: ',' }:
                         _ = context.GetNextRequired();
-                        declaredScale = TypeNameSynonyms.ReadSecondTypeArgument(context, typeNameToken);
+                        declaredScale = TypeNameSynonyms.ReadSecondTypeArgument(context, typeNameToken, columnDefinition: true);
                         if (context.GetNextRequired() is not Operator { Character: ')' })
                             throw SimulatedSqlException.SyntaxErrorNear(context);
                         break;

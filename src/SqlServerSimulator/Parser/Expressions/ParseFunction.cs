@@ -53,12 +53,13 @@ internal sealed class ParseFunction : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var src = this.source.Run(runtime);
+        // The culture is checked as the call runs, a NULL value's included,
+        // and TRY_PARSE's too: a name Windows doesn't take as one is Msg 9818,
+        // as for FORMAT (probed 2026-10-25 against SQL Server 2025).
+        var cultureInfo = this.culture is null ? CultureInfo.InvariantCulture : ResolveCulture(this.culture);
         if (src.IsNull)
             return SqlValue.Null(this.targetType);
         var input = src.CoerceTo(SqlType.NVarchar).AsString;
-        var cultureInfo = this.culture is null
-            ? CultureInfo.InvariantCulture
-            : CultureInfo.GetCultureInfo(this.culture);
         try
         {
             return ParseInto(input, this.targetType, cultureInfo);
@@ -73,6 +74,25 @@ internal sealed class ParseFunction : Expression
                     input,
                     this.targetType is DecimalSqlType ? "numeric" : this.targetType.SqlServerName ?? this.targetType.ToString()!,
                     this.culture ?? "");
+        }
+    }
+
+    /// <summary>
+    /// The culture <paramref name="name"/> parses under: the runtime's own
+    /// data, or for a name it doesn't know, what Windows synthesizes for it
+    /// (<see cref="FormatCulture"/>).
+    /// </summary>
+    private static CultureInfo ResolveCulture(string name)
+    {
+        if (!Format.IsCultureName(name))
+            throw SimulatedSqlException.CultureNotSupported(name);
+        try
+        {
+            return CultureInfo.GetCultureInfo(name.Replace('_', '-'));
+        }
+        catch (CultureNotFoundException)
+        {
+            return FormatCulture.Resolve(name).Culture;
         }
     }
 

@@ -262,6 +262,11 @@ The related strict-mode errors carry State bytes of their own: `JSON_VALUE`'s **
 
 A statement that fails partway surfaces as the error alone: real streams the rows a truncated `OPENJSON` got through ahead of the error token, while the simulator's failed statement carries no rows (see [`data-reader.md`](data-reader.md)).
 
+### Not modeled yet
+
+- **A document holding an unpaired surrogate**: real's reader keeps it as the UTF-16 unit it is, so `JSON_VALUE(N'{"' + NCHAR(55357) + N'":1}', N'$."' + NCHAR(55357) + N'"')` is 1 (probed 2026-10-25 against SQL Server 2025); the UTF-8 object model the simulator builds can't hold one, and a read reaching it raises `NotSupportedException`.
+  A path holding one is real's Msg 13607 at the character, as here.
+
 ## `FOR JSON` result serialization
 
 The trailing `FOR JSON { PATH | AUTO } [, ROOT[('name')]] [, INCLUDE_NULL_VALUES] [, WITHOUT_ARRAY_WRAPPER]` clause on a SELECT serializes the whole result set to a single JSON string.

@@ -119,7 +119,7 @@ An **integer source** splits the same way while naming its own family: `CAST(1 A
 
 `PARSE(string AS type [USING culture])` / `TRY_PARSE(...)` — culture-aware Convert.NET surface (`Parser/Expressions/ParseFunction.cs`).
 The string argument routes through .NET's `<Type>.Parse(string, CultureInfo)` rather than the simulator's existing CAST machinery, so the accepted formats follow the CLR's culture rules (commas vs dots, locale-specific date orderings) rather than SQL Server's CAST grammar.
-Culture defaults to `en-US` when the USING clause is omitted; unknown culture name raises Msg 9819 (probe-confirmed) via a dedicated `ParseConversionFailed` factory.
+Culture defaults to `en-US` when the USING clause is omitted; a name Windows doesn't take as one is Msg 9818 by `FORMAT`'s rule ([`scalars.md`](scalars.md)), checked as the call runs — over a NULL value and in `TRY_PARSE` too — and a well-formed name the runtime doesn't ship parses as Windows synthesizes it (probed 2026-10-25 against SQL Server 2025).
 `PARSE` re-raises any `FormatException` / `OverflowException` as Msg 9819 with the source value embedded; `TRY_PARSE` catches the same set and returns NULL.
 An exact-numeric target is named **`numeric`** in that message however the statement spelled it.
 

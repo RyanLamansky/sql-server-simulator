@@ -265,10 +265,8 @@ partial class Simulation
         var afterTypeName = context.SaveCheckpoint();
         if (context.MoveNext() && context.Token is Operator { Character: '(' })
         {
-            var lengthToken = context.GetNextRequired();
-            if (lengthToken is not Numeric { Value: { IsNull: false } numericValue })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            declaredMaxLength = numericValue.AsInt32;
+            _ = context.GetNextRequired();
+            declaredMaxLength = TypeNameSynonyms.ReadIntegerTypeArgument(context, columnDefinition: false);
             switch (context.GetNextRequired())
             {
                 case Operator { Character: ',' }:

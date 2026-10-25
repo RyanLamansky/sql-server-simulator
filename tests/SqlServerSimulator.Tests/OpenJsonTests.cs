@@ -444,4 +444,24 @@ public sealed class OpenJsonTests
     [DataRow("openjson(N'[{}]') with (a int)", 1)]
     public void AnEmptyObjectRoot_ReadsNoRowUnderWith(string source, int rows)
         => AreEqual(rows, new Simulation().ExecuteScalar($"select count(*) from {source}"));
+
+    /// <summary>
+    /// The WITH clause parses whole before any column's path is read, so an
+    /// expression where a path literal belongs is the syntax error at its
+    /// operator, ahead of the malformed path its literal half makes (probed
+    /// 2026-10-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void WithColumn_PathExpression_IsASyntaxError()
+        => new Simulation().AssertSqlError("select v from openjson(N'{\"a\":1}') with (v int N'$.' + nchar(97))", 102, "Incorrect syntax near '+'.");
+
+    /// <summary>
+    /// Real's reader keeps an unpaired surrogate as the UTF-16 unit it is, so
+    /// a key holding one matches a path naming it (probed 2026-10-25 against
+    /// SQL Server 2025); the simulator's object model can't hold one and says
+    /// so.
+    /// </summary>
+    [TestMethod]
+    public void Document_HoldingAnUnpairedSurrogate_IsAnUnmodeledGap()
+        => Contains("unpaired surrogate", Throws<NotSupportedException>(() => new Simulation().ExecuteScalar("select json_value(N'{\"' + nchar(55357) + N'\":1}', N'$.\"' + nchar(55357) + N'\"')")).Message);
 }

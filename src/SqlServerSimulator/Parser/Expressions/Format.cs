@@ -102,10 +102,18 @@ internal sealed partial class Format : Expression
     private static FormatCulture ResolveCulture(SqlValue cultureValue)
     {
         var name = cultureValue.IsNull ? null : cultureValue.AsString;
-        return name is null || !(IsWellFormedCultureName(name) || FormatCulture.IsKnown(name))
+        return name is null || !IsCultureName(name)
             ? throw SimulatedSqlException.CultureNotSupported(name ?? "NULL")
             : FormatCulture.Resolve(name);
     }
+
+    /// <summary>
+    /// Whether real takes <paramref name="name"/> as a culture, <c>FORMAT</c>
+    /// and <c>PARSE</c> alike: one Windows parses as a name, or knows outright
+    /// (see <see cref="IsWellFormedCultureName"/>; probed 2026-10-25 for
+    /// <c>PARSE</c>).
+    /// </summary>
+    internal static bool IsCultureName(string name) => IsWellFormedCultureName(name) || FormatCulture.IsKnown(name);
 
     /// <summary>
     /// Whether Windows parses <paramref name="name"/> as a culture name at

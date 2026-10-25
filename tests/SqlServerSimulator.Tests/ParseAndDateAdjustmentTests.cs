@@ -46,6 +46,32 @@ public sealed class ParseAndDateAdjustmentTests
     public void Parse_Hour24_RaisesError(string arguments)
         => _ = new Simulation().AssertSqlError($"select parse({arguments})", 9819);
 
+    /// <summary>
+    /// A culture Windows doesn't take as a name, FORMAT's rule, is Msg 9818 as
+    /// the call runs — for a NULL value and from TRY_PARSE too — while a
+    /// well-formed name the runtime doesn't ship reads as Windows synthesizes
+    /// it (probed 2026-10-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("parse('12.5' as decimal(10, 2) using '=n-US')", "=n-US")]
+    [DataRow("try_parse('12.5' as decimal(10, 2) using '=n-US')", "=n-US")]
+    [DataRow("parse('12.5' as decimal(10, 2) using '')", "")]
+    [DataRow("try_parse('1' as int using ' en-US')", " en-US")]
+    [DataRow("parse('1' as int using 'en-POSIX')", "en-POSIX")]
+    [DataRow("parse('1' as int using 'x')", "x")]
+    [DataRow("parse(cast(null as varchar(5)) as int using '=n')", "=n")]
+    public void Parse_CultureThatIsNoName_RaisesError(string call, string culture)
+        => new Simulation().AssertSqlError($"select {call}", 9818, $"The culture parameter '{culture}' provided in the function call is not supported.");
+
+    [TestMethod]
+    [DataRow("parse('12.5' as decimal(10, 2) using 'xx-YY')")]
+    [DataRow("parse('12.5' as decimal(10, 2) using 'EN-us')")]
+    [DataRow("parse('12.5' as decimal(10, 2) using 'en_US')")]
+    [DataRow("parse('12.5' as decimal(10, 2) using 'en-US-POSIX')")]
+    [DataRow("(select count(*) from (values (cast(null as varchar(5)))) v (s) where 1 = 0 and parse(s as int using '=n') = 1) + 12.5")]
+    public void Parse_CultureCheckedOnlyAsTheCallRuns(string call)
+        => AreEqual(12.5m, Convert.ToDecimal(new Simulation().ExecuteScalar($"if 1 = 0 select parse('1' as int using '=n'); select {call}"), System.Globalization.CultureInfo.InvariantCulture));
+
     [TestMethod]
     public void TryParse_Hour24_ReturnsNull()
         => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select try_parse('2026-10-16 24:00' as datetime2)"));

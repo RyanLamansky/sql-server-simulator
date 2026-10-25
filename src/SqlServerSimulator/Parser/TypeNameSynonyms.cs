@@ -46,8 +46,38 @@ internal static class TypeNameSynonyms
     }
 
     /// <summary>
+    /// Reads the first argument of a type spec's parenthesized list, with the
+    /// cursor on it: a length or precision, or <c>MAX</c>
+    /// (<see cref="Storage.SqlType.MaxLengthSentinel"/>). See
+    /// <see cref="ReadIntegerTypeArgument"/> for the numbers it refuses.
+    /// </summary>
+    internal static int ReadFirstTypeArgument(ParserContext context, bool columnDefinition) =>
+        context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Max }
+            ? Storage.SqlType.MaxLengthSentinel
+            : ReadIntegerTypeArgument(context, columnDefinition);
+
+    /// <summary>
+    /// A type argument that has to be a number, with the cursor on it: an
+    /// <c>int</c> literal. A decimal one — a fraction, or a whole number past
+    /// <c>int</c> — is Msg 1080 echoing it in a column definition (a table's,
+    /// a table type's or variable's, a table-valued function's result, an
+    /// <c>OPENJSON</c> / <c>OPENXML</c> <c>WITH</c> clause, <c>WITH RESULT
+    /// SETS</c>) and Msg 102 near it in any other type spec, and a float or
+    /// anything else is Msg 102 near it everywhere (probed 2026-10-25 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static int ReadIntegerTypeArgument(ParserContext context, bool columnDefinition) => context.Token switch
+    {
+        Numeric { Value: { IsNull: false } number } when number.Type == Storage.SqlType.Int32 => number.AsInt32,
+        Numeric { Value: { IsNull: false } number } when columnDefinition && number.Type.Category == Storage.SqlTypeCategory.Decimal =>
+            throw SimulatedSqlException.IntegerValueOutOfRange(context.Token.Source.ToString()),
+        _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+    };
+
+    /// <summary>
     /// Reads the second argument of a type spec's parenthesized pair, with
-    /// the cursor on it: an integer (a <c>decimal</c>'s scale), or for
+    /// the cursor on it: an integer (a <c>decimal</c>'s scale, refused as
+    /// <see cref="ReadIntegerTypeArgument"/> refuses), or for
     /// <c>vector</c> an unquoted base-type name, which reads as
     /// <see cref="Storage.VectorSqlType.Float32BaseType"/> when it is
     /// <c>float32</c>, as <see cref="Storage.VectorSqlType.Float16BaseType"/>
@@ -55,9 +85,9 @@ internal static class TypeNameSynonyms
     /// is on, and raises real's Msg 195 when it names anything else.
     /// A name after any other type is real's Msg 102 near the type's name.
     /// </summary>
-    internal static int ReadSecondTypeArgument(ParserContext context, Name typeName) => context.Token switch
+    internal static int ReadSecondTypeArgument(ParserContext context, Name typeName, bool columnDefinition = false) => context.Token switch
     {
-        Numeric { Value: { IsNull: false } scale } => scale.AsInt32,
+        Numeric => ReadIntegerTypeArgument(context, columnDefinition),
         UnquotedString when !string.Equals(typeName.Value, "vector", StringComparison.OrdinalIgnoreCase) => throw SimulatedSqlException.SyntaxErrorNear(typeName),
         UnquotedString baseType when string.Equals(baseType.Value, "float32", StringComparison.OrdinalIgnoreCase) => Storage.VectorSqlType.Float32BaseType,
         UnquotedString baseType when string.Equals(baseType.Value, "float16", StringComparison.OrdinalIgnoreCase)
