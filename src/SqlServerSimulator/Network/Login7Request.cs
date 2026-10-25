@@ -99,14 +99,20 @@ internal sealed class Login7Request
         var pointerOffset = BinaryPrimitives.ReadUInt16LittleEndian(payload[56..]);
         if (pointerOffset + 4 > payload.Length)
             throw new InvalidDataException("LOGIN7 feature extension pointer extends past the end of the payload.");
-        var offset = (int)BinaryPrimitives.ReadUInt32LittleEndian(payload[pointerOffset..]);
-        while (offset < payload.Length && payload[offset] != 0xFF)
+        // The block's offset and each feature's length are DWORDs, read wide
+        // so one past int's range is refused rather than wrapping negative.
+        long offset = BinaryPrimitives.ReadUInt32LittleEndian(payload[pointerOffset..]);
+        if (offset > payload.Length)
+            throw new InvalidDataException("LOGIN7 feature extension block lies past the end of the payload.");
+        while (offset < payload.Length && payload[(int)offset] != 0xFF)
         {
             if (offset + 5 > payload.Length)
                 throw new InvalidDataException("LOGIN7 feature extension entry extends past the end of the payload.");
-            var featureId = payload[offset];
-            var length = (int)BinaryPrimitives.ReadUInt32LittleEndian(payload[(offset + 1)..]);
-            var data = payload.Slice(offset + 5, length);
+            var featureId = payload[(int)offset];
+            long length = BinaryPrimitives.ReadUInt32LittleEndian(payload[((int)offset + 1)..]);
+            if (offset + 5 + length > payload.Length)
+                throw new InvalidDataException("LOGIN7 feature extension data extends past the end of the payload.");
+            var data = payload.Slice((int)offset + 5, (int)length);
             switch (featureId)
             {
                 case 0x0A:
