@@ -188,6 +188,9 @@ partial class Selection
     /// </summary>
     internal bool AcceptDemand(bool[]? read)
     {
+        // A chain of CTEs, each reading the last, hands its demand down the
+        // whole chain.
+        Expression.EnsureParseStack();
         if (this.projectionDemand is { } demand)
             return !this.IsForClauseDocument && demand.Apply(read);
         if (this.takesReaderDemand)

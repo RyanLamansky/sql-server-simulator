@@ -333,6 +333,23 @@ public sealed class ExpressionNestingLimitTests
         AreEqual(3000, result);
     }
 
+    /// <summary>
+    /// A chain of CTEs, each reading the last, hands its projection demand
+    /// down the whole chain: real reads 850 of them (probed 2026-10-25 against
+    /// SQL Server 2025), and past the thread's stack the hand-down is Msg 8631
+    /// rather than a process abort.
+    /// </summary>
+    [TestMethod]
+    [Timeout(60000)]
+    public void CteChain_ReadsRealsLength_AndRaisesMsg8631PastTheStack()
+    {
+        var sql = "with c0 as (select 1 as x), "
+            + string.Join(", ", Enumerable.Range(1, 849).Select(i => $"c{i.ToInvariantString()} as (select x from c{(i - 1).ToInvariantString()})"))
+            + " select x from c849";
+        AreEqual(1, Extensions.ExecuteScalarOnStack(sql, DeepStack).Result);
+        AreEqual(8631, Extensions.ExecuteScalarOnStack(sql, SmallStack).Failure.ErrorNumber());
+    }
+
     // --- Nesting inside another language's text: XQuery, full-text conditions. ---
 
     private static string Nested(string open, string inner, string close, int depth) =>
