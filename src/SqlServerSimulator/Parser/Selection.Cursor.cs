@@ -442,7 +442,7 @@ internal sealed class CursorSourcePlan
     /// reading no column at all, and null for anything else — a computed
     /// expression, or a reference the plan's own sources don't resolve.
     /// </summary>
-    private static (HeapTable? Table, int Ordinal)? ResolveOrderColumn(
+    internal static (HeapTable? Table, int Ordinal)? ResolveOrderColumn(
         FromSource[] sources,
         CursorSlot[] slots,
         Expression[] projections,
@@ -984,8 +984,9 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// A DYNAMIC cursor's joined rows in its order, by identity alone — no
-    /// WHERE, no select list — as of a generation of each base table's heap
+    /// A DYNAMIC cursor's joined rows in its order, by their ORDER BY key and
+    /// identity alone — no WHERE, no select list — as of a generation of each
+    /// base table's heap
     /// (<see cref="DynamicOrder"/>). A fetch searches it for the last row
     /// read and reads rows at their addresses from there until one joins and
     /// passes the WHERE, which is the row the walk of every live row
@@ -1074,8 +1075,9 @@ internal sealed partial class Selection
     /// take any place, an emptied address included; a delete unless an outer
     /// join NULL-extends its table's side, where the rows it matched can be
     /// left unmatched; and an update unless it changes the clustered key a
-    /// clustered table's order follows or a column an ON predicate reads,
-    /// which can join its row to others. A table under a view or derived
+    /// clustered table's order follows, a column the ORDER BY reads, which an
+    /// index delivers, or a column an ON predicate reads, which can join its
+    /// row to others. A table under a view or derived
     /// table keeps the order through no write, its body's WHERE and select
     /// list deciding what its rows join.
     /// </summary>
@@ -1084,15 +1086,15 @@ internal sealed partial class Selection
         /// <summary>The rules of a plan no order serves: one whose rows can't be read at their addresses, or whose joins read more than their rows.</summary>
         public static readonly CursorOrderRules Unordered = new([], []);
 
-        /// <summary>Per identity table, the stored columns its ON predicates read, or null where any update may change what its rows join.</summary>
-        private readonly int[]?[] joinColumns;
+        /// <summary>Per identity table, the stored columns placing its rows in the order — those its ON predicates and the ORDER BY read — or null where any update may change what its rows join.</summary>
+        private readonly int[]?[] placingColumns;
 
         /// <summary>Per identity table, whether a delete keeps the order.</summary>
         private readonly bool[] deleteKeeps;
 
-        private CursorOrderRules(int[]?[] joinColumns, bool[] deleteKeeps)
+        private CursorOrderRules(int[]?[] placingColumns, bool[] deleteKeeps)
         {
-            this.joinColumns = joinColumns;
+            this.placingColumns = placingColumns;
             this.deleteKeeps = deleteKeeps;
         }
 
@@ -1105,7 +1107,7 @@ internal sealed partial class Selection
         /// </summary>
         public static CursorOrderRules For(CursorSourcePlan plan)
         {
-            if (plan.OrderBy.Count != 0 || plan.HasRowLimit || !ReadsAtAddresses(plan) || !DecidedByRows(plan, nested: false))
+            if (!plan.OrderBySuppliedByIndex || plan.HasRowLimit || !ReadsAtAddresses(plan) || !DecidedByRows(plan, nested: false))
                 return Unordered;
             var width = plan.Slots.Length;
             var extended = new bool[width];
@@ -1151,17 +1153,27 @@ internal sealed partial class Selection
             }
             if (walk.Unresolved)
                 return Unordered;
-            var joinColumns = new int[]?[plan.IdentityTables.Length];
+            var placing = new List<int>?[plan.IdentityTables.Length];
             var deleteKeeps = new bool[plan.IdentityTables.Length];
             for (var i = 0; i < width; i++)
             {
                 if (plan.Slots[i].Table is null)
                     continue;
                 var entry = plan.SlotIdentityOffset[i];
-                joinColumns[entry] = walk.Read[i] is { } read ? [.. read] : null;
+                placing[entry] = walk.Read[i];
                 deleteKeeps[entry] = !extended[i];
             }
-            return new(joinColumns, deleteKeeps);
+            foreach (var spec in plan.OrderBy)
+            {
+                if (CursorSourcePlan.ResolveOrderColumn(plan.Sources, plan.Slots, plan.Projections, plan.ColumnNames, spec) is not var (table, ordinal))
+                    return Unordered;
+                for (var entry = 0; table is not null && entry < placing.Length; entry++)
+                {
+                    if (ReferenceEquals(plan.IdentityTables[entry], table))
+                        placing[entry]?.Add(ordinal);
+                }
+            }
+            return new(Array.ConvertAll(placing, static columns => columns?.ToArray()), deleteKeeps);
         }
 
         /// <summary>
@@ -1198,7 +1210,7 @@ internal sealed partial class Selection
             {
                 case Heap.SeekJournalKind.Delete:
                     return this.deleteKeeps[entry];
-                case Heap.SeekJournalKind.Update when this.joinColumns[entry] is { } columns:
+                case Heap.SeekJournalKind.Update when this.placingColumns[entry] is { } columns:
                     var table = plan.IdentityTables[entry];
                     return (plan.IdentityKeys[entry] is not { ClusteredDescending: not null, Ordinals: { } key } || Unchanged(table, write, key))
                         && Unchanged(table, write, columns);
@@ -1225,8 +1237,9 @@ internal sealed partial class Selection
     /// <paramref name="cached"/> while no base table's heap has changed since
     /// it was read, or has changed only by writes keeping every row in its
     /// place (<see cref="CursorOrderRules"/>), else the joined rows read
-    /// again, for a DYNAMIC cursor with no ORDER BY, row limit or row-level
-    /// security filter whose rows can be read at their addresses; null for
+    /// again, for a DYNAMIC cursor with no row limit or row-level security
+    /// filter, an ORDER BY only an index delivers, and rows that can be read
+    /// at their addresses; null for
     /// any other, and while a <c>STATISTICS IO</c> report counts the walk's
     /// reads.
     /// </summary>
@@ -1263,8 +1276,8 @@ internal sealed partial class Selection
     /// identity table as a row's <see cref="CursorRow.Rids"/> holds them,
     /// confines each base table's scan to the row at its address, or to none
     /// where the address is null. <paramref name="identityOnly"/> leaves the
-    /// rows' WHERE unjudged and their select list unread, for the order a
-    /// DYNAMIC cursor keeps (<see cref="DynamicOrder"/>).
+    /// rows' WHERE unjudged and their select list read only for their ORDER BY
+    /// key, for the order a DYNAMIC cursor keeps (<see cref="DynamicOrder"/>).
     /// </summary>
     private static List<CursorRow> EnumerateCursorRows(
         CursorSourcePlan plan,
@@ -1335,7 +1348,10 @@ internal sealed partial class Selection
             }
             if (identityOnly)
             {
-                rows.Add(new CursorRow([], [], identityKeys, uniquifiers, rids));
+                var placement = orderBy.Count == 0
+                    ? []
+                    : ComputeOrderKeys(orderBy, ProjectCursorRow(plan, runtime, out _), plan.ColumnNames, projectionSources: null, distinct: false, batch, resolve);
+                rows.Add(new CursorRow([], placement, identityKeys, uniquifiers, rids));
                 continue;
             }
 

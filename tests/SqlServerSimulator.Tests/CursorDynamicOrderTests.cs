@@ -30,6 +30,29 @@ public sealed class CursorDynamicOrderTests
             """));
 
     /// <summary>
+    /// An ORDER BY an index delivers orders the rows the same way, and an
+    /// update of its column moves its row in the order.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select id, name, x from t order by name", "update t set name = 'a' where id = 4; update t set name = 'z' where id = 1; update t set x = 99 where id = 5; delete t where id = 6; insert t values (7, 'g', 70)", "1b10 2d20 3f30 7g70 5j99 1z10")]
+    [DataRow("select id, name, x from t order by id desc", "update t set x = x + 1 where id = 3; update t set id = 0 where id = 2; update t set id = 9 where id = 1; insert t values (-1, 'q', 1); delete t where id = 4", "6l60 5j50 3f31 0d20 -1q1")]
+    [DataRow("select id, name, x from t where x > 15 order by name desc", "update t set name = 'c' where id = 5; update t set x = 5 where id = 3; update t set x = 25 where id = 1", "6l60 5j50 4h40 2d20 5c50 1b25")]
+    public void OrderedWritesWhileOpen_AreFollowed(string query, string writes, string expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($"""
+            create table t (id int primary key, name varchar(10), x int); create index ix_name on t (name);
+            insert t values (1, 'b', 10), (2, 'd', 20), (3, 'f', 30), (4, 'h', 40), (5, 'j', 50), (6, 'l', 60);
+            declare @a int, @n varchar(10), @x int, @seq varchar(200);
+            declare c cursor local for {query};
+            open c;
+            fetch c into @a, @n, @x; set @seq = concat(@a, @n, @x);
+            fetch c into @a, @n, @x; set @seq += concat(' ', @a, @n, @x);
+            {writes};
+            while 1 = 1 begin fetch c into @a, @n, @x; if @@fetch_status <> 0 break; set @seq += concat(' ', @a, @n, @x); end;
+            close c; deallocate c;
+            select @seq
+            """));
+
+    /// <summary>
     /// A cursor over a join follows its joined rows the same way: a row
     /// joining another once its join column changes, an outer join's row
     /// losing its match, a derived table's WHERE passing a row it didn't.
@@ -38,6 +61,7 @@ public sealed class CursorDynamicOrderTests
     [DataRow("select p.id, o.id, o.amt from p join o on o.p_id = p.id", "delete o where id = 3; update o set p_id = 5 where id = 4; insert o values (7, 6, 70); update o set amt = 99 where id = 5", "1/1/10 2/2/20 5/4/40 5/5/99 6/6/60 6/7/70")]
     [DataRow("select p.id, o.id, o.amt from p left join o on o.p_id = p.id", "delete o where id = 4; update o set amt = amt + 1 where id = 5; delete p where id = 3", "1/1/10 2/2/20 4/-/- 5/5/51 6/6/60")]
     [DataRow("select q.id, q.oid, q.amt from (select p.id, o.id as oid, o.amt from p join o on o.p_id = p.id where o.amt > 15) q", "update o set amt = 5 where id = 4; update o set amt = 77 where id = 5", "2/2/20 3/3/30 5/5/77 6/6/60")]
+    [DataRow("select p.id, o.id, o.amt from p join o on o.p_id = p.id order by p.id desc", "update o set p_id = 2 where id = 5; update o set amt = 1 where id = 3; delete o where id = 4; insert o values (7, 3, 70)", "6/6/60 3/3/1 3/7/70 2/2/20 2/5/50 1/1/10")]
     public void JoinWritesWhileOpen_AreFollowed(string query, string writes, string expected) =>
         AreEqual(expected, new Simulation().ExecuteScalar($"""
             create table p (id int primary key, name varchar(10)); insert p select value, concat('p', value) from generate_series(1, 6);
@@ -100,13 +124,14 @@ public sealed class CursorDynamicOrderTests
     /// </summary>
     [TestMethod]
     [Timeout(20000)]
-    [DataRow("id int primary key")]
-    [DataRow("id int")]
-    public void PositionedUpdateLoop_RunsInLinearTime(string key) =>
+    [DataRow("id int primary key", "")]
+    [DataRow("id int", "")]
+    [DataRow("id int primary key", "order by id desc")]
+    public void PositionedUpdateLoop_RunsInLinearTime(string key, string orderBy) =>
         AreEqual(783862, new Simulation().ExecuteScalar($"""
             create table t ({key}, x int); insert t select value, value % 97 from generate_series(1, 16000);
             declare @x int;
-            declare c cursor local for select x from t;
+            declare c cursor local for select x from t {orderBy};
             open c; fetch c into @x;
             while @@fetch_status = 0 begin update t set x = x + 1 where current of c; fetch c into @x; end;
             close c; deallocate c;
