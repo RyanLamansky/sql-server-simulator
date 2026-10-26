@@ -161,6 +161,19 @@ internal sealed class UndeclaredParameterDeduction(HashSet<string> names)
         return [.. rest];
     }
 
+    /// <summary>
+    /// A slot for <paramref name="name"/>, a scalar the batch being described
+    /// uses without declaring, under the placeholder type: the parameter is
+    /// declared where the compile first meets it rather than found from the
+    /// compile's Msg 137 and the batch compiled again, so one compile finds
+    /// every parameter.
+    /// </summary>
+    public VariableSlot DeclareParameter(string name)
+    {
+        _ = names.Add(name);
+        return new VariableSlot(SqlType.Int32, declaredMaxLength: null, SqlValue.Null(SqlType.Int32), parameter: null);
+    }
+
     private string? ParameterName(Expression? source)
     {
         while (source is Parenthesized parenthesized)

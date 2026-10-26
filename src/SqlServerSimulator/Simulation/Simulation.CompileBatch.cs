@@ -319,6 +319,7 @@ partial class Simulation
         var compile = executing.ProcFrame is { } frame
             ? new BatchContext(command, variables, new ProcFrame(frame.ProcedureName, frame.IsDynamicSql))
             : new BatchContext(command, variables);
+        compile.DescribedParameters = executing.DescribedParameters;
         if (executing.TableVariables is { } tableVariables)
         {
             foreach (var (name, table) in tableVariables)

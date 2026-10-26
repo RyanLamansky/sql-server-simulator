@@ -86,8 +86,10 @@ partial class Simulation
             tables = EmptyTableValuedParameters(declarations, batch);
         }
 
-        // An undeclared name surfaces as the batch's Msg 137; each one found
-        // joins the placeholder declarations and the batch compiles again.
+        // The batch declares each undeclared name where it first meets one
+        // (BatchContext.DescribedParameters); a Msg 137 raised past that —
+        // from a site reading its variables some other way — names one more,
+        // which joins the placeholder declarations as the batch compiles again.
         var undeclared = new HashSet<string>(BatchContext.VariableNameComparer);
         UndeclaredParameterDeduction deduction;
         while (true)
@@ -107,7 +109,7 @@ partial class Simulation
             UndeclaredParameterDeduction.Current = deduction;
             try
             {
-                foreach (var _ in this.ExecuteDynamicBatch(batch, tsql, slots, tableVariables: tables))
+                foreach (var _ in this.ExecuteDynamicBatch(batch, tsql, slots, tableVariables: tables, describedParameters: deduction))
                 {
                 }
                 break;

@@ -963,7 +963,8 @@ partial class Simulation
         bool streams = false,
         string? declarations = null,
         ResultSetsSink? resultSetsSink = null,
-        bool apiServerCursor = false)
+        bool apiServerCursor = false,
+        UndeclaredParameterDeduction? describedParameters = null)
     {
         var nestingLevels = viaSystemProcedure ? 2 : 1;
         var connection = outerBatch.Connection;
@@ -982,7 +983,13 @@ partial class Simulation
             ? new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer)
             : new Dictionary<string, VariableSlot>(preDeclaredVariables, BatchContext.VariableNameComparer);
         var procFrame = new ProcFrame("<dynamic-sql>", isDynamicSql: true);
-        var innerBatch = new BatchContext(dynCommand, variables, procFrame, tableVariables) { ContinueOnError = ContinuesCalledBatch(outerBatch), ResultSetsSink = resultSetsSink, ApiServerCursor = apiServerCursor };
+        var innerBatch = new BatchContext(dynCommand, variables, procFrame, tableVariables)
+        {
+            ContinueOnError = ContinuesCalledBatch(outerBatch),
+            ResultSetsSink = resultSetsSink,
+            ApiServerCursor = apiServerCursor,
+            DescribedParameters = describedParameters,
+        };
 
         connection.NestingLevel += nestingLevels;
         var enteredDatabase = connection.CurrentDatabase;

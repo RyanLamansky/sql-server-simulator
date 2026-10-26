@@ -2452,14 +2452,26 @@ internal sealed partial class BatchContext
     /// reference captured during parse stays valid.
     /// </summary>
     /// <exception cref="SimulatedSqlException">Must declare the scalar variable \"@{value of <paramref name="name"/>}\".</exception>
-    public VariableSlot GetVariableSlot(string name) =>
-        Variables.TryGetValue(name, out var slot)
-        ? slot
-        : throw (this.HasTableVariable(name)
-            ? SimulatedSqlException.TableVariableUsedAsScalar(name)
-            : this.HasCursorVariable(name)
-                ? SimulatedSqlException.CursorVariableUsedAsScalar(name)
-                : SimulatedSqlException.MustDeclareScalarVariable(name));
+    public VariableSlot GetVariableSlot(string name)
+    {
+        if (Variables.TryGetValue(name, out var slot))
+            return slot;
+        if (this.HasTableVariable(name))
+            throw SimulatedSqlException.TableVariableUsedAsScalar(name);
+        if (this.HasCursorVariable(name))
+            throw SimulatedSqlException.CursorVariableUsedAsScalar(name);
+        if (this.DescribedParameters is not { } described)
+            throw SimulatedSqlException.MustDeclareScalarVariable(name);
+        return Variables[name] = described.DeclareParameter(name);
+    }
+
+    /// <summary>
+    /// The deduction an <c>sp_describe_undeclared_parameters</c> analysis
+    /// feeds while this batch is the one it describes — its own text, not a
+    /// module or dynamic batch it reaches — which declares each scalar the
+    /// text uses undeclared where it is first met (<see cref="GetVariableSlot"/>).
+    /// </summary>
+    public UndeclaredParameterDeduction? DescribedParameters;
 
     /// <summary>
     /// While a cursor's query parses, the copies of the variables it reads,

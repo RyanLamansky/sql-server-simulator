@@ -80,6 +80,7 @@ public sealed class ExceptionDispatchTests
     [DataRow("update c set name = p.name output deleted.name, inserted.name from c join p on p.id = c.pid")]
     [DataRow("select p.id, c.name from p left join c on c.pid = p.id where p.name like N'a%' order by p.id")]
     [DataRow("delete c output deleted.id where c.id = 1")]
+    [DataRow("exec sp_describe_undeclared_parameters N'update c set name = @P1, pid = @P2 where id = @P3 and name <> @P4'")]
     public void A_Statement_That_Succeeds_Dispatches_Nothing(string statement)
         => AreEqual(0, Dispatches(Seeded(), statement));
 
