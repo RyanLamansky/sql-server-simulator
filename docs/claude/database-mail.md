@@ -36,7 +36,7 @@ Turning it on finds the queue started.
 
 The checks run in real's order, each answering its own return code: the gate, the stopped queue (Msg 14641), the profile — named (`sysmail_verify_profile_sp`, answering 4), else the caller's default private profile, else the default public one (Msg 14636) — and for a caller outside `sysadmin` its access, public or granted to its msdb user (Msg 14607 at line 141); then the five switches that may not be NULL (Msg 14618), the body format, importance and sensitivity (Msg 14626, 14622, 14623, each naming the value upper-cased), something to send (Msg 14624 over body, query, attachments and subject, an empty string counting as none) and someone to send it to (Msg 14624 over the three recipient lists).
 
-- **Attachments** split on `;` and are read through `Simulation.OpenBulkFile`, the server disk the bulk loads read.
+- **Attachments** split on `;` and are read from the server's disk, as the bulk loads read it (`Simulation.OpenServerFile`).
   An extension `ProhibitedExtensions` lists is Msg 14630 from `sp_GetAttachmentData`, naming the whole path; a caller outside `sysadmin` (a SQL login, which real can't impersonate), a missing file and one larger than `MaxFileSize` are Msg 22051, an extended procedure's error sent past any `TRY`, answering 1.
   The caller is refused before any file is opened, whether or not one exists — a rule of the simulator's own.
   Each attachment is stored whole in `sysmail_attachments` under the path as written.

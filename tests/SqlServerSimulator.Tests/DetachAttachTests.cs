@@ -268,7 +268,7 @@ public sealed class DetachAttachTests
         var files = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
         var simulation = new Simulation
         {
-            OpenBackupFile = (path, access) => access == FileAccess.Write
+            OpenServerFile = (path, access) => access == FileAccess.Write
                 ? new WriteBack(files, path)
                 : files.TryGetValue(path, out var bytes) ? new MemoryStream(bytes) : null,
         };

@@ -291,7 +291,7 @@ public sealed class BulkFormatFileTests
     public void AProceduresRefusal_FailsItsCreate_OrEndsItsCallersBatch()
     {
         var files = new Dictionary<string, byte[]>(StringComparer.Ordinal) { ["/d.txt"] = System.Text.Encoding.UTF8.GetBytes(Data) };
-        var sim = new Simulation { OpenBulkFile = path => files.TryGetValue(path, out var bytes) ? new MemoryStream(bytes) : null };
+        var sim = new Simulation { OpenServerFile = (path, access) => access == FileAccess.Read && files.TryGetValue(path, out var bytes) ? new MemoryStream(bytes) : null };
         _ = sim.ExecuteNonQuery("create table t (id int, name varchar(20)); create table log (step varchar(10))");
         sim.ExecuteBatches("create procedure p as begin insert log values ('in p'); bulk insert t from '/d.txt' with (formatfile = '/f.fmt'); end");
         files["/f.fmt"] = System.Text.Encoding.UTF8.GetBytes("14.0 1 1 SQLFOO 0 10 \"\\n\" 1 id \"\"");

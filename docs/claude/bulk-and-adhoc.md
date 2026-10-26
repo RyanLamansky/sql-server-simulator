@@ -1,7 +1,7 @@
 # Bulk loads and ad hoc data sources
 
 `BULK INSERT`, `OPENROWSET(BULK …)`, `OPENROWSET` over a provider and `OPENDATASOURCE`.
-Everything below was probed 2026-09-29 against SQL Server 2025 on Linux, through the edge-probe harness (`.vs/edge-probe`, `--bulk <dir>` wires `OpenBulkFile` to the same probe directory the server reads, `--adhoc` registers the simulation as `localhost`).
+Everything below was probed 2026-09-29 against SQL Server 2025 on Linux, through the edge-probe harness (`.vs/edge-probe`, `--bulk <dir>` wires `OpenServerFile` to the same probe directory the server reads, `--adhoc` registers the simulation as `localhost`).
 The simulator models that Linux server whatever host it runs on, which three rules make visible: `CODEPAGE` is refused, a login without `CONTROL SERVER` reaches no file, and `'\n'` means a line feed alone.
 
 Code: [`Simulation.BulkInsert.cs`](../../src/SqlServerSimulator/Simulation/Simulation.BulkInsert.cs) (the statement), [`Selection.OpenRowset.cs`](../../src/SqlServerSimulator/Parser/Selection.OpenRowset.cs) (both `OPENROWSET` forms and `OPENDATASOURCE`), [`BulkOptions.cs`](../../src/SqlServerSimulator/Parser/BulkOptions.cs), and the readers under [`Storage/Bulk/`](../../src/SqlServerSimulator/Storage/Bulk/).
@@ -10,14 +10,15 @@ Rows land through `BulkInsertRows`, the engine `SqlBulkCopy`'s `INSERT BULK` use
 ## File access
 
 **Settled — don't re-pitch:** the simulator never touches the host's file system on its own.
-A consumer opts in through one public `init` property, `Simulation.OpenBulkFile` (`Func<string, Stream?>`), which receives the path as the statement spells it and returns a readable stream or null for "no such file"; with no delegate every path is a file that doesn't exist.
+A consumer opts in through one public `init` property, `Simulation.OpenServerFile` (`Func<string, FileAccess, Stream?>`), the delegate backups and detached databases go through too, which returns a stream or null for "no such file"; with no delegate the disk is the simulation's own, in memory, where a bulk load finds only the files a backup or a detach wrote.
+The delegate receives the path as the server's file layer reads it — rooted, `C:\` as the root, `.` and `..` settled — so a relative path names no file and never reaches it, as a relative path reached none on real (probed 2026-10-26 against SQL Server 2025).
 The reason is containment: a simulation exposed over the TDS endpoint would otherwise hand any client the host's files, and tests should never depend on real disk paths — they serve files from memory.
-The delegate's files are only ever read.
+A bulk load only ever reads its files.
 
 - A missing file is real's own **Msg 4860**, at state 1 for `BULK INSERT`'s data file, 3 for a format file, 4 for an `OPENROWSET(BULK …)` data file.
   It ends the batch, a `TRY` in the same scope doesn't catch it, and raised in a procedure or dynamic batch it ends only that batch (`IsBulkRefusal`).
 - A login without `CONTROL SERVER` gets **Msg 4860 at state 75** for every file, `bulkadmin` or not: the Linux server lets no other login read one.
-- An `ERRORFILE` is a file the server can't create, since the simulator writes nothing: **Msg 4861** for it — code 80 (`The file exists.`) when the delegate answers for the path, code 5 (`Access is denied.`) otherwise — then again for the `.Error.Txt` file beside it, before any row loads.
+- An `ERRORFILE` is a file the server can't create, since the simulator writes nothing: **Msg 4861** for it — code 80 (`The file exists.`) when a file is at the path, code 5 (`Access is denied.`) otherwise — then again for the `.Error.Txt` file beside it, before any row loads.
   Real opens both up front even for a clean load, so the refusal is what a server with an unwritable error-file location reports, and it ends the batch uncaught by a `TRY`.
 - `DATA_SOURCE` names no external data source (**Msg 12703**, state 2); `ERRORFILE_DATA_SOURCE` and `FORMATFILE_DATA_SOURCE` are accepted and ignored.
 

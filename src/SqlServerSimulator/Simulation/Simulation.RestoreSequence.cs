@@ -629,8 +629,8 @@ partial class Simulation
     /// <summary>Deletes a standby undo file the in-memory disk holds; one the host's delegate opened stays, as it has no delete.</summary>
     private void DeleteStandbyFile(string path)
     {
-        if (this.OpenBackupFile is null)
-            _ = this.BackupDevices.TryRemove(BackupDeviceKey(path), out _);
+        if (this.OpenServerFile is null)
+            _ = this.DiskFiles.TryRemove(BackupDeviceKey(path), out _);
     }
 
     /// <summary>

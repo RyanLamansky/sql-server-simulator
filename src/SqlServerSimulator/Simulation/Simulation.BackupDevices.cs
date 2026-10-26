@@ -151,7 +151,7 @@ partial class Simulation
     /// <c>diskadmin</c> Msg 15247 and a device that doesn't exist Msg 15012.
     /// <c>delfile</c> also deletes the device's content, with real's Msg 2503,
     /// when the simulation holds it in memory; a file the host's
-    /// <see cref="OpenBackupFile"/> opens is left in place, since the host
+    /// <see cref="OpenServerFile"/> opens is left in place, since the host
     /// supplies no way to delete one.
     /// </summary>
     private IEnumerable<SimulatedStatementOutcome> InvokeSpDropDevice(BatchContext batch, string calledAs)
@@ -174,7 +174,7 @@ partial class Simulation
         var name = values[0].IsNull ? "(null)" : values[0].AsString;
         if (values[0].IsNull || !this.LogicalBackupDevices.TryRemove(name.TrimEnd(' '), out var device))
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.BackupDeviceDoesNotExist(name), 37);
-        if (deleteFile && device.Type == 2 && this.OpenBackupFile is null && this.BackupDevices.TryRemove(BackupDeviceKey(device.PhysicalName), out _))
+        if (deleteFile && device.Type == 2 && this.OpenServerFile is null && this.DiskFiles.TryRemove(BackupDeviceKey(device.PhysicalName), out _))
             QueueProcedureMessage(batch, calledAs, 2503, $"Successfully deleted the physical file '{device.PhysicalName}'.", 43);
         // Its statements, the DBCC among them, then the confirmation it
         // raises and an assignment (captured 2026-10-17 against SQL Server
@@ -204,7 +204,7 @@ partial class Simulation
 
     /// <summary>
     /// One device a <c>BACKUP</c> or <c>RESTORE</c> reads or writes: the path
-    /// handed to <see cref="OpenBackupFile"/>, the name its messages give
+    /// it opens, as written, the name its messages give
     /// it — the path itself for <c>DISK = path</c>, <c>logical(physical)</c>
     /// for a logical device — and the name the error log gives it, a logical
     /// device's own name alone.

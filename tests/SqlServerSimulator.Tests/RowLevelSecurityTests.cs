@@ -239,7 +239,7 @@ public sealed class RowLevelSecurityTests
     [TestMethod]
     public void Block_BulkInsertRefusesTheRow()
     {
-        var simulation = new Simulation { OpenBulkFile = path => path == "/data/rows.csv" ? new MemoryStream("10,u2,1,n\n"u8.ToArray()) : null };
+        var simulation = new Simulation { OpenServerFile = (path, _) => path == "/data/rows.csv" ? new MemoryStream("10,u2,1,n\n"u8.ToArray()) : null };
         simulation.ExecuteBatches(Table, Function, "create security policy dbo.sp add block predicate dbo.fp(owner) on dbo.t after insert;");
         simulation.AssertSqlError("bulk insert dbo.t from '/data/rows.csv' with (fieldterminator = ',', rowterminator = '\n')", 33504, BlockMessage);
         AreEqual("4", Ids(simulation, "select count(*) from dbo.t"));

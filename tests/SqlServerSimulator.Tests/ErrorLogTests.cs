@@ -697,7 +697,7 @@ public sealed class ErrorLogTests
     [TestMethod]
     public void BackupAndRestore_Failures_LogAsRealDoes()
     {
-        var simulation = new Simulation { OpenBackupFile = static (path, access) => access == FileAccess.Write && path.StartsWith("/nowhere/", StringComparison.Ordinal) ? null : new MemoryStream() };
+        var simulation = new Simulation { OpenServerFile = static (path, access) => access == FileAccess.Write && path.StartsWith("/nowhere/", StringComparison.Ordinal) ? null : new MemoryStream() };
         _ = simulation.ExecuteNonQuery("create database fdb; alter database fdb set recovery simple");
         using var connection = simulation.CreateOpenConnection();
         var spid = connection.CreateCommand("select @@spid").ExecuteScalar();

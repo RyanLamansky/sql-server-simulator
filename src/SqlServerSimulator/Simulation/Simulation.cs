@@ -654,34 +654,6 @@ public sealed partial class Simulation
     public bool EnableClr { get; init; }
 
     /// <summary>
-    /// Opens the data and format files that <c>BULK INSERT</c> and
-    /// <c>OPENROWSET(BULK …)</c> name, and the attachments
-    /// <c>sp_send_dbmail</c> names, standing in for the server's file
-    /// system. Defaults to <see langword="null"/>, under which every path
-    /// behaves as a file that doesn't exist; set it in an object initializer
-    /// (<c>new Simulation { OpenBulkFile = path =&gt; … }</c>).
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// The delegate receives the path exactly as the statement spells it and
-    /// returns a readable <see cref="Stream"/>, which the simulator reads to
-    /// its end and disposes, or <see langword="null"/> for a file that doesn't
-    /// exist. Tests can serve files from memory
-    /// (<c>path =&gt; new MemoryStream(bytes)</c>); a host wanting real disk
-    /// access supplies something like
-    /// <c>path =&gt; File.Exists(path) ? File.OpenRead(path) : null</c>.
-    /// </para>
-    /// <para>
-    /// <strong>Anything the delegate returns becomes readable to every
-    /// session</strong>, as real SQL Server's file access is. Keep the
-    /// mapping as narrow as the content allows, above all when a
-    /// <c>Simulation</c> is exposed over the network endpoint. Files are only
-    /// read: an <c>ERRORFILE</c> is never written.
-    /// </para>
-    /// </remarks>
-    public Func<string, Stream?>? OpenBulkFile { get; init; }
-
-    /// <summary>
     /// Server-wide default collation name. Used as the seed for every
     /// database created on this simulation — both the lazy
     /// <c>"simulated"</c> seed picked up on first

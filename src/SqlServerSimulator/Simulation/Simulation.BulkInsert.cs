@@ -7,7 +7,7 @@ using SqlServerSimulator.Storage.Bulk;
 
 namespace SqlServerSimulator;
 
-// BULK INSERT: a data file read through OpenBulkFile into a table or an
+// BULK INSERT: a data file read through OpenServerFile into a table or an
 // updatable view with bulk-load semantics — the engine SqlBulkCopy's INSERT
 // BULK uses (Simulation.BulkLoad.cs), fed by the character, native and
 // format-file readers under Storage/Bulk.
@@ -23,30 +23,12 @@ partial class Simulation
     internal bool AdHocDistributedQueriesEnabled => this.ConfigurationInUse(AdHocDistributedQueriesConfigurationId) != 0;
 
     /// <summary>
-    /// The file <paramref name="path"/> names, read whole through
-    /// <see cref="OpenBulkFile"/>; null when there is no such file — always,
-    /// when the host supplied no delegate — or the delegate couldn't open it.
+    /// The file <paramref name="path"/> names, read whole from the server's
+    /// disk; null when there is no such file or it can't be read — always for
+    /// a relative path, which names no file.
     /// </summary>
-    internal byte[]? ReadBulkFile(string path)
-    {
-        if (this.OpenBulkFile is not { } open)
-            return null;
-        // The delegate and the stream it opens are the host's code.
-        using var culture = CultureScope.Host();
-        try
-        {
-            using var stream = open(path);
-            if (stream is null)
-                return null;
-            using var buffer = new MemoryStream();
-            stream.CopyTo(buffer);
-            return buffer.ToArray();
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return null;
-        }
-    }
+    internal byte[]? ReadBulkFile(string path) =>
+        CanonicalServerPath(path) is { } canonical ? this.ReadServerFile(canonical, out _) : null;
 
     /// <summary>
     /// Reads a file a bulk load names, refusing first the session whose login
@@ -128,7 +110,7 @@ partial class Simulation
             if (view.PartitionedBase is { } partitioned)
             {
                 if (!batch.Connection.Simulation.SessionHoldsServerPermission(batch.Connection, Permission.ControlServer)
-                    || batch.Connection.Simulation.ReadBulkFile(path) is null)
+                    || !batch.Connection.Simulation.ServerFileExists(path))
                 {
                     if (batch.IsSkipping)
                         yield break;
@@ -205,14 +187,14 @@ partial class Simulation
         }
         if (options.ErrorFile is { } errorFile)
         {
-            // The simulator writes no file, so an error file is one the server
+            // A bulk load writes no file, so an error file is one the server
             // can't create — refused, with the .Error.Txt file beside it, before
             // a row loads (probed 2026-09-29: real opens both up front).
-            var first = SimulatedSqlException.BulkErrorFileNotOpened(errorFile, simulation.ReadBulkFile(errorFile) is not null);
+            var first = SimulatedSqlException.BulkErrorFileNotOpened(errorFile, simulation.ServerFileExists(errorFile));
             first.ResolveDiagnostics(batch.CurrentStatement.StartLine, batch.LineOffset, batch.ErrorProcedureName);
             yield return new SimulatedErrorOutcome(first) { DoneKind = batch.CurrentStatement.DoneKind };
             var besideIt = errorFile + ".Error.Txt";
-            throw SimulatedSqlException.BulkErrorFileNotOpened(besideIt, simulation.ReadBulkFile(besideIt) is not null);
+            throw SimulatedSqlException.BulkErrorFileNotOpened(besideIt, simulation.ServerFileExists(besideIt));
         }
         var firstRow = Math.Max(options.FirstRow ?? 1, 1);
         var lastRow = options.LastRow is > 0 and var last ? last : long.MaxValue;

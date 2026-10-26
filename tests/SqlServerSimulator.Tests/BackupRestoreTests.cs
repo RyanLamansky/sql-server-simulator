@@ -249,8 +249,8 @@ public sealed class BackupRestoreTests
     [TestMethod]
     public void Device_TooShortForAMediaHeader_IsAnEmptyVolume()
     {
-        var files = new Dictionary<string, byte[]> { ["short.bak"] = new byte[100], ["junk.bak"] = [.. Enumerable.Repeat((byte)0x41, 5000)] };
-        var simulation = new Simulation { OpenBackupFile = (path, _) => files.TryGetValue(path, out var bytes) ? new MemoryStream(bytes) : null };
+        var files = new Dictionary<string, byte[]> { ["/var/opt/mssql/data/short.bak"] = new byte[100], ["/var/opt/mssql/data/junk.bak"] = [.. Enumerable.Repeat((byte)0x41, 5000)] };
+        var simulation = new Simulation { OpenServerFile = (path, _) => files.TryGetValue(path, out var bytes) ? new MemoryStream(bytes) : null };
         _ = simulation.ExecuteNonQuery("create database d");
         AreEqual("The volume on device '/var/opt/mssql/data/short.bak' is empty.", simulation.AssertSqlError("restore database d from disk = N'short.bak' with replace", 3254).Errors[0].Message);
         AreEqual("The media family on device '/var/opt/mssql/data/junk.bak' is incorrectly formed. SQL Server cannot process this media family.",
@@ -258,44 +258,47 @@ public sealed class BackupRestoreTests
     }
 
     [TestMethod]
-    public void OpenBackupFile_ReceivesThePathAsSpelled_ForWritingAndReading()
+    public void OpenServerFile_ReceivesTheCanonicalPath_ForWritingAndReading()
     {
-        var written = new Dictionary<string, MemoryStream>();
+        var written = new Dictionary<string, MemoryStream>(StringComparer.OrdinalIgnoreCase);
         var simulation = new Simulation
         {
-            OpenBackupFile = (path, access) => access == FileAccess.Write
+            OpenServerFile = (path, access) => access == FileAccess.Write
                 ? written[path] = new MemoryStream()
                 : written.TryGetValue(path, out var stream) ? new MemoryStream(stream.ToArray()) : null,
         };
         simulation.ExecuteBatches("create database d", "use d; create table t (a int); insert t values (7)");
-        _ = simulation.ExecuteNonQuery(@"backup database d to disk = N'C:\temp\d.bak'");
-        IsGreaterThanOrEqualTo(4096, written[@"C:\temp\d.bak"].ToArray().Length);
-        _ = simulation.ExecuteNonQuery(@"use d; delete t; use master; restore database d from disk = N'C:\temp\d.bak' with replace");
+        _ = simulation.ExecuteNonQuery(@"backup database d to disk = N'C:\temp\..\temp\.\d.bak'; backup database d to disk = N'r.bak'");
+        AreEqual("/temp/d.bak|/var/opt/mssql/data/r.bak", string.Join('|', written.Keys));
+        IsGreaterThanOrEqualTo(4096, written["/temp/d.bak"].ToArray().Length);
+        _ = simulation.ExecuteNonQuery(@"use d; delete t; use master; restore database d from disk = N'C:\TEMP\d.bak' with replace");
         AreEqual(7, simulation.ExecuteScalar("select a from d.dbo.t"));
     }
 
     [TestMethod]
-    public void OpenBackupFile_GivingNoStreamToWrite_IsAMissingPath()
+    public void OpenServerFile_GivingNoStreamToWrite_IsAMissingPath()
     {
-        var simulation = new Simulation { OpenBackupFile = (_, _) => null };
+        var simulation = new Simulation { OpenServerFile = (_, _) => null };
         _ = simulation.ExecuteNonQuery("create database d");
         AreEqual(@"Cannot open backup device 'C:\nodir\d.bak'. Operating system error 3(The system cannot find the path specified.).",
             simulation.AssertSqlError(@"backup database d to disk = N'C:\nodir\d.bak'", 3201).Errors[0].Message);
     }
 
     /// <summary>
-    /// The host's file callback refusing with an IO exception reads as the
-    /// operating-system error real reports for the same failure, writing or
-    /// reading.
+    /// The host's file callback throwing reads as the operating-system error
+    /// real reports for the same failure, writing or reading, and anything
+    /// but a missing file or directory as access denied, its message kept
+    /// from the client.
     /// </summary>
     [TestMethod]
     [DataRow(typeof(FileNotFoundException), "2(The system cannot find the file specified.)")]
     [DataRow(typeof(DirectoryNotFoundException), "3(The system cannot find the path specified.)")]
     [DataRow(typeof(UnauthorizedAccessException), "5(Access is denied.)")]
     [DataRow(typeof(IOException), "5(Access is denied.)")]
-    public void OpenBackupFile_Throwing_IsTheOperatingSystemError(Type exception, string osError)
+    [DataRow(typeof(InvalidOperationException), "5(Access is denied.)")]
+    public void OpenServerFile_Throwing_IsTheOperatingSystemError(Type exception, string osError)
     {
-        var simulation = new Simulation { OpenBackupFile = (_, _) => throw (Exception)Activator.CreateInstance(exception)! };
+        var simulation = new Simulation { OpenServerFile = (_, _) => throw (Exception)Activator.CreateInstance(exception)! };
         _ = simulation.ExecuteNonQuery("create database d");
         AreEqual($"Cannot open backup device '/b/d.bak'. Operating system error {osError}.",
             simulation.AssertSqlError("backup database d to disk = N'/b/d.bak'", 3201).Errors[0].Message);
@@ -426,7 +429,7 @@ public sealed class BackupRestoreTests
     public void ReadingADevice_ByALoginWithoutCreateDatabase_IsMsg262_WithTheDeviceUnopened(string sql, string verb)
     {
         var opened = 0;
-        var simulation = new Simulation { OpenBackupFile = (_, _) => { opened++; return null; } };
+        var simulation = new Simulation { OpenServerFile = (_, _) => { opened++; return null; } };
         _ = simulation.ExecuteNonQuery("create login l with password = 'Xx!12345678'; create user l for login l");
         var refusal = simulation.AssertSqlError($"execute as login = 'l'; {sql}", 262);
         AreEqual(("CREATE DATABASE permission denied in database 'master'.", $"{verb} is terminating abnormally."), (refusal.Errors[0].Message, refusal.Errors[1].Message));

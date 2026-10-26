@@ -137,7 +137,7 @@ internal readonly struct CultureScope : IDisposable
 
     /// <summary>
     /// Switches back to the consumer's culture around an event or callback the
-    /// engine raises — <c>InfoMessage</c>, the <c>OpenBulkFile</c> delegate —
+    /// engine raises — <c>InfoMessage</c>, the <c>OpenServerFile</c> delegate —
     /// so its handler runs as it would have outside the engine. A no-op where
     /// no <see cref="Engine"/> scope on this thread recorded one, as on the TDS
     /// endpoint, whose engine work no consumer call is waiting on.

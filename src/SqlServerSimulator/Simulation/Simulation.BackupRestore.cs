@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using SqlServerSimulator.Parser;
@@ -14,37 +13,6 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
-    /// Opens the files that <c>BACKUP … TO DISK</c> writes and
-    /// <c>RESTORE … FROM DISK</c> reads, standing in for the server's file
-    /// system. Defaults to <see langword="null"/>, under which backups live in
-    /// memory for the life of the <see cref="Simulation"/>, keyed by the path
-    /// as the statement spells it; set it in an object initializer to reach
-    /// real files.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// The delegate receives the path exactly as the statement spells it.
-    /// Given <see cref="FileAccess.Read"/>, it returns a readable
-    /// <see cref="Stream"/>, which the simulator reads to its end and
-    /// disposes, or <see langword="null"/> for a file that doesn't exist.
-    /// Given <see cref="FileAccess.Write"/>, it returns a writable stream the
-    /// simulator writes the device's whole new content to and disposes, or
-    /// <see langword="null"/> for a path that can't be written. A host wanting
-    /// real disk access supplies something like
-    /// <c>(path, access) =&gt; access == FileAccess.Read ? (File.Exists(path) ? File.OpenRead(path) : null) : File.Create(path)</c>.
-    /// </para>
-    /// <para>
-    /// The file holds the simulator's own backup format, not Microsoft's,
-    /// and only the simulator build that wrote it restores it.
-    /// <strong>Anything the delegate reaches is readable and writable by every
-    /// session allowed to back up or restore</strong>, as real SQL Server's
-    /// file access is; keep the mapping narrow, above all when a
-    /// <see cref="Simulation"/> is exposed over the network endpoint.
-    /// </para>
-    /// </remarks>
-    public Func<string, FileAccess, Stream?>? OpenBackupFile { get; init; }
-
-    /// <summary>
     /// How long a restore waits for the sessions using its database to leave
     /// before Msg 3101: about twenty seconds (probed 2026-10-11 against SQL
     /// Server 2022, where a session leaving during the wait lets the restore
@@ -52,74 +20,20 @@ partial class Simulation
     /// </summary>
     internal int RestoreExclusiveAccessWaitMillis = 20_000;
 
-    /// <summary>
-    /// The backup devices written while <see cref="OpenBackupFile"/> is unset,
-    /// keyed by the canonical path real reaches (<see cref="BackupDeviceKey"/>):
-    /// a relative path under the default backup directory, case aside.
-    /// </summary>
-    internal readonly ConcurrentDictionary<string, byte[]> BackupDevices = new(concurrencyLevel: 1, capacity: 0, StringComparer.OrdinalIgnoreCase);
-
     /// <summary>A device's bytes, or null with the operating-system error real reports for it.</summary>
     private byte[]? ReadBackupDevice(string path, out int osError)
     {
+        var key = BackupDeviceKey(path);
+        var bytes = this.ReadServerFile(key, out osError);
         // A directory in the device's place can't be opened as one (probed
         // 2026-10-16 against SQL Server 2025: operating system error 5).
-        var key = BackupDeviceKey(path);
-        osError = this.IsServerDirectory(key) ? 5 : 2;
-        if (this.OpenBackupFile is not { } open)
-            return this.BackupDevices.GetValueOrDefault(key);
-        try
-        {
-            using var stream = open(path, FileAccess.Read);
-            if (stream is null)
-                return null;
-            using var buffer = new MemoryStream();
-            stream.CopyTo(buffer);
-            return buffer.ToArray();
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            osError = OperatingSystemError(ex);
-            return null;
-        }
+        if (bytes is null && osError == 2 && this.IsServerDirectory(key))
+            osError = 5;
+        return bytes;
     }
 
-    /// <summary>
-    /// Replaces a device's content, creating the directories above it as
-    /// real's Linux server does; 0, or the operating-system error real reports.
-    /// </summary>
-    private int WriteBackupDevice(string path, byte[] content)
-    {
-        var key = BackupDeviceKey(path);
-        if (this.OpenBackupFile is not { } open)
-        {
-            this.BackupDevices[key] = content;
-            if (ServerParentDirectory(key) is { } parent)
-                this.CreateServerDirectory(parent);
-            return 0;
-        }
-        try
-        {
-            using var stream = open(path, FileAccess.Write);
-            if (stream is null)
-                return 3;
-            stream.Write(content);
-            if (ServerParentDirectory(key) is { } parent)
-                this.CreateServerDirectory(parent);
-            return 0;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return OperatingSystemError(ex);
-        }
-    }
-
-    private static int OperatingSystemError(Exception ex) => ex switch
-    {
-        FileNotFoundException => 2,
-        DirectoryNotFoundException => 3,
-        _ => 5,
-    };
+    /// <summary>Replaces a device's content, creating the directories above it; 0, or the operating-system error real reports.</summary>
+    private int WriteBackupDevice(string path, byte[] content) => this.WriteServerFile(BackupDeviceKey(path), content);
 
     /// <summary>What a <c>BACKUP</c> or <c>RESTORE</c> statement's <c>WITH</c> list said.</summary>
     private sealed class BackupOptions

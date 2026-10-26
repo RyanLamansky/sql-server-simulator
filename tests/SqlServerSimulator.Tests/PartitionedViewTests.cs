@@ -400,7 +400,7 @@ public sealed class PartitionedViewTests
     public void BulkInsert_ByALoginThatMayReachNoFile_OpensNone()
     {
         var opened = 0;
-        var simulation = new Simulation { OpenBulkFile = _ => { opened++; return new MemoryStream("1,1\n"u8.ToArray()); } };
+        var simulation = new Simulation { OpenServerFile = (_, _) => { opened++; return new MemoryStream("1,1\n"u8.ToArray()); } };
         simulation.ExecuteBatches(
             "create table m1 (k int not null check (k < 10), v int, primary key (k)); create table m2 (k int not null check (k >= 10), v int, primary key (k)); create login l with password = 'Xx!12345678'; create user l for login l",
             "create view pv as select k, v from m1 union all select k, v from m2");

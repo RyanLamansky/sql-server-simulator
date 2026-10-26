@@ -8,7 +8,7 @@ namespace SqlServerSimulator;
 // sp_detach_db, CREATE DATABASE … FOR ATTACH / FOR ATTACH_REBUILD_LOG,
 // sp_attach_db and sp_attach_single_file_db. A detached database is a
 // DatabaseImage written into its primary data file on the server's disk (the
-// in-memory store or Simulation.OpenBackupFile), each other file holding its
+// in-memory disk or Simulation.OpenServerFile), each other file holding its
 // identity alone. Behavior probed 2026-10-16 against SQL Server 2025 by
 // calling each and reading the messages, return codes, catalog and files;
 // see docs/claude/backup-restore.md.
@@ -156,7 +156,7 @@ partial class Simulation
                 Payload = file.FileId == 1 ? payload : null,
             };
             if (this.WriteBackupDevice(file.PhysicalName, content.ToBytes()) is not 0)
-                throw new NotSupportedException($"The simulator couldn't write the detached database's file '{file.PhysicalName}' through OpenBackupFile.");
+                throw new NotSupportedException($"The simulator couldn't write the detached database's file '{file.PhysicalName}' through OpenServerFile.");
         }
     }
 
@@ -362,10 +362,10 @@ partial class Simulation
             log.UnlimitedReadsMinusOne = true;
 
         // The files are the database's own again.
-        if (this.OpenBackupFile is null)
+        if (this.OpenServerFile is null)
         {
             foreach (var (_, path) in found)
-                _ = this.BackupDevices.TryRemove(BackupDeviceKey(path), out _);
+                _ = this.DiskFiles.TryRemove(BackupDeviceKey(path), out _);
         }
         database.Trustworthy = false;
         database.CrossDatabaseChaining = false;

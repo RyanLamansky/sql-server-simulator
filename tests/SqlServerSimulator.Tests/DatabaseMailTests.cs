@@ -19,7 +19,7 @@ public sealed class DatabaseMailTests
     /// <summary>A simulation with Database Mail enabled and a public default profile <c>p</c> sending through account <c>a</c>.</summary>
     private static Simulation Mail(Func<string, Stream?>? files = null)
     {
-        var simulation = new Simulation { OpenBulkFile = files };
+        var simulation = new Simulation { OpenServerFile = files is null ? null : (path, access) => access == FileAccess.Read ? files(path) : null };
         _ = simulation.ExecuteNonQuery(EnableXps + """
             exec msdb.dbo.sysmail_add_account_sp @account_name = N'a', @email_address = N'a@example.invalid', @mailserver_name = N'smtp.example.invalid';
             exec msdb.dbo.sysmail_add_profile_sp @profile_name = N'p';

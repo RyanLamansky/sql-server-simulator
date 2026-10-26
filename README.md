@@ -105,14 +105,24 @@ A `Stream` overload covers bacpacs that don't come from a file path.
 Restoring a database that still has the backup's definitions only replaces its data, which takes a fraction of a second even for a database of a few hundred tables.
 
 The backup file is the simulator's own format, readable only by the simulator build that wrote it — not a real `.bak`.
-By default backups live in memory inside the simulation; to read and write real files, supply `OpenBackupFile`:
+By default the simulated server's disk lives in memory inside the simulation.
+To read and write real files, supply `OpenServerFile`, which serves `BULK INSERT` and `OPENROWSET(BULK …)` too.
+It receives each path as SQL Server on Linux reads it — rooted, `/` between names — so map it into a folder kept for the purpose:
 
 ```C#
+var root = Path.GetFullPath("server-disk");
 var simulation = new Simulation
 {
-    OpenBackupFile = (path, access) => access == FileAccess.Read
-        ? (File.Exists(path) ? File.OpenRead(path) : null)
-        : File.Create(path),
+    OpenServerFile = (path, access) =>
+    {
+        var full = Path.GetFullPath(Path.Join(root, path));
+        if (path.Contains(':') || !full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+            return null;
+        if (access == FileAccess.Read)
+            return File.Exists(full) ? File.OpenRead(full) : null;
+        Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+        return File.Create(full);
+    },
 };
 ```
 
@@ -154,7 +164,7 @@ Coverage is broad; the compact map below is the shape of it, not the full invent
   `GRANT`/`DENY`/`REVOKE` are enforced for restricted principals at column, object, schema, and database scope — alongside `EXECUTE AS` impersonation, module `WITH EXECUTE AS`, ownership chaining, catalog metadata filtered to a principal's visibility, and `VIEW SERVER STATE`-gated DMVs.
   Row-level security, dynamic data masking, and the master key, certificates, asymmetric and symmetric keys with the functions that encrypt, decrypt and sign with them.
 - **Scale-out shapes.**
-  Multiple databases with cross-database reads and writes, linked servers between simulations, BACPAC import for bootstrapping from a real database, full and differential `BACKUP` / `RESTORE` with log backups, and `BULK INSERT` / `OPENROWSET(BULK …)` over files supplied through `OpenBulkFile`.
+  Multiple databases with cross-database reads and writes, linked servers between simulations, BACPAC import for bootstrapping from a real database, full and differential `BACKUP` / `RESTORE` with log backups, and `BULK INSERT` / `OPENROWSET(BULK …)` over files supplied through `OpenServerFile`.
 
 Deeper per-feature notes live under [`docs/claude/`](docs/claude/).
 

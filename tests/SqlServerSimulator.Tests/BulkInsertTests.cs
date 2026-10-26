@@ -14,7 +14,7 @@ public class BulkInsertTests
     internal static Simulation WithFileBytes(params (string Path, byte[] Bytes)[] files)
     {
         var map = files.ToDictionary(file => file.Path, file => file.Bytes, StringComparer.Ordinal);
-        return new Simulation { OpenBulkFile = path => map.TryGetValue(path, out var bytes) ? new MemoryStream(bytes) : null };
+        return new Simulation { OpenServerFile = (path, access) => access == FileAccess.Read && map.TryGetValue(path, out var bytes) ? new MemoryStream(bytes) : null };
     }
 
     [TestMethod]

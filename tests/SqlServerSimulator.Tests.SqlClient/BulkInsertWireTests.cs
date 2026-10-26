@@ -17,7 +17,7 @@ public sealed class BulkInsertWireTests
     private static Simulation WithFile(string text)
     {
         var bytes = Encoding.UTF8.GetBytes(text);
-        return new Simulation { OpenBulkFile = path => path == "/f.txt" ? new MemoryStream(bytes) : null };
+        return new Simulation { OpenServerFile = (path, _) => path == "/f.txt" ? new MemoryStream(bytes) : null };
     }
 
     [TestMethod]
@@ -50,5 +50,26 @@ public sealed class BulkInsertWireTests
         AreEqual(4864, ex.Number);
         await using var check = new SqlCommand("select concat((select count(*) from t), ':', (select n from log))", connection);
         AreEqual("1:7", await check.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    /// <summary>
+    /// A file delegate that throws leaves its file unreadable, as an operating
+    /// system's error would: the client meets the load's own refusal, never
+    /// the host's message, and the session goes on.
+    /// </summary>
+    [TestMethod]
+    public async Task ThrowingFileDelegate_IsAnUnreadableFile_ItsMessageKeptOnTheHost()
+    {
+        var simulation = new Simulation { OpenServerFile = (_, _) => throw new InvalidOperationException("the host's own detail") };
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using (var faulting = new SqlCommand("create table t (a int); bulk insert t from '/data/t.csv'", connection))
+        {
+            var ex = await Assert.ThrowsExactlyAsync<SqlException>(async () => await faulting.ExecuteNonQueryAsync(TestContext.CancellationToken));
+            AreEqual(4860, ex.Number);
+            DoesNotContain("the host's own detail", ex.Message);
+        }
+        await using var next = new SqlCommand("select 42", connection);
+        AreEqual(42, await next.ExecuteScalarAsync(TestContext.CancellationToken));
     }
 }

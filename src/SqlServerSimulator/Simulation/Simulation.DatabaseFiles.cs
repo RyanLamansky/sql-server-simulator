@@ -202,7 +202,7 @@ partial class Simulation
         }
         // A file no database holds — a detached database's, a backup — is in
         // the way too (probed 2026-10-16 against SQL Server 2025).
-        return except is null && CanonicalServerPath(path) is { } canonical && simulation.BackupDevices.ContainsKey(canonical);
+        return except is null && CanonicalServerPath(path) is { } canonical && simulation.DiskFiles.ContainsKey(canonical);
     }
 
     /// <summary>

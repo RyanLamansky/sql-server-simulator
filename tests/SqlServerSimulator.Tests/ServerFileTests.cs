@@ -145,7 +145,7 @@ public sealed class ServerFileTests
     public void FileProcedures_ShortOfSysadmin()
     {
         var opened = 0;
-        var simulation = new Simulation { OpenBackupFile = (_, _) => { opened++; return null; } };
+        var simulation = new Simulation { OpenServerFile = (_, _) => { opened++; return null; } };
         _ = simulation.ExecuteNonQuery("create login low with password = 'Zq!8vWm#2pLr', check_policy = off");
         using var connection = simulation.CreateOpenConnection();
         _ = connection.CreateCommand("use master; execute as login = 'low'").ExecuteNonQuery();
@@ -169,6 +169,57 @@ public sealed class ServerFileTests
                 (select count(*) from #t where s like N'system[_]health[_]0[_]%.xel' and f = 1), '|',
                 (select count(*) from #t where s like N'HkEngineEventFile[_]0[_]%.xel' and f = 1))
             """));
+
+    /// <summary>With no delegate the disk is one store in memory: a bulk read finds the file a backup wrote, as the server's file layer reads its path.</summary>
+    [TestMethod]
+    public void NoDelegate_ABulkReadFindsTheFileABackupWrote()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create database d;
+            backup database d to disk = N'/var/opt/mssql/data/d.bak';
+            select count(*) from openrowset(bulk N'C:\VAR\opt\mssql\data\.\d.bak', single_blob) x where datalength(BulkColumn) >= 4096
+            """));
+
+    [TestMethod]
+    public void RelativeBulkPath_NamesNoFile_AndNeverReachesTheDelegate()
+    {
+        var opened = 0;
+        var simulation = new Simulation { OpenServerFile = (_, _) => { opened++; return new MemoryStream([1]); } };
+        _ = simulation.AssertSqlError("select * from openrowset(bulk N'f.bin', single_blob) x", 4860);
+        AreEqual(0, opened);
+    }
+
+    [TestMethod]
+    public void FileLongerThanTheSimulatorReads_IsNotSupported_BeforeItIsRead()
+    {
+        var simulation = new Simulation { OpenServerFile = (_, _) => new OversizedStream() };
+        Contains("at most 1 GiB", Throws<NotSupportedException>(() => simulation.ExecuteScalar("select datalength(BulkColumn) from openrowset(bulk N'/big.bin', single_blob) x")).Message);
+    }
+
+    /// <summary>A readable stream claiming more than the simulator reads, failing any read.</summary>
+    private sealed class OversizedStream : Stream
+    {
+        public override bool CanRead => true;
+
+        public override bool CanSeek => true;
+
+        public override bool CanWrite => false;
+
+        public override long Length => (1L << 30) + 1;
+
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => throw new InvalidOperationException("read past the length check");
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
 
     private static string Dirtree(string arguments) => $"""
         create table #t (s nvarchar(260), d int);

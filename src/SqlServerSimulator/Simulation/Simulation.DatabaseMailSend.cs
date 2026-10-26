@@ -80,7 +80,7 @@ partial class Simulation
     /// is public or granted to it (14607), else the caller's default private
     /// profile, else the default public one (14636) — and the arguments in
     /// real's order, each with its own return code. The attachments are read
-    /// through <see cref="OpenBulkFile"/> and the query runs as the caller,
+    /// from the server's disk and the query runs as the caller,
     /// its output formatted as <c>sqlcmd</c> would into the body or an
     /// attached file; a refusal of either is an extended procedure's Msg
     /// 22050 / 22051, sent past any <c>TRY</c>. The item queued, the external

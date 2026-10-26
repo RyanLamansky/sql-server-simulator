@@ -64,7 +64,7 @@ public sealed class ConcurrentUniqueKeyTests
     public void RacingWritersOfOneKey_LandItOnce(int table, Shape shape)
     {
         var composite = table == 3;
-        var simulation = new Simulation { OpenBulkFile = path => new MemoryStream(BulkFile(path)) };
+        var simulation = new Simulation { OpenServerFile = (path, _) => new MemoryStream(BulkFile(path)) };
         _ = simulation.ExecuteNonQuery(TableShapes[table]);
         if (shape == Shape.Update)
         {

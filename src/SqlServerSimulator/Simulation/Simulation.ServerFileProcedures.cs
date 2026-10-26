@@ -96,8 +96,8 @@ partial class Simulation
     /// severity 15 (<c>Invalid Parameter</c>), and a folder that doesn't
     /// exist Msg 22049 severity 16 naming operating-system error 2. Report
     /// files (type 1) are never written here, so that type deletes nothing.
-    /// Only the in-memory device store can be listed: with
-    /// <see cref="OpenBackupFile"/> set, nothing is deleted.
+    /// Only the in-memory disk can be listed: with
+    /// <see cref="OpenServerFile"/> set, nothing is deleted.
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeXpDeleteFile(BatchContext batch, string calledAs, string? returnCodeVar)
     {
@@ -123,8 +123,8 @@ partial class Simulation
         if (arguments.Count == 2)
         {
             if (type == 0 && this.IsBackupFile(target))
-                _ = this.BackupDevices.TryRemove(target, out _);
-            else if (type == 0 && this.BackupDevices.ContainsKey(target))
+                _ = this.DiskFiles.TryRemove(target, out _);
+            else if (type == 0 && this.DiskFiles.ContainsKey(target))
                 return SimulatedSqlException.NotABackupFile();
             return null;
         }
@@ -157,11 +157,11 @@ partial class Simulation
             {
                 var path = (folder == "/" ? "/" : folder + "/") + name;
                 if (isFile && name.EndsWith(extension, StringComparison.OrdinalIgnoreCase)
-                    && this.BackupDevices.TryGetValue(path, out var bytes)
+                    && this.DiskFiles.TryGetValue(path, out var bytes)
                     && BackupMedia.TryRead(bytes, out var media, out _) == BackupMedia.ReadOutcome.Read
                     && media!.Sets.Count > 0 && media.Sets[^1].FinishUtc < before)
                 {
-                    _ = this.BackupDevices.TryRemove(path, out _);
+                    _ = this.DiskFiles.TryRemove(path, out _);
                 }
             }
         }
@@ -170,7 +170,7 @@ partial class Simulation
 
     /// <summary>Whether the in-memory device at <paramref name="canonical"/> holds a backup.</summary>
     private bool IsBackupFile(string canonical) =>
-        this.BackupDevices.TryGetValue(canonical, out var bytes) && BackupMedia.TryRead(bytes, out _, out _) == BackupMedia.ReadOutcome.Read;
+        this.DiskFiles.TryGetValue(canonical, out var bytes) && BackupMedia.TryRead(bytes, out _, out _) == BackupMedia.ReadOutcome.Read;
 
     private static bool IsGivenText(ProcArgument argument) =>
         !argument.IsDefault && !argument.Value.IsNull && argument.Value.Type.Category == SqlTypeCategory.String;
