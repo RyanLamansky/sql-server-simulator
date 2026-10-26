@@ -47,21 +47,7 @@ internal static class ConstraintLookup
     public static bool TryResolveByName(BatchContext batch, MultiPartName name, out ConstraintReference found)
     {
         found = default;
-        if (!batch.TryResolveSchema(name, out var schema))
-            return false;
-        var collation = schema.Database.Collation;
-        foreach (var (table, owner) in ConstraintOwners(schema, includeTableTypes: false))
-        {
-            foreach (var reference in Constraints(table, owner))
-            {
-                if (collation.Equals(reference.Name, name.Leaf))
-                {
-                    found = reference;
-                    return true;
-                }
-            }
-        }
-        return false;
+        return batch.TryResolveSchema(name, out var schema) && Schemas.ObjectIdIndex.TryFindConstraintNamed(batch, schema, name.Leaf, out found);
     }
 
     /// <summary>
@@ -71,22 +57,39 @@ internal static class ConstraintLookup
     /// </summary>
     public static bool TryResolveById(Database database, int objectId, out ConstraintReference found)
     {
+        foreach (var reference in All(database))
+        {
+            if (reference.ObjectId == objectId)
+            {
+                found = reference;
+                return true;
+            }
+        }
+        found = default;
+        return false;
+    }
+
+    /// <summary>Every constraint of <paramref name="database"/>, in the order <see cref="TryResolveById"/> walks them.</summary>
+    public static IEnumerable<ConstraintReference> All(Database database)
+    {
         foreach (var (_, schema) in database.Schemas)
         {
             foreach (var (table, owner) in ConstraintOwners(schema, includeTableTypes: true))
             {
                 foreach (var reference in Constraints(table, owner))
-                {
-                    if (reference.ObjectId == objectId)
-                    {
-                        found = reference;
-                        return true;
-                    }
-                }
+                    yield return reference;
             }
         }
-        found = default;
-        return false;
+    }
+
+    /// <summary>The constraints a name qualified by <paramref name="schema"/> may resolve to, in the order <see cref="TryResolveByName"/> tries them.</summary>
+    public static IEnumerable<ConstraintReference> NamedIn(Schema schema)
+    {
+        foreach (var (table, owner) in ConstraintOwners(schema, includeTableTypes: false))
+        {
+            foreach (var reference in Constraints(table, owner))
+                yield return reference;
+        }
     }
 
     /// <summary>

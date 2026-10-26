@@ -1,3 +1,4 @@
+using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -50,20 +51,14 @@ internal sealed class ObjectDefinition : Expression
         var id = ScalarArguments.CoerceToInt(idValue);
 
         var database = runtime.Batch.CurrentDatabase;
-        foreach (var (_, schema) in database.Schemas)
-        {
-            foreach (var obj in schema.SchemaObjects())
-            {
-                if (obj.ObjectId == id)
-                    return PermissionEnforcement.CanSeeDefinition(runtime.Batch, database, obj) ? Definition(obj.DefinitionText) : SqlValue.Null(SqlType.NVarcharMax);
-            }
-        }
+        if (ObjectIdIndex.TryFindSchemaObject(runtime.Batch, database, id, out var obj, out _))
+            return PermissionEnforcement.CanSeeDefinition(runtime.Batch, database, obj) ? Definition(obj.DefinitionText) : SqlValue.Null(SqlType.NVarcharMax);
         foreach (var (_, ddlTrigger) in database.DdlTriggers)
         {
             if (ddlTrigger.ObjectId == id)
                 return Definition(ddlTrigger.DefinitionText);
         }
-        return ConstraintLookup.TryResolveById(database, id, out var constraint)
+        return ObjectIdIndex.TryFindConstraint(runtime.Batch, database, id, out var constraint)
             ? Definition(constraint.Definition)
             : SqlValue.Null(SqlType.NVarcharMax);
     }

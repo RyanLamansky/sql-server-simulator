@@ -53,15 +53,7 @@ internal sealed class CatalogRowCache
     /// </summary>
     public CatalogRowSet GetOrBuild(CatalogView view, Database database, BatchContext batch, Func<CatalogView, BatchContext, Database, List<byte[]>> generate)
     {
-        var stamp = Volatile.Read(ref this.version);
-        var generation = Volatile.Read(ref this.current);
-        if (generation.Version < stamp)
-        {
-            var fresh = new Generation(stamp);
-            var prior = Interlocked.CompareExchange(ref this.current, fresh, generation);
-            generation = ReferenceEquals(prior, generation) ? fresh : prior;
-        }
-
+        var generation = this.CurrentGeneration(out var stamp);
         var key = (view, database);
         var live = view.LiveStamp?.Invoke(database);
         if (generation.Version == stamp && generation.Sets.TryGetValue(key, out var cached)
@@ -80,6 +72,36 @@ internal sealed class CatalogRowCache
             return built;
         generation.Sets[key] = built;
         return built;
+    }
+
+    /// <summary>
+    /// <paramref name="database"/>'s <see cref="ObjectIdIndex"/>, built on a
+    /// miss and kept under the same generation as the rowsets, so the
+    /// invalidation that drops a stale <c>sys.objects</c> drops it too.
+    /// </summary>
+    public ObjectIdIndex ObjectIds(Database database)
+    {
+        var generation = this.CurrentGeneration(out var stamp);
+        if (generation.Version == stamp && generation.ObjectIds.TryGetValue(database, out var cached))
+            return cached;
+        var built = new ObjectIdIndex(database);
+        if (generation.Version == stamp && Volatile.Read(ref this.version) == stamp)
+            generation.ObjectIds[database] = built;
+        return built;
+    }
+
+    /// <summary>The generation of the latest <see cref="Invalidate"/> count, <paramref name="stamp"/>, starting it if no read has.</summary>
+    private Generation CurrentGeneration(out long stamp)
+    {
+        stamp = Volatile.Read(ref this.version);
+        var generation = Volatile.Read(ref this.current);
+        if (generation.Version < stamp)
+        {
+            var fresh = new Generation(stamp);
+            var prior = Interlocked.CompareExchange(ref this.current, fresh, generation);
+            generation = ReferenceEquals(prior, generation) ? fresh : prior;
+        }
+        return generation;
     }
 
 #if DEBUG
@@ -106,6 +128,7 @@ internal sealed class CatalogRowCache
     {
         public readonly long Version = version;
         public readonly ConcurrentDictionary<(CatalogView View, Database Database), CatalogRowSet> Sets = new();
+        public readonly ConcurrentDictionary<Database, ObjectIdIndex> ObjectIds = new();
     }
 }
 

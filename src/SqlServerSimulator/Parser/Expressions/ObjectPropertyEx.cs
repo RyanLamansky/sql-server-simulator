@@ -60,7 +60,7 @@ internal sealed class ObjectPropertyEx : Expression
         var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
 
         var database = runtime.Batch.CurrentDatabase;
-        var obj = ObjectProperty.FindObject(database, id);
+        var obj = ObjectIdIndex.FindObject(runtime.Batch, database, id);
         // Boolean Is-X props share OBJECTPROPERTY's dispatch verbatim; real
         // carries them as an int inner base type inside the sql_variant. A
         // constraint id and a system object resolve through the same answers
@@ -72,14 +72,14 @@ internal sealed class ObjectPropertyEx : Expression
                 ? SqlValue.FromVariant(SqlValue.FromInt32(booleanResult))
                 : EvaluateExtendedProperty(obj, prop, runtime.Batch);
         }
-        if (ObjectProperty.TryFindConstraint(database, id, out var constraint))
+        if (ObjectIdIndex.TryFindConstraint(runtime.Batch, database, id, out var constraint))
         {
             return IsBaseType(prop) ? TypeCodeVariant(constraint.TypeCode, database)
                 : ObjectProperty.EvaluateConstraintProperty(constraint, prop) is int constraintResult
                     ? SqlValue.FromVariant(SqlValue.FromInt32(constraintResult))
                     : SqlValue.Null(SqlType.SqlVariant);
         }
-        if (ObjectProperty.FindTableType(database, id) is { } tableType)
+        if (ObjectIdIndex.TryFindTableType(runtime.Batch, database, id, out var tableType, out _))
         {
             return IsBaseType(prop) ? TypeCodeVariant(tableType.ObjectTypeCode, database)
                 : BuiltInToken.Equals(prop, "Cardinality") ? SqlValue.FromVariant(SqlValue.FromInt64(0))

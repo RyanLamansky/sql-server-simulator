@@ -62,25 +62,17 @@ internal sealed class ObjectSchemaName : Expression
         // login can't reach at all, exactly as the sibling OBJECT_NAME does.
         if (!PermissionEnforcement.TryMetadataVisibilityPrincipal(runtime.Batch, database, out var principalId))
             return SqlValue.Null(MetadataNameType(runtime.Batch));
-        foreach (var (_, schema) in database.Schemas)
+        if (ObjectIdIndex.TryFindSchemaObject(runtime.Batch, database, id, out var obj, out var schema))
         {
-            foreach (var obj in schema.SchemaObjects())
-            {
-                if (obj.ObjectId != id)
-                    continue;
-                var (governObjectId, governSchemaId) = obj is Trigger trigger
-                    ? (trigger.Parent.ObjectId, trigger.Parent.SchemaId)
-                    : (obj.ObjectId, obj.SchemaId);
-                return principalId is { } filter && !PermissionChecker.CanViewMetadata(database, filter, governObjectId, governSchemaId, ServerLoginRights.For(runtime.Batch.Connection))
-                    ? SqlValue.Null(MetadataNameType(runtime.Batch))
-                    : SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), schema.Name);
-            }
-            foreach (var (_, tableType) in schema.TableTypes)
-            {
-                if (tableType.ObjectId == id)
-                    return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), schema.Name);
-            }
+            var (governObjectId, governSchemaId) = obj is Trigger trigger
+                ? (trigger.Parent.ObjectId, trigger.Parent.SchemaId)
+                : (obj.ObjectId, obj.SchemaId);
+            return principalId is { } filter && !PermissionChecker.CanViewMetadata(database, filter, governObjectId, governSchemaId, ServerLoginRights.For(runtime.Batch.Connection))
+                ? SqlValue.Null(MetadataNameType(runtime.Batch))
+                : SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), schema.Name);
         }
+        if (ObjectIdIndex.TryFindTableType(runtime.Batch, database, id, out _, out var typeSchema))
+            return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), typeSchema.Name);
         // A temp table lives in tempdb's catalog, under dbo.
         if (database.Name == Simulation.TempdbDatabaseName)
         {
@@ -106,7 +98,7 @@ internal sealed class ObjectSchemaName : Expression
         }
         // A constraint id answers the schema of the table that owns it, whose
         // visibility it also follows.
-        return ConstraintLookup.TryResolveById(database, id, out var constraint)
+        return ObjectIdIndex.TryFindConstraint(runtime.Batch, database, id, out var constraint)
             && (principalId is not { } constraintFilter
                 || PermissionChecker.CanViewMetadata(database, constraintFilter, constraint.Table.ObjectId, constraint.Table.SchemaId, ServerLoginRights.For(runtime.Batch.Connection)))
             ? SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), constraint.Schema.Name)

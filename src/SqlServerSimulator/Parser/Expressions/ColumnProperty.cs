@@ -49,7 +49,7 @@ internal sealed class ColumnProperty : Expression
         var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
 
         var database = runtime.Batch.CurrentDatabase;
-        return FindColumn(database, id, columnName) is { } found && Evaluate(database, found, prop) is int result
+        return FindColumn(runtime.Batch, database, id, columnName) is { } found && Evaluate(database, found, prop) is int result
             ? SqlValue.FromInt32(result)
             : SqlValue.Null(SqlType.Int32);
     }
@@ -95,9 +95,9 @@ internal sealed class ColumnProperty : Expression
     /// which always allows NULL, and the empty name a scalar function's return
     /// value, id 0 (probed 2026-09-25 / 2026-09-26 against SQL Server 2025).
     /// </summary>
-    private static FoundColumn? FindColumn(Database database, int id, string name)
+    private static FoundColumn? FindColumn(BatchContext batch, Database database, int id, string name)
     {
-        var owner = ObjectProperty.FindObject(database, id);
+        var owner = ObjectIdIndex.FindObject(batch, database, id);
         if (name.StartsWith('@'))
         {
             var parameterName = name[1..];
@@ -139,7 +139,7 @@ internal sealed class ColumnProperty : Expression
             View or null => ColumnSite.View,
             _ => ColumnSite.Table,
         };
-        var columns = ColumnsOf(database, id);
+        var columns = ColumnsOf(batch, database, id);
         for (var i = 0; i < columns?.Length; i++)
         {
             var column = columns[i];
@@ -161,30 +161,24 @@ internal sealed class ColumnProperty : Expression
     /// <see cref="HeapColumn.ColumnId"/> where it has one and its position
     /// otherwise.
     /// </summary>
-    internal static HeapColumn[]? ColumnsOf(Database database, int id)
+    internal static HeapColumn[]? ColumnsOf(Database database, int id) =>
+        ColumnsOf(ObjectProperty.FindObject(database, id), id) ?? ObjectProperty.FindTableType(database, id)?.Columns;
+
+    /// <summary><see cref="ColumnsOf(Database, int)"/>, finding the object through the batch's <see cref="ObjectIdIndex"/>.</summary>
+    internal static HeapColumn[]? ColumnsOf(BatchContext batch, Database database, int id) =>
+        ColumnsOf(ObjectIdIndex.FindObject(batch, database, id), id)
+            ?? (ObjectIdIndex.TryFindTableType(batch, database, id, out var tableType, out _) ? tableType.Columns : null);
+
+    private static HeapColumn[]? ColumnsOf(SchemaObject? owner, int id) => owner switch
     {
-        var columns = ObjectProperty.FindObject(database, id) switch
-        {
-            HeapTable table => table.Columns,
-            View view => view.CatalogColumns(),
-            InlineTableValuedFunction inline => inline.OutputColumns,
-            MultiStatementTableValuedFunction multiStatement => multiStatement.OutputColumns,
-            ClrTableValuedFunction clr => clr.OutputColumns,
-            null => CatalogViewColumns(id),
-            _ => null,
-        };
-        if (columns is not null)
-            return columns;
-        foreach (var (_, schema) in database.Schemas)
-        {
-            foreach (var (_, tableType) in schema.TableTypes)
-            {
-                if (tableType.ObjectId == id)
-                    return tableType.Columns;
-            }
-        }
-        return null;
-    }
+        HeapTable table => table.Columns,
+        View view => view.CatalogColumns(),
+        InlineTableValuedFunction inline => inline.OutputColumns,
+        MultiStatementTableValuedFunction multiStatement => multiStatement.OutputColumns,
+        ClrTableValuedFunction clr => clr.OutputColumns,
+        null => CatalogViewColumns(id),
+        _ => null,
+    };
 
     private static HeapColumn[]? CatalogViewColumns(int id)
     {

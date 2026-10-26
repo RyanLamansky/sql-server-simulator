@@ -36,13 +36,13 @@ internal sealed class ObjectProperty : Expression
         var id = ScalarArguments.CoerceToInt(idValue);
         var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
         var database = runtime.Batch.CurrentDatabase;
-        var result = FindObject(database, id) is { } obj
+        var result = ObjectIdIndex.FindObject(runtime.Batch, database, id) is { } obj
             ? obj is View view && EvaluateViewBodyProperty(runtime.Batch, view, prop) is { } bodyAnswer
                 ? bodyAnswer
                 : EvaluateProperty(database, obj, prop)
-            : TryFindConstraint(database, id, out var constraint)
+            : ObjectIdIndex.TryFindConstraint(runtime.Batch, database, id, out var constraint)
                 ? EvaluateConstraintProperty(constraint, prop)
-                : FindTableType(database, id) is { } tableType
+                : ObjectIdIndex.TryFindTableType(runtime.Batch, database, id, out var tableType, out _)
                     ? EvaluateTableTypeProperty(database, tableType, prop)
                 : BuiltInResources.TryResolveSystemObject(id, out var system)
                     ? EvaluateSystemObjectProperty(system, prop)

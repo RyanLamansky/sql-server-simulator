@@ -1,3 +1,4 @@
+using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -50,7 +51,7 @@ internal sealed class IndexProperty : Expression
         var indexName = indexValue.CoerceTo(SqlType.NVarchar).AsString;
         var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
 
-        return Resolve(ObjectProperty.FindObject(runtime.Batch.CurrentDatabase, id), indexName) is { } found
+        return Resolve(ObjectIdIndex.FindObject(runtime.Batch, runtime.Batch.CurrentDatabase, id), indexName) is { } found
             && Evaluate(found, prop) is int result
                 ? SqlValue.FromInt32(result)
                 : SqlValue.Null(SqlType.Int32);

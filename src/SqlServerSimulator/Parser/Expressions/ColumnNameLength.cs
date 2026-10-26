@@ -33,7 +33,7 @@ internal sealed class ColName : Expression
         var colId = ScalarArguments.CoerceToInt(colIdValue);
         // Any object with columns answers, by the stable column_id a dropped
         // column leaves a hole in (probed 2026-09-26 against SQL Server 2025).
-        var columns = ColumnProperty.ColumnsOf(runtime.Batch.CurrentDatabase, tableId);
+        var columns = ColumnProperty.ColumnsOf(runtime.Batch, runtime.Batch.CurrentDatabase, tableId);
         for (var i = 0; i < columns?.Length; i++)
         {
             if ((columns[i].ColumnId == 0 ? i + 1 : columns[i].ColumnId) == colId)
@@ -112,7 +112,7 @@ internal sealed class ColLength : Expression
         }
         else if (runtime.Batch.TryResolveCallerSchema(multiPart, out var schema) && schema.TryFindInSharedNamespace(multiPart.Leaf, out var other))
         {
-            columns = ColumnProperty.ColumnsOf(schema.Database, other.ObjectId);
+            columns = ColumnProperty.ColumnsOf(runtime.Batch, schema.Database, other.ObjectId);
         }
         else
         {

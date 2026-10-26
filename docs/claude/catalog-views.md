@@ -939,6 +939,11 @@ A view with one column ordinary DML moves carries a `CatalogView.LiveStamp`, rea
 The views whose DML-moved state has no cheap stamp stay out — `sys.partitions` (row counts, including per-partition shares), `sys.sequences` (`current_value`) — as do the principal, permission and role views and the dynamic management views.
 **Debug builds regenerate each cached view on its first hit per statement and throw on any difference**, so a missing invalidation fails whichever test exposes it; the whole suite runs under that audit.
 
+**The object scalars read the same generation.**
+`OBJECTPROPERTY`, `OBJECTPROPERTYEX`, `OBJECT_ID` of a constraint's name, `OBJECT_NAME`, `OBJECT_SCHEMA_NAME`, `OBJECT_DEFINITION`, `COLUMNPROPERTY`, `COL_NAME`, `COL_LENGTH`, `INDEXPROPERTY` and `INDEXKEY_PROPERTY` find an object or constraint through a per-database index of ids and constraint names (`Schemas/ObjectIdIndex.cs`), built on first use and kept and dropped with the rowsets, where each call walked every object of every schema — which made a catalog query calling one per row quadratic in the database's objects.
+It serves where a rowset would, metadata visibility aside, since each scalar checks visibility after its lookup, and Debug builds check every indexed answer against the walk.
+Over 2,000 keyed tables, `OBJECTPROPERTY` over `sys.objects` took 0.4–0.7 s and takes 17–24 ms, and `OBJECT_ID` of each row's own name 0.4–0.5 s and 60–70 ms, against 16–24 ms each on real (2026-10-26, Release).
+
 **Measured** (2026-09-28, in-process against the live SQL Server 2025 reference over TDS, a generated 300-table database across three schemas with 3,145 columns, primary keys, unique constraints, nonclustered indexes, foreign keys, defaults, checks, 30 views and 20 procedures; median of five warm runs; `×30` runs the per-table query for 30 different tables):
 
 | Query | Before | After | Live |

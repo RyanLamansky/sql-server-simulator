@@ -1,3 +1,4 @@
+using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -59,7 +60,7 @@ internal sealed class IndexKeyProperty : Expression
         var objectId = ScalarArguments.CoerceToInt(objectIdValue);
         var indexId = ScalarArguments.CoerceToInt(indexIdValue);
         var keyId = ScalarArguments.CoerceToSmallInt(keyIdValue);
-        if (ObjectProperty.FindObject(runtime.Batch.CurrentDatabase, objectId) is not HeapTable table)
+        if (ObjectIdIndex.FindObject(runtime.Batch, runtime.Batch.CurrentDatabase, objectId) is not HeapTable table)
             return SqlValue.Null(SqlType.Int32);
 
         var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;

@@ -70,27 +70,19 @@ internal sealed class ObjectName : Expression
         // reveals nothing and the answer is NULL (probe-confirmed).
         if (!PermissionEnforcement.TryMetadataVisibilityPrincipal(runtime.Batch, targetDb, out var principalId))
             return SqlValue.Null(MetadataNameType(runtime.Batch));
-        foreach (var (_, schema) in targetDb.Schemas)
+        if (ObjectIdIndex.TryFindSchemaObject(runtime.Batch, targetDb, id, out var obj, out _))
         {
-            foreach (var obj in schema.SchemaObjects())
-            {
-                if (obj.ObjectId != id)
-                    continue;
-                var (governObjectId, governSchemaId) = obj is Trigger trigger
-                    ? (trigger.Parent.ObjectId, trigger.Parent.SchemaId)
-                    : (obj.ObjectId, obj.SchemaId);
-                return principalId is { } filter && !PermissionChecker.CanViewMetadata(targetDb, filter, governObjectId, governSchemaId, ServerLoginRights.For(runtime.Batch.Connection))
-                    ? SqlValue.Null(MetadataNameType(runtime.Batch))
-                    : SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), obj.Name);
-            }
-            foreach (var (_, tableType) in schema.TableTypes)
-            {
-                // The id is the backing type table's, which answers under
-                // the name sys.objects lists it by.
-                if (tableType.ObjectId == id)
-                    return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), tableType.BackingTableName);
-            }
+            var (governObjectId, governSchemaId) = obj is Trigger trigger
+                ? (trigger.Parent.ObjectId, trigger.Parent.SchemaId)
+                : (obj.ObjectId, obj.SchemaId);
+            return principalId is { } filter && !PermissionChecker.CanViewMetadata(targetDb, filter, governObjectId, governSchemaId, ServerLoginRights.For(runtime.Batch.Connection))
+                ? SqlValue.Null(MetadataNameType(runtime.Batch))
+                : SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), obj.Name);
         }
+        // A table type's id is its backing type table's, which answers under
+        // the name sys.objects lists it by.
+        if (ObjectIdIndex.TryFindTableType(runtime.Batch, targetDb, id, out var tableType, out _))
+            return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), tableType.BackingTableName);
         // A temp table lives in tempdb's catalog, so an id there names it.
         if (targetDb.Name == Simulation.TempdbDatabaseName)
         {
@@ -118,7 +110,7 @@ internal sealed class ObjectName : Expression
         // A constraint id reads back its own name, visibility following the
         // table it hangs off (constraints aren't SchemaObjects, so the walk
         // above can't reach one).
-        return ConstraintLookup.TryResolveById(targetDb, id, out var constraint)
+        return ObjectIdIndex.TryFindConstraint(runtime.Batch, targetDb, id, out var constraint)
             && (principalId is not { } constraintFilter
                 || PermissionChecker.CanViewMetadata(targetDb, constraintFilter, constraint.Table.ObjectId, constraint.Table.SchemaId, ServerLoginRights.For(runtime.Batch.Connection)))
             ? SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), constraint.Name)
