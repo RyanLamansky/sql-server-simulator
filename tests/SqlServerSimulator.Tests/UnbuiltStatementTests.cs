@@ -22,6 +22,8 @@ public sealed class UnbuiltStatementTests
     [DataRow("create selective xml index sx on t (x) for (p = '/a')", "CREATE SELECTIVE XML INDEX")]
     [DataRow("backup service master key to file = 'x' encryption by password = 'x'", "BACKUP SERVICE MASTER KEY")]
     [DataRow("restore master key from file = 'x' decryption by password = 'x' encryption by password = 'x'", "RESTORE MASTER KEY")]
+    [DataRow("backup symmetric key k to file = 'k.key' encryption by password = 'Xx!12345678'", "BACKUP SYMMETRIC KEY")]
+    [DataRow("restore symmetric key k from file = 'k.key' decryption by password = 'x' encryption by password = 'x'", "RESTORE SYMMETRIC KEY")]
     [DataRow("add signature to p by certificate c", "ADD SIGNATURE")]
     public void UnbuiltStatement_RaisesNotSupported(string sql, string statement)
     {

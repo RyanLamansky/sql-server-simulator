@@ -58,8 +58,10 @@ partial class Simulation
         new("", "BACKUP CERTIFICATE", "Certificates"),
         new("", "BACKUP MASTER KEY", "Database master keys"),
         new("", "BACKUP SERVICE MASTER KEY", "The service master key"),
+        new("", "BACKUP SYMMETRIC KEY", "Symmetric keys"),
         new("", "RESTORE MASTER KEY", "Database master keys"),
         new("", "RESTORE SERVICE MASTER KEY", "The service master key"),
+        new("", "RESTORE SYMMETRIC KEY", "Symmetric keys"),
     ];
 
     /// <summary>

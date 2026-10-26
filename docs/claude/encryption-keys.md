@@ -78,7 +78,7 @@ Each key statement raises its DDL event — `CREATE_MASTER_KEY` through `DROP_SY
 
 ## Not modeled yet
 
-- `CREATE CERTIFICATE` / `CREATE ASYMMETRIC KEY … FROM` a file, binary, assembly or provider, loading a private key from one, `BACKUP CERTIFICATE`, `BACKUP` / `RESTORE MASTER KEY`, and the service master key's statements.
+- `CREATE CERTIFICATE` / `CREATE ASYMMETRIC KEY … FROM` a file, binary, assembly or provider, loading a private key from one, `BACKUP CERTIFICATE`, `BACKUP` / `RESTORE MASTER KEY`, SQL Server 2025's `BACKUP` / `RESTORE SYMMETRIC KEY`, and the service master key's statements.
 - Temporary symmetric keys (`#name`) and keys from an extensible key management provider.
 - Module signing (`ADD SIGNATURE`, `IS_OBJECTSIGNED`, `sys.crypt_properties`), and users and logins mapped to a certificate.
 - Real's `master` holds the `##MS_…##` system certificates, which `CERT_ID` finds there; here `master` starts with none.
