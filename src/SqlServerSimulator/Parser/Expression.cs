@@ -704,6 +704,7 @@ internal abstract class Expression : ExpressionNode
                         }
 
                         context.MoveNextRequired(); // Move past (
+                        var starArgument = context.Token is Operator { Character: '*' };
                         // 2- and 3-part dotted names route to user-defined
                         // function resolution before falling back to built-ins
                         // (which are 1-part only). Bare `fn(x)` raises Msg 195
@@ -729,6 +730,12 @@ internal abstract class Expression : ExpressionNode
                         // `OVER w` named-window reference ends on the name.
                         if (context.Token is not Operator { Character: ')' } && expression is not WindowExpression)
                             throw SimulatedSqlException.SyntaxErrorNear(context);
+
+                        // An aggregate leaves its OVER for the next iteration and
+                        // a windowed function has taken its own, so one after any
+                        // other built-in call is on a function with no windowed form.
+                        if (reference.ReferencedName.Count == 1 && expression is not (AggregateExpression or WindowExpression))
+                            expression = OverAfterBuiltIn.Read(expression, reference.Name, starArgument, context);
                         continue;
                     }
                 // OVER following an aggregate function call promotes the

@@ -75,6 +75,7 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
             return;
         RefuseAdjacentOperands(context);
         context.RestoreCheckpoint(checkpoint);
+        OverAfterBuiltIn.RefuseAheadOfCount(uppercaseName, writtenName, count < arity.min, context);
         throw count < arity.min ? arity.belowMin.ToException() : arity.aboveMax.ToException();
     }
 

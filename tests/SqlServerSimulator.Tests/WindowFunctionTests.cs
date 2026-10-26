@@ -940,6 +940,100 @@ public sealed class WindowFunctionTests
         AreEqual(1, sim.ExecuteScalar("select count(*) from flag"));
     }
 
+    /// <summary>
+    /// <c>OVER</c> after a function that has no windowed form is Msg 4113
+    /// naming it, at a state sorting the function, ahead of a wrong argument
+    /// count — save a count the function's own grammar settles — while a
+    /// syntax error inside the clause comes first and what binding would
+    /// settle doesn't (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("grouping(g) over ()", "grouping", 2)]
+    [DataRow("grouping_id(g) over ()", "grouping_id", 2)]
+    [DataRow("grouping(g) over (partition by g)", "grouping", 2)]
+    [DataRow("grouping(g, g) over ()", "grouping", 2)]
+    [DataRow("abs(g) over ()", "abs", 6)]
+    [DataRow("LEN('a') over ()", "len", 6)]
+    [DataRow("len() over ()", "len", 6)]
+    [DataRow("abs(1, 2) over ()", "abs", 6)]
+    [DataRow("isnull(g) over ()", "isnull", 6)]
+    [DataRow("trim() over ()", "trim", 6)]
+    [DataRow("trim(' a') over ()", "trim", 6)]
+    [DataRow("json_query() over ()", "json_query", 6)]
+    [DataRow("json_query('[]') over ()", "json_query", 6)]
+    [DataRow("checksum(*) over ()", "checksum", 1)]
+    [DataRow("binary_checksum(*) over ()", "binary_checksum", 1)]
+    [DataRow("checksum(g) over ()", "checksum", 6)]
+    [DataRow("checksum() over ()", "checksum", 6)]
+    [DataRow("string_agg(g) over ()", "string_agg", 4)]
+    [DataRow("approx_count_distinct(g, 1) over ()", "approx_count_distinct", 5)]
+    [DataRow("abs(g) over (order by nosuch)", "abs", 6)]
+    [DataRow("abs(g) over w", "abs", 6)]
+    [DataRow("abs(g) over (w order by g)", "abs", 6)]
+    [DataRow("abs(g) over (order by g range between current row and unbounded following)", "abs", 6)]
+    public void Over_AfterAFunctionWithNoWindowedForm_RaisesMsg4113(string call, string name, int state)
+    {
+        var ex = new Simulation().AssertSqlError($"select {call} from (values (1)) t (g) group by rollup (g)", 4113);
+        AreEqual($"The function '{name}' is not a valid windowing function, and cannot be used with the OVER clause.", ex.Errors[0].Message);
+        AreEqual(state, ex.Errors[0].State);
+    }
+
+    /// <summary>
+    /// What outranks Msg 4113, or stands in its place: a syntax error inside
+    /// the clause, a keyword-form call that ends at its parenthesis (the
+    /// <c>OVER</c> the syntax error after it), and a count the grammar settles
+    /// — a windowed aggregate's, <c>LEFT</c> / <c>RIGHT</c>'s, and
+    /// <c>TRIM</c> / <c>JSON_QUERY</c> above their range (probed 2026-10-26
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("abs(g) over (order by)", 102)]
+    [DataRow("abs(g) over (partition g)", 102)]
+    [DataRow("abs(g) over (rows unbounded preceding)", 102)]
+    [DataRow("abs(g) over", 156)]
+    [DataRow("len() over (order by)", 102)]
+    [DataRow("grouping(g) over (order by)", 102)]
+    [DataRow("string_agg(g, ',') over (order by)", 102)]
+    [DataRow("approx_percentile_cont(0.5) within group (order by g) over (order by)", 102)]
+    [DataRow("cast(g as int) over ()", 156)]
+    [DataRow("convert(int, g) over ()", 156)]
+    [DataRow("coalesce(g, 1) over (order by)", 156)]
+    [DataRow("iif(g = 1, 1, 0) over ()", 156)]
+    [DataRow("nullif(g, 1) over ()", 156)]
+    [DataRow("left('a', 1) over ()", 156)]
+    [DataRow("right('a', 1) over ()", 156)]
+    [DataRow("try_cast(g as int) over ()", 156)]
+    [DataRow("try_convert(int, g) over ()", 156)]
+    [DataRow("parse('1' as int) over ()", 156)]
+    [DataRow("try_parse('1' as int) over ()", 156)]
+    [DataRow("trim('x' from 'a') over ()", 156)]
+    [DataRow("sum(g, 1) over ()", 174)]
+    [DataRow("left('a') over ()", 174)]
+    [DataRow("right('a', 1, 2) over ()", 174)]
+    [DataRow("trim('a', 'b') over ()", 174)]
+    [DataRow("json_query('[]', '$', 1) over ()", 189)]
+    public void Over_AfterAFunctionWithNoWindowedForm_YieldsToTheGrammar(string call, int error)
+        => _ = new Simulation().AssertSqlError($"select {call} from (values (1)) t (g) group by rollup (g)", error);
+
+    /// <summary>
+    /// <c>JSON_OBJECT</c>, <c>JSON_ARRAY</c> and <c>JSON_QUERY … WITH ARRAY
+    /// WRAPPER</c> read an <c>OVER</c> after them for its grammar and discard
+    /// it unbound — a missing column, an undefined window and an aggregate in
+    /// it change nothing (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("json_object('a':g) over (order by nosuch)", """{"a":10}|{"a":20}""")]
+    [DataRow("json_object('a':g) over w", """{"a":10}|{"a":20}""")]
+    [DataRow("json_object('a':g) over (order by sum(g))", """{"a":10}|{"a":20}""")]
+    [DataRow("json_array(g) over (partition by g) + 'x'", "[10]x|[20]x")]
+    [DataRow("json_query('[1]' with array wrapper) over ()", "[[1]]|[[1]]")]
+    public void Over_AfterAJsonConstructor_IsDiscarded(string call, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select string_agg(c, '|') within group (order by g) from (select g, {call} c from (values (10), (20)) t (g)) q"));
+
+    [TestMethod]
+    public void Over_AfterAJsonConstructor_StillParses()
+        => _ = new Simulation().AssertSqlError("select json_object('a':1) over (order by)", 102);
+
     [TestMethod]
     public void PartitionBySpatial_NamesItsClause()
         => new Simulation().AssertSqlError($"{EmptyTable}select rank() over (partition by g order by id) from w", 249, "The type \"geography\" is not comparable. It cannot be used in the PARTITION BY clause.");

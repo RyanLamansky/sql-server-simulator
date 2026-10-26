@@ -36,7 +36,7 @@ internal sealed class JsonQuery : Expression
     /// Whether SQL Server 2025's <c>WITH ARRAY WRAPPER</c> closes the
     /// argument list, which gathers everything the path selects into one array.
     /// </summary>
-    private readonly bool arrayWrapper;
+    public readonly bool ArrayWrapper;
 
     /// <summary>The result type the statement bound, which the rows carry.</summary>
     private SqlType? resultType;
@@ -50,7 +50,7 @@ internal sealed class JsonQuery : Expression
             if (context.Token is Operator { Character: ',' })
                 throw SimulatedSqlException.FunctionArgumentCountRange("json_query", 1, 2);
         }
-        this.arrayWrapper = ParseArrayWrapper(context);
+        this.ArrayWrapper = ParseArrayWrapper(context);
     }
 
     /// <summary>
@@ -91,7 +91,7 @@ internal sealed class JsonQuery : Expression
         if (this.pathInput is null)
         {
             return jsonValue.IsNull ? SqlValue.Null(resultType)
-                : this.arrayWrapper ? Wrap(jsonValue, JsonPath.Root, resultType)
+                : this.ArrayWrapper ? Wrap(jsonValue, JsonPath.Root, resultType)
                 : Extract(jsonValue, JsonPath.Root, resultType);
         }
 
@@ -99,7 +99,7 @@ internal sealed class JsonQuery : Expression
         if (jsonValue.IsNull)
             return SqlValue.Null(resultType);
         var path = JsonPath.Parse(pathValue.AsString, ref this.parsedPath);
-        return this.arrayWrapper ? Wrap(jsonValue, path, resultType)
+        return this.ArrayWrapper ? Wrap(jsonValue, path, resultType)
             : path.IsAdvanced ? ExtractAdvanced(jsonValue, path, resultType)
             : Extract(jsonValue, path, resultType);
     }
@@ -235,8 +235,8 @@ internal sealed class JsonQuery : Expression
     private static byte ScalarState(SqlType resultType) => resultType is NVarcharSqlType { length: SqlType.MaxLengthSentinel } ? (byte)1 : (byte)2;
 
     internal override string DebugDisplay() => this.pathInput is null
-        ? $"JSON_QUERY({this.jsonInput.DebugDisplay()}{(this.arrayWrapper ? " WITH ARRAY WRAPPER" : "")})"
-        : $"JSON_QUERY({this.jsonInput.DebugDisplay()}, {this.pathInput.DebugDisplay()}{(this.arrayWrapper ? " WITH ARRAY WRAPPER" : "")})";
+        ? $"JSON_QUERY({this.jsonInput.DebugDisplay()}{(this.ArrayWrapper ? " WITH ARRAY WRAPPER" : "")})"
+        : $"JSON_QUERY({this.jsonInput.DebugDisplay()}, {this.pathInput.DebugDisplay()}{(this.ArrayWrapper ? " WITH ARRAY WRAPPER" : "")})";
 
-    internal override void Describe(NodeShape shape) => shape.Local(this.arrayWrapper).Child(this.jsonInput).Child(this.pathInput);
+    internal override void Describe(NodeShape shape) => shape.Local(this.ArrayWrapper).Child(this.jsonInput).Child(this.pathInput);
 }

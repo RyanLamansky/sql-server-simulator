@@ -805,10 +805,13 @@ internal sealed class WindowExpression : Expression
         // written, so its window is judged by RefusedWindowName instead.
         if (aggregate.Distinct && aggregate.Kind != AggregateKind.ApproxCountDistinct)
             throw SimulatedSqlException.DistinctNotAllowedInOver();
-        if (aggregate.Kind == AggregateKind.StringAgg)
-            throw SimulatedSqlException.FunctionNotValidForOver("string_agg");
-        if (aggregate.Kind is AggregateKind.ApproxPercentileCont or AggregateKind.ApproxPercentileDisc)
-            throw SimulatedSqlException.FunctionNotValidForOver(aggregate.LowerName, state: 8);
+        // Refused once the clause has parsed, so a syntax error inside it wins
+        // (probed 2026-10-26 against SQL Server 2025).
+        if (aggregate.Kind is AggregateKind.StringAgg or AggregateKind.ApproxPercentileCont or AggregateKind.ApproxPercentileDisc)
+        {
+            ParseClauseSyntax(context);
+            throw SimulatedSqlException.FunctionNotValidForOver(aggregate.LowerName, aggregate.Kind == AggregateKind.StringAgg ? (byte)4 : (byte)8);
+        }
         // JSON_ARRAYAGG's in-parens ORDER BY is mutually exclusive with OVER —
         // real SQL Server raises Msg 156 near the OVER keyword (the cursor is
         // on it here). JSON_OBJECTAGG can't carry an in-parens ORDER BY at all.

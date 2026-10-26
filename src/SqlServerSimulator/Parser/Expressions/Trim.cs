@@ -34,7 +34,7 @@ internal enum TrimSide
 internal sealed class Trim : Expression
 {
     private readonly Expression source;
-    private readonly Expression? trimChars;
+    public readonly Expression? TrimChars;
     private readonly TrimSide side;
 
     public Trim(ParserContext context)
@@ -59,7 +59,7 @@ internal sealed class Trim : Expression
         var first = Parse(context);
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
         {
-            this.trimChars = first;
+            this.TrimChars = first;
             context.MoveNextRequired();
             this.source = Parse(context);
         }
@@ -74,7 +74,7 @@ internal sealed class Trim : Expression
         }
     }
 
-    internal override bool ParallelSafe => this.source.ParallelSafe && this.trimChars?.ParallelSafe != false;
+    internal override bool ParallelSafe => this.source.ParallelSafe && this.TrimChars?.ParallelSafe != false;
 
     public override SqlValue Run(RuntimeContext runtime)
     {
@@ -86,11 +86,11 @@ internal sealed class Trim : Expression
         // order also decides which of two offending arguments is reported, so
         // the character set is gated before the source rather than where it is
         // consumed below — `TRIM(<ntext> FROM <text>)` names argument 1.
-        var sourceIndex = this.trimChars is null ? 1 : 2;
+        var sourceIndex = this.TrimChars is null ? 1 : 2;
         SqlValue? charsValue = null;
-        if (this.trimChars is not null)
+        if (this.TrimChars is not null)
         {
-            charsValue = this.trimChars.Run(runtime);
+            charsValue = this.TrimChars.Run(runtime);
             StringScalars.RejectLegacyLob(charsValue.Value, "Trim", argumentIndex: 1);
         }
         var value = source.Run(runtime);
@@ -122,9 +122,9 @@ internal sealed class Trim : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var charsType = this.trimChars is null ? null
-            : StringScalars.RequireStringArgument(this.trimChars, StringScalars.BindArgument(this.trimChars, batch, resolveColumnType, "Trim", argumentIndex: 1), "Trim", 1);
-        var sourceIndex = this.trimChars is null ? 1 : 2;
+        var charsType = this.TrimChars is null ? null
+            : StringScalars.RequireStringArgument(this.TrimChars, StringScalars.BindArgument(this.TrimChars, batch, resolveColumnType, "Trim", argumentIndex: 1), "Trim", 1);
+        var sourceIndex = this.TrimChars is null ? 1 : 2;
         var sourceType = source.GetSqlType(batch, resolveColumnType);
         VectorArguments.RejectVector(sourceType, "Trim", sourceIndex, 6);
         sourceType = StringScalars.RequireStringArgument(source, StringScalars.BindArgumentType(sourceType, "Trim", argumentIndex: sourceIndex), "Trim", sourceIndex, acceptsBinary: true);
@@ -156,5 +156,5 @@ internal sealed class Trim : Expression
 
     internal override string DebugDisplay() => $"TRIM({source.DebugDisplay()})";
 
-    internal override void Describe(NodeShape shape) => shape.Local(this.side).Child(this.trimChars).Child(this.source);
+    internal override void Describe(NodeShape shape) => shape.Local(this.side).Child(this.TrimChars).Child(this.source);
 }
