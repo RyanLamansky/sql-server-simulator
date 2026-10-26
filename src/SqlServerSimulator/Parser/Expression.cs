@@ -704,6 +704,11 @@ internal abstract class Expression : ExpressionNode
                         }
 
                         context.MoveNextRequired(); // Move past (
+                        if (IsWindowedUserCall(reference.ReferencedName, context))
+                        {
+                            expression = ParseWindowedUserCall(reference.ReferencedName, context);
+                            continue;
+                        }
                         var starArgument = context.Token is Operator { Character: '*' };
                         // 2- and 3-part dotted names route to user-defined
                         // function resolution before falling back to built-ins
@@ -898,14 +903,54 @@ internal abstract class Expression : ExpressionNode
     }
 
     /// <summary>
-    /// Skip-mode fallback for a schema-qualified function call whose name
-    /// doesn't resolve. Parses and discards the comma-separated argument list
-    /// so the cursor advances past the call, then returns a placeholder NULL
+    /// Whether a schema-qualified call to <paramref name="name"/> is followed
+    /// by <c>OVER</c> and names no CLR aggregate, which reads its own window:
+    /// real's grammar reads any such call as a user-defined aggregate's
+    /// windowed call, whatever the name turns out to be. Cursor on the
+    /// argument list's first token, where it stays.
+    /// </summary>
+    private static bool IsWindowedUserCall(MultiPartName name, ParserContext context)
+    {
+        if (name.Count is < 2 or > 3)
+            return false;
+        var start = context.SaveCheckpoint();
+        var over = BuiltInArity.CountArguments(context) >= 0 && context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.Over };
+        context.RestoreCheckpoint(start);
+        return over && !(context.Batch.TryResolveFunction(name, out var function) && function is ClrAggregateFunction);
+    }
+
+    /// <summary>
+    /// A schema-qualified call <see cref="IsWindowedUserCall"/> answered for,
+    /// cursor on its argument list's first token. The list and the window
+    /// clause — a window name and a <c>PARTITION BY</c>, nothing more — parse
+    /// for their grammar alone, and the name binds ahead of anything in them:
+    /// a scalar function is Msg 4113 at severity 16, any other name Msg 4121
+    /// at state 2, which a missing function owes to the statement's run as it
+    /// always does, answering a placeholder with the cursor on the clause's
+    /// last token (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    private static Value ParseWindowedUserCall(MultiPartName name, ParserContext context)
+    {
+        if (context.RuleVariables is not null)
+            throw SimulatedSqlException.UserFunctionNotAllowedInThisContext();
+        var placeholder = ParseDeferredCallAndDiscard(context);
+        context.MoveNextRequired();
+        WindowExpression.ParseClauseSyntax(context, partitionOnly: true);
+        if (!context.Batch.TryResolveFunction(name, out var function))
+            return context.Batch.IsSkipping ? placeholder : throw SimulatedSqlException.CannotFindUserDefinedFunction(name, state: 2);
+        throw function is ScalarFunction or ClrScalarFunction
+            ? SimulatedSqlException.UserFunctionNotValidForOver(name)
+            : SimulatedSqlException.CannotFindUserDefinedFunction(name, state: 2);
+    }
+
+    /// <summary>
+    /// Parses and discards a call's comma-separated argument list, for a
+    /// schema-qualified call that skip mode defers or a windowed one whose
+    /// arguments real never binds, and returns a placeholder NULL
     /// expression. On entry the cursor is on the token after the opening
     /// <c>(</c>; on return it sits on the closing <c>)</c>, matching
     /// <see cref="UserFunctionCall.ParseFunctionArguments"/>'s post-condition so
-    /// the outer parse loop resumes cleanly. Never runs outside skip mode — the
-    /// discarded statement is conceptually never bound.
+    /// the outer parse loop resumes cleanly.
     /// </summary>
     private static Value ParseDeferredCallAndDiscard(ParserContext context)
     {

@@ -1118,6 +1118,16 @@ partial class SimulatedSqlException
         new($"The function '{functionLowerName}' is not a valid windowing function, and cannot be used with the OVER clause.", 4113, 15, state);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 4113 at severity 16 — a user-defined scalar
+    /// function written with <c>OVER</c>, which real's grammar reads as a
+    /// user-defined aggregate's call and its binder refuses, naming the
+    /// function as written, schema included (probed 2026-10-26 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException UserFunctionNotValidForOver(MultiPartName name) =>
+        new($"The function '{name}' is not a valid windowing function, and cannot be used with the OVER clause.", 4113, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 4109 — a windowed function inside an aggregate's
     /// or another windowed function's argument.
     /// </summary>

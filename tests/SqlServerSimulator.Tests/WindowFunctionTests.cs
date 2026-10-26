@@ -1034,6 +1034,66 @@ public sealed class WindowFunctionTests
     public void Over_AfterAJsonConstructor_StillParses()
         => _ = new Simulation().AssertSqlError("select json_object('a':1) over (order by)", 102);
 
+    /// <summary>
+    /// A schema-qualified call followed by <c>OVER</c> is a user-defined
+    /// aggregate's windowed call to real's grammar, whatever the name: the
+    /// name binds ahead of anything in the call — a scalar function is Msg
+    /// 4113 at severity 16 naming it as written, any other name Msg 4121 at
+    /// state 2 (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("dbo.f(1) over ()", 4113, 1, "The function 'dbo.f' is not a valid windowing function, and cannot be used with the OVER clause.")]
+    [DataRow("DBO.F(nosuch, 2) over (partition by g)", 4113, 1, "The function 'DBO.F' is not a valid windowing function, and cannot be used with the OVER clause.")]
+    [DataRow("[dbo].[f](1) over w", 4113, 1, "The function 'dbo.f' is not a valid windowing function, and cannot be used with the OVER clause.")]
+    [DataRow("dbo.tvf() over ()", 4121, 2, "Cannot find either column \"dbo\" or the user-defined function or aggregate \"dbo.tvf\", or the name is ambiguous.")]
+    [DataRow("dbo.nosuch(1) over (w partition by nosuch)", 4121, 2, "Cannot find either column \"dbo\" or the user-defined function or aggregate \"dbo.nosuch\", or the name is ambiguous.")]
+    public void Over_AfterAUserFunction_BindsTheName(string call, int number, int state, string message)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (g int)",
+            "create function dbo.f (@x int) returns int as begin return @x end",
+            "create function dbo.tvf () returns table as return select 1 a");
+        var ex = sim.AssertSqlError($"select {call} from t", number);
+        AreEqual(message, ex.Errors[0].Message);
+        AreEqual(state, ex.Errors[0].State);
+    }
+
+    /// <summary>
+    /// The clause after a schema-qualified call takes a window name and a
+    /// <c>PARTITION BY</c> and nothing more: an <c>ORDER BY</c> is Msg 156 at
+    /// its keyword and a frame Msg 102 at its first word, ahead of the name's
+    /// own refusal (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("dbo.f(1) over (order by g)", 156)]
+    [DataRow("dbo.nosuch(1) over (order by)", 156)]
+    [DataRow("dbo.nosuch(1) over (w)", 102)]
+    [DataRow("dbo.nosuch(1) over (rows unbounded preceding)", 102)]
+    [DataRow("dbo.nosuch(1) over (partition by g rows unbounded preceding)", 102)]
+    public void Over_AfterAUserFunction_TakesOnlyAPartition(string call, int error)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (g int)", "create function dbo.f (@x int) returns int as begin return @x end");
+        _ = sim.AssertSqlError($"select {call} from t", error);
+    }
+
+    /// <summary>
+    /// A missing function's refusal waits for its statement, as one without
+    /// the <c>OVER</c> does, while an existing scalar function's stops the
+    /// batch as it compiles (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Over_AfterAUserFunction_OnlyAMissingOneWaits()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table flag (n int)", "create function dbo.f (@x int) returns int as begin return @x end");
+        _ = sim.AssertSqlError("insert flag values (1); select dbo.nosuch(1) over () from flag", 4121);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from flag"));
+        _ = sim.AssertSqlError("insert flag values (2); select dbo.f(1) over () from flag", 4113);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from flag"));
+    }
+
     [TestMethod]
     public void PartitionBySpatial_NamesItsClause()
         => new Simulation().AssertSqlError($"{EmptyTable}select rank() over (partition by g order by id) from w", 249, "The type \"geography\" is not comparable. It cannot be used in the PARTITION BY clause.");

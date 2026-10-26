@@ -935,8 +935,11 @@ internal sealed class WindowExpression : Expression
     /// a partition, the window a name refers to — doesn't (probed 2026-10-01
     /// against SQL Server 2025). A frame standing alone is the syntax error at
     /// its keyword, and so is a window name refined by nothing.
+    /// <paramref name="partitionOnly"/> reads the clause a user-defined
+    /// aggregate takes, whose <c>ORDER BY</c> is the syntax error at its
+    /// keyword and whose frame at its first word.
     /// </summary>
-    internal static void ParseClauseSyntax(ParserContext context)
+    internal static void ParseClauseSyntax(ParserContext context, bool partitionOnly = false)
     {
         var afterOver = context.GetNextRequired();
         if (afterOver is Name bareName && !IsWindowBodyKeyword(bareName))
@@ -946,7 +949,7 @@ internal sealed class WindowExpression : Expression
         var opening = context.SaveCheckpoint();
         try
         {
-            ParseClauseBodySyntax(context);
+            ParseClauseBodySyntax(context, partitionOnly);
         }
         catch (SimulatedSqlException error) when (error.Class > 15)
         {
@@ -967,7 +970,7 @@ internal sealed class WindowExpression : Expression
     }
 
     /// <summary>The body of <see cref="ParseClauseSyntax"/>, from its <c>(</c> to its <c>)</c>.</summary>
-    private static void ParseClauseBodySyntax(ParserContext context)
+    private static void ParseClauseBodySyntax(ParserContext context, bool partitionOnly)
     {
         context.MoveNextRequired();
         var refines = context.Token is Name referenceName && !IsWindowBodyKeyword(referenceName);
@@ -981,8 +984,10 @@ internal sealed class WindowExpression : Expression
             _ = ParseExpressionList(context);
             elements = true;
         }
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Order })
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Order } order)
         {
+            if (partitionOnly)
+                throw SimulatedSqlException.SyntaxErrorNearKeyword(order);
             if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             do
@@ -995,7 +1000,7 @@ internal sealed class WindowExpression : Expression
             while (context.Token is Operator { Character: ',' });
             elements = true;
         }
-        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Rows or ContextualKeyword.Range })
+        if (!partitionOnly && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Rows or ContextualKeyword.Range })
         {
             if (!elements && !refines)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
