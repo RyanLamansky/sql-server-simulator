@@ -718,6 +718,22 @@ public sealed class RefusalFidelityTests
     [TestMethod]
     [DataRow("select row_number() over (order by 'a')", 5309)]
     [DataRow("select row_number() over (order by 1)", 5308)]
+    [DataRow("select row_number() over (order by cast(null as xml))", 5309)]
     public void ConstantWindowOrderBy_IsClass16(string sql, int number)
         => AreEqual((byte)16, new Simulation().AssertSqlError(sql, number).Class);
+
+    /// <summary>
+    /// A window or WITHIN GROUP key folding to a non-NULL value of a type no
+    /// sort compares is no constant to real: it reports its type's refusal
+    /// rather than Msg 5309, as a column of that type does (probed 2026-10-26
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select row_number() over (order by cast('<a/>' as xml))", 305)]
+    [DataRow("select row_number() over (order by cast('a' as text))", 306)]
+    [DataRow("select row_number() over (order by cast('[1]' as json))", 13636)]
+    [DataRow("select string_agg('a', ',') within group (order by cast('<a/>' as xml))", 305)]
+    [DataRow("declare @t table (n varchar(10), x xml); select string_agg(n, ',') within group (order by x) from @t", 305)]
+    public void IncomparableOrderingKey_ReportsItsType(string sql, int number)
+        => new Simulation().AssertSqlError(sql, number);
 }

@@ -491,8 +491,9 @@ Detection is `Expression.IsWrittenConstant` = a parse-time mark (set by the buil
 A term whose *fold itself raises* is no constant to real: `ORDER BY 1/0`, `ORDER BY CAST('a' AS int)` and `ORDER BY POWER(CAST(2 AS int), 40)` stand as sort keys, and the error surfaces when the plan starts — see [runtime constants at plan start](#runtime-constants-at-plan-start).
 Under `DISTINCT` such a term is Msg 145 and after a set operation Msg 104, both while compiling, as for any term missing from the select list.
 `CHECKSUM(*)` / `BINARY_CHECKSUM(*)` hash the row, so they are no constant either.
+Nor is a term of a MAX type, which real doesn't fold (`ORDER BY CAST('a' AS varchar(max))` sorts by nothing), or a non-NULL value of a type no sort compares, which reports that type's refusal instead — `ORDER BY CAST('<a/>' AS xml)` is Msg 305, while `CAST(NULL AS xml)` is a constant (`ConstantFolding.FoldsToOrderByConstant`, probed 2026-10-26 against SQL Server 2025).
 
-**Divergences** on this path: where real reports every ORDER BY error it finds, the simulator raises the first, so `ORDER BY nosuch, 'x'` is Msg 408 (position 2) rather than real's leading Msg 207.
+**Divergences** on this path: where real reports every ORDER BY error it finds, the simulator raises the first, so `ORDER BY nosuch, 'x'` is Msg 408 (position 2) rather than real's leading Msg 207, and `ORDER BY CAST('<a/>' AS xml), 'x'` the Msg 408 without real's leading Msg 305 — a Msg 408 itself ends real's report, so `ORDER BY 'x', CAST('<a/>' AS xml)` is the Msg 408 alone on both.
 
 #### Inside `OVER` / `WITHIN GROUP` (Msg 5308 and 5309)
 
@@ -511,6 +512,7 @@ Real applies **no range check** against the select list: `OVER (ORDER BY 100)` o
 Deciding 5308 vs 5309 needs the folded *value*, so the gate evaluates the term at parse time; **a fold that raises is no rejection**, and in an `OVER` clause real never evaluates that key at all: `OVER (ORDER BY 1/0)`, `OVER (ORDER BY CAST('a' AS int))` and `OVER (PARTITION BY 1/0 …)` return their rows unraised (probed 2026-09-26), so the parser swaps such a key for a constant the sort reads instead.
 A `WITHIN GROUP` key orders the aggregated values and real does evaluate it — `STRING_AGG(v, ',') WITHIN GROUP (ORDER BY 1/0)` raises — so that position keeps its term.
 **A constant of a MAX type isn't folded at all**: `OVER (ORDER BY CAST('a' AS varchar(max)))`, `CAST(NULL AS nvarchar(max))` and `CAST('a' AS nvarchar(max)) + 'b'` order nothing and raise neither Msg 5309 nor, under a RANGE frame, the Msg 8728 a MAX-typed column earns (probed 2026-09-28 against SQL Server 2025), so the parser swaps such a key for the same stand-in constant.
+Nor is a non-NULL value of a type no sort compares a constant there: `OVER (ORDER BY CAST('<a/>' AS xml))` and the same `WITHIN GROUP` key are that type's refusal (Msg 305 / 306 / 13636 / 42213), as a column of the type is, while `CAST(NULL AS xml)` is Msg 5309 (probed 2026-10-26 against SQL Server 2025).
 
 **Divergences** on the window path:
 
@@ -858,6 +860,7 @@ Probe-confirmed; oracle `AggregateBindingRuleTests`.
   The empty grouping set is exempt — `GROUP BY ()`, `GROUPING SETS (())`, `GROUPING SETS ((a),())` and `GROUP BY (), a` all return rows on real, and contribute no expression for the rule to apply to.
   An *outer* column is no column of the item's own: a subquery's item naming only enclosing queries' columns (`SELECT (SELECT COUNT(*) FROM u GROUP BY t.a) FROM t`), at any depth and through `APPLY`, a CTE, an `UPDATE`'s target or a trigger's `inserted`, is Msg 164, while one local column beside it (`GROUP BY t.a + u.c`) is enough (probed 2026-10-07 against SQL Server 2025).
   A name binding nowhere reports its own Msg 207 instead, and a missing table defers the statement with the rest of its binding.
+  Real judges the items in written order, the first item's Msg 164 or type refusal being its report (`GROUP BY x, 1` over an `xml` column is Msg 305, `GROUP BY 1, x` Msg 164, probed 2026-10-26 against SQL Server 2025); the simulator's type refusal always comes first, so the second form, and `GROUP BY CAST('<a/>' AS xml)`, report Msg 305 here.
 
 Msg 144 and Msg 164 are **held rather than thrown**: real parses a batch before binding any of it, so a stray token after the clause reports Msg 102 instead (`GROUP BY 'a' 'b'` → `near 'b'`, where `GROUP BY 'a'` alone is Msg 164 — probe-confirmed).
 The held message is raised once the statement's outermost query expression has parsed; see the trailing-token section of [`grammar.md`](grammar.md#trailing-token-tightening).

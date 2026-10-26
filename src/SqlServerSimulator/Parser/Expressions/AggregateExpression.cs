@@ -611,6 +611,14 @@ internal sealed class AggregateExpression : Expression
         // SQL Server 2025: a binary in both is argument 1's Msg 8116 first).
         var resultType = Aggregators.StringAggAggregator.ResultType(operandType, batch);
         this.RejectSeparator(this.Separator!, separatorType, operandType, batch);
+        // The WITHIN GROUP keys sort the values, so a type no sort compares
+        // refuses there as an ORDER BY key does (probed 2026-10-26 against
+        // SQL Server 2025: an xml key is Msg 305).
+        foreach (var item in this.OrderBy ?? [])
+        {
+            if (item.Expr?.GetSqlType(batch, resolveColumnType) is { IsIncomparable: true } keyType)
+                throw Selection.NotComparableInClause(keyType, "ORDER BY");
+        }
         return resultType;
     }
 

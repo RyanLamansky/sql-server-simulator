@@ -308,6 +308,24 @@ internal static class ConstantFolding
     }
 
     /// <summary>
+    /// Whether real folds the query <c>ORDER BY</c> term <paramref name="term"/>
+    /// into a constant, which it refuses (Msg 408). Not every written constant
+    /// is one: a term whose fold raises stands as a sort key, the error
+    /// surfacing as the plan starts (<c>ORDER BY 1/0</c> is Msg 8134 over an
+    /// empty table, probed 2026-09-26); real folds no MAX-typed term, so
+    /// <c>ORDER BY CAST('a' AS varchar(max))</c> orders by nothing; and a
+    /// non-NULL value of a type no sort compares — <c>CAST('&lt;a/&gt;' AS
+    /// xml)</c>, a legacy LOB, <c>json</c>, <c>vector</c> — stands for the
+    /// bind's refusal of its type, Msg 305 / 306 / 13636 / 42213, where that
+    /// type's NULL is a constant (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    internal static bool FoldsToOrderByConstant(Expression term, ParserContext context) =>
+        term.IsWrittenConstant
+        && !FoldRaises(term, context)
+        && !(TryFold(term, context, out var folded)
+            && (Expressions.WindowExpression.IsMaxFormType(folded.Type) || (!folded.IsNull && folded.Type.IsIncomparable)));
+
+    /// <summary>
     /// Whether evaluating the written constant <paramref name="expression"/>
     /// raises — which real, attempting the same fold while compiling, takes
     /// as "not a constant" and leaves for the plan to raise at runtime.
@@ -423,6 +441,12 @@ internal static class ConstantFolding
         {
             return NeverEvaluatedKey();
         }
+
+        // Nor is a value of a type no sort compares a constant: the key stands
+        // for its type's refusal (Msg 305 / 306 / 13636 / 42213), which only
+        // that type's NULL escapes (probed 2026-10-26 against SQL Server 2025).
+        if (!folded.IsNull && folded.Type.IsIncomparable)
+            return term;
 
         // A NULL is never index-shaped here, matching real for a written
         // `NULL` and for `CAST(NULL AS int)`. Real does answer Msg 5308 for an

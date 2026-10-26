@@ -391,6 +391,10 @@ public class OrderByTests
     [DataRow("select v from t order by v, 'x'", 2)]
     [DataRow("select v from t union all select v from t order by 'x'", 1)]
     [DataRow("select v from t union all select v from t order by 1, 'x'", 2)]
+    [DataRow("select v from t order by cast(null as xml)", 1)]
+    [DataRow("select v from t order by cast(null as text)", 1)]
+    [DataRow("select v from t order by cast('a' as varchar(max)), 'x'", 2)]
+    [DataRow("select v from t order by 'x', cast('<a/>' as xml)", 1)]
     public void OrderBy_ConstantTerm_RaisesMsg408(string commandText, int position)
     {
         var sim = new Simulation();
@@ -434,11 +438,34 @@ public class OrderByTests
     [DataRow("select v from t order by concat('a', getdate())")]
     [DataRow("select v from t order by iif(1 = 1, v, 2)")]
     [DataRow("select v from t order by case when exists (select 1) then 1 else 2 end")]
+    // Real folds no MAX-typed term, NULL or not (probed 2026-10-26).
+    [DataRow("select v from t order by cast('a' as varchar(max))")]
+    [DataRow("select v from t order by cast(null as nvarchar(max))")]
+    [DataRow("select v from t order by cast(0x01 as varbinary(max))")]
     public void OrderBy_NonConstantTerm_Sorts(string commandText)
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table t (v int); insert t values (3),(1),(2)");
         Assert.HasCount(3, Column(sim, commandText));
+    }
+
+    /// <summary>
+    /// A non-NULL value of a type no sort compares is no constant to real: the
+    /// term reports its type's refusal rather than Msg 408 (probed 2026-10-26
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select v from t order by cast('<a/>' as xml)", 305)]
+    [DataRow("select v from t order by cast('a' as text)", 306)]
+    [DataRow("select v from t order by cast('a' as ntext)", 306)]
+    [DataRow("select v from t order by cast('[1]' as json)", 13636)]
+    [DataRow("select v from t order by cast('[1,2]' as vector(2))", 42213)]
+    [DataRow("select v from t order by v, cast('<a/>' as xml)", 305)]
+    public void OrderBy_IncomparableConstant_ReportsItsType(string commandText, int number)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (v int); insert t values (3),(1),(2)");
+        _ = sim.AssertSqlError(commandText, number);
     }
 
     /// <summary>
