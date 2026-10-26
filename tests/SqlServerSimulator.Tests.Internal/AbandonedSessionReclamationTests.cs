@@ -15,9 +15,9 @@ namespace SqlServerSimulator;
 /// </summary>
 /// <remarks>
 /// Most tests drive the sweep directly (enqueue, then drain) so they don't
-/// depend on when the GC decides to finalize; <see cref="GarbageCollected_Connection_IsEnqueuedAndReclaimed"/>
-/// is the one that goes through the real finalizer, and is what pins the claim
-/// that nothing global still holds the connection alive.
+/// depend on when the GC decides to finalize; the <c>GarbageCollected_</c>
+/// tests go through the real finalizer, and are what pin the claim that
+/// nothing global still holds the connection alive.
 /// </remarks>
 [TestClass]
 public sealed class AbandonedSessionReclamationTests
@@ -249,7 +249,7 @@ public sealed class AbandonedSessionReclamationTests
     }
 
     [TestMethod]
-    public void GarbageCollected_Connection_IsEnqueuedAndReclaimed()
+    public async Task GarbageCollected_Connection_IsEnqueuedAndReclaimed()
     {
         var simulation = new Simulation();
         using var observer = simulation.CreateDbConnection();
@@ -263,12 +263,7 @@ public sealed class AbandonedSessionReclamationTests
         // the connection any more, so the GC can finalize it. Before it, the
         // lock hold, the ##temp entry and the snapshot registration each pinned
         // it for the life of the process and this collection found nothing.
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        GC.Collect();
-
-        AreEqual(1, simulation.ReclaimAbandonedSessions());
-        IsTrue(session.Reclaimed);
+        AreEqual(1, await this.CollectUntilReclaimed(simulation, session));
         AreEqual(1, Convert.ToInt32(Scalar(observer, "SELECT v FROM dbo.t WHERE id = 1"), null));
         AreEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks WHERE resource_type <> 'DATABASE'"), null));
         AreEqual(DBNull.Value, Scalar(observer, "SELECT OBJECT_ID('tempdb..##gcleaked')"));
@@ -281,7 +276,7 @@ public sealed class AbandonedSessionReclamationTests
     /// its transaction's going with it.
     /// </summary>
     [TestMethod]
-    public void GarbageCollected_SuspendedReader_IsReclaimed()
+    public async Task GarbageCollected_SuspendedReader_IsReclaimed()
     {
         var simulation = new Simulation();
         using var observer = simulation.CreateDbConnection();
@@ -292,12 +287,7 @@ public sealed class AbandonedSessionReclamationTests
         AreEqual(20, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks WHERE resource_type = 'KEY'"), null));
         IsNull(session.CurrentExecutingThreadId);
 
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        GC.Collect();
-
-        AreEqual(1, simulation.ReclaimAbandonedSessions());
-        IsTrue(session.Reclaimed);
+        AreEqual(1, await this.CollectUntilReclaimed(simulation, session));
         AreEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks WHERE resource_type <> 'DATABASE'"), null));
     }
 
@@ -307,7 +297,7 @@ public sealed class AbandonedSessionReclamationTests
     /// a session whose client went away, where a <c>Close</c> runs it.
     /// </summary>
     [TestMethod]
-    public void GarbageCollected_SuspendedReader_RunsNothingMoreOfItsBatch()
+    public async Task GarbageCollected_SuspendedReader_RunsNothingMoreOfItsBatch()
     {
         var simulation = new Simulation();
         using var observer = simulation.CreateDbConnection();
@@ -315,12 +305,7 @@ public sealed class AbandonedSessionReclamationTests
         Exec(observer, "CREATE TABLE dbo.big (k int PRIMARY KEY, v char(2000) NOT NULL); INSERT dbo.big SELECT value, 'x' FROM generate_series(1, 200); CREATE TABLE dbo.l (v int)");
 
         var session = LeakSuspendedReader(simulation, "SELECT * FROM dbo.big; INSERT dbo.l VALUES (1)");
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        GC.Collect();
-
-        AreEqual(1, simulation.ReclaimAbandonedSessions());
-        IsTrue(session.Reclaimed);
+        AreEqual(1, await this.CollectUntilReclaimed(simulation, session));
         AreEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM dbo.l"), null));
         AreEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks WHERE resource_type <> 'DATABASE'"), null));
     }
@@ -343,19 +328,34 @@ public sealed class AbandonedSessionReclamationTests
         var session = LeakTriggerReader(simulation);
         AreNotEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks WHERE resource_type = 'KEY' AND request_mode = 'X'"), null));
 
+        _ = await this.CollectUntilReclaimed(simulation, session);
+        AreEqual(1, Convert.ToInt32(Scalar(observer, "SELECT v FROM dbo.t WHERE id = 1"), null));
+        AreEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks WHERE resource_type <> 'DATABASE'"), null));
+    }
+
+    /// <summary>
+    /// Collects and sweeps until <paramref name="session"/> is reclaimed,
+    /// asserting it is within the deadline, and answers how many sessions the
+    /// sweeps reclaimed. A connection's finalizer runs at the collector's
+    /// discretion, so one collection and sweep can come back before it has
+    /// queued the session — more so while the statement it abandoned still
+    /// winds down on a thread of its own.
+    /// </summary>
+    private async Task<int> CollectUntilReclaimed(Simulation simulation, SessionToken session)
+    {
+        var reclaimed = 0;
         var deadline = Environment.TickCount64 + 10_000;
         while (!session.Reclaimed && Environment.TickCount64 < deadline)
         {
             GC.Collect();
             GC.WaitForPendingFinalizers();
             GC.Collect();
-            _ = simulation.ReclaimAbandonedSessions();
+            reclaimed += simulation.ReclaimAbandonedSessions();
             if (!session.Reclaimed)
                 await Task.Delay(50, this.TestContext.CancellationToken);
         }
         IsTrue(session.Reclaimed);
-        AreEqual(1, Convert.ToInt32(Scalar(observer, "SELECT v FROM dbo.t WHERE id = 1"), null));
-        AreEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks WHERE resource_type <> 'DATABASE'"), null));
+        return reclaimed;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
