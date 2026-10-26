@@ -465,11 +465,12 @@ partial class Simulation
         if (valueTuples is not null)
         {
             var plan = new InsertPlan(destinationTable, destinationView, joinViewPlan, destinationColumns, output, top, valueTuples, targetName: destinationName);
-            NoteDmlPlan(
+            return NoteDmlPlan(
                 context,
                 plan,
-                admitted: AdmitsDmlPlan(context.Batch, destinationTable, destinationView, output));
-            return RunInsertValues(context, plan);
+                admitted: AdmitsDmlPlan(context.Batch, destinationTable, destinationView, output))
+                ? RunInsertValues(context, plan)
+                : UnranNestedWrite;
         }
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.Default })
@@ -484,8 +485,9 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextOptional();
             var defaultsPlan = new InsertSourcePlan(new InsertPlan(destinationTable, destinationView, joinViewPlan, [], output, top, valueTuples: null, targetName: destinationName), source: null);
-            NoteDmlPlan(context, defaultsPlan, admitted: AdmitsDmlPlan(context.Batch, destinationTable, destinationView, output));
-            return InsertSourceRows(context, defaultsPlan, sourceStamps: null);
+            return NoteDmlPlan(context, defaultsPlan, admitted: AdmitsDmlPlan(context.Batch, destinationTable, destinationView, output))
+                ? InsertSourceRows(context, defaultsPlan, sourceStamps: null)
+                : UnranNestedWrite;
         }
 
         // A row's default drawing from a sequence its select list drew from
@@ -508,8 +510,9 @@ partial class Simulation
                     : ParseSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable);
                 NoteViewInsertSource(context, bindErrors, sourceStart, destinationView, destinationName);
                 var selectPlan = new InsertSourcePlan(new InsertPlan(destinationTable, destinationView, joinViewPlan, destinationColumns, output, top, valueTuples: null, targetName: destinationName), selection);
-                NoteDmlPlan(context, selectPlan, admitted: AdmitsDmlPlan(context.Batch, destinationTable, destinationView, output));
-                return InsertSourceRows(context, selectPlan, sourceStamps);
+                return NoteDmlPlan(context, selectPlan, admitted: AdmitsDmlPlan(context.Batch, destinationTable, destinationView, output))
+                    ? InsertSourceRows(context, selectPlan, sourceStamps)
+                    : UnranNestedWrite;
             }
 
             if (context.Token is not ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute } execute)
@@ -1955,6 +1958,8 @@ partial class Simulation
         QueryPosition position = QueryPosition.InsertSource)
     {
         var selection = Selection.Parse(context, new QueryScope(position, null));
+        if (context.Batch.CurrentStatement.ReadsNestedWrite && destinationTable is not null)
+            RefuseNestedWriteTarget(context.Batch, destinationTable);
 
         PermissionEnforcement.CheckWhileParsing(context.Batch, new CompiledPermissionCheck(selection));
 

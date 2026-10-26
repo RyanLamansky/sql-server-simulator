@@ -333,6 +333,28 @@ internal sealed class StatementContext
     public (SqlType[] Schema, string[] Names)? ClientOutputShape;
 
     /// <summary>
+    /// Whether the statement reads a DML statement nested as its
+    /// <c>INSERT … SELECT</c> source (composable DML), which keeps it out of
+    /// the plan caches.
+    /// </summary>
+    public bool ReadsNestedWrite;
+
+    /// <summary>
+    /// Set while the statement's nested write runs, which writes its rows
+    /// before its source hands them on rather than as a client reads them.
+    /// </summary>
+    public bool RunsNestedWrite;
+
+    /// <summary>
+    /// The rows the statement's nested write sent through its <c>OUTPUT</c>,
+    /// once it has run — once per execution of the statement, however often
+    /// its source is read — and the identity values it left, which the outer
+    /// <c>INSERT</c>'s own don't replace (probed 2026-10-26 against SQL Server
+    /// 2025); null until it runs.
+    /// </summary>
+    public (List<byte[]> Rows, Int128? LastIdentity, Int128? ScopeIdentity)? NestedWriteRun;
+
+    /// <summary>
     /// Set once a DML statement writing as it sends has sent its result set
     /// (<c>Simulation.SendAsWritten</c>), which carries the statement's count
     /// whatever ends it: a TRY frame catching its error adds no count of its
@@ -636,6 +658,8 @@ internal sealed class StatementContext
         this.CountsNoRows = false;
         this.WritesText = false;
         this.ClientOutputShape = null;
+        this.ReadsNestedWrite = false;
+        this.NestedWriteRun = null;
         this.SentWrittenRows = false;
         this.CutShortWrite = null;
         this.SendsRows = false;

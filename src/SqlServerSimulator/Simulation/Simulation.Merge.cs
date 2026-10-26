@@ -291,9 +291,10 @@ partial class Simulation
         // Required trailing ; — end-of-batch included, which real refuses as
         // it compiles, so a MERGE without one never runs (probed 2026-09-26).
         // A stray word where the ; belongs is a syntax error at the word
-        // (probed 2026-09-30).
+        // (probed 2026-09-30). One nested as an INSERT's source ends at its
+        // parenthesis (probed 2026-10-26).
         Selection.ParseOptionalDmlOptionClause(context);
-        if (context.Token is not Operator { Character: ';' })
+        if (context.Token is not Operator { Character: ';' } && !(context.NestedWrite is not null && context.Token is Operator { Character: ')' }))
             throw EndsStatement(context.Token) ? SimulatedSqlException.MergeMustBeTerminated() : SimulatedSqlException.SyntaxErrorNear(context);
 
         // A source's columns no clause reads go uncomputed, and one only a
@@ -322,15 +323,16 @@ partial class Simulation
         // Which INSTEAD OF triggers take the actions is settled above from
         // their enabled state, which no schema change records, so a target
         // carrying any keeps its statements parsing.
-        NoteDmlPlan(
+        return NoteDmlPlan(
             context,
             plan,
             admitted: replayableSource
                 && viewRowsTarget is null
                 && !Array.Exists(TriggersAttachedTo(context.Batch, destinationTable), trigger => trigger.Timing == TriggerTiming.InsteadOf)
                 && !whenClauses.Exists(clause => clause.Assignments?.Exists(assignment => assignment.Expr is JsonModify) == true)
-                && AdmitsDmlPlan(context.Batch, destinationTable, sourceView, output));
-        return RunMerge(context, plan);
+                && AdmitsDmlPlan(context.Batch, destinationTable, sourceView, output))
+            ? RunMerge(context, plan)
+            : UnranNestedWrite;
     }
 
     /// <summary>

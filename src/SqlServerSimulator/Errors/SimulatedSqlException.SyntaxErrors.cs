@@ -588,6 +588,85 @@ partial class SimulatedSqlException
         new("A nested INSERT, UPDATE, DELETE, or MERGE statement is not allowed in a SELECT statement that is not the immediate source of rows for an INSERT statement.", 10729, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 10731: a DML statement nested inside a DML
+    /// statement that is itself nested as an <c>INSERT</c>'s source (probed
+    /// 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NestedDmlInsideNestedDml() =>
+        new("A nested INSERT, UPDATE, DELETE, or MERGE statement is not allowed inside another nested INSERT, UPDATE, DELETE, or MERGE statement.", 10731, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 10727: the <c>FROM</c> clause reading a nested
+    /// DML statement joins or applies another source, a comma included
+    /// (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NestedDmlBesideJoin() =>
+        new("A nested INSERT, UPDATE, DELETE, or MERGE statement is not allowed on either side of a JOIN or APPLY operator.", 10727, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 10732: the query reading a nested DML statement
+    /// is a branch of a set operation (probed 2026-10-26 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException NestedDmlBesideSetOperator() =>
+        new("A nested INSERT, UPDATE, DELETE, or MERGE statement is not allowed on either side of a UNION, INTERSECT, or EXCEPT operator.", 10732, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 10717: the query reading a nested DML statement
+    /// carries a clause it may not — <paramref name="clause"/> is <c>TOP or
+    /// OFFSET</c>, <c>GROUP BY</c>, <c>HAVING</c> or <c>ORDER BY</c> (probed
+    /// 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NestedDmlClauseNotAllowed(string clause) =>
+        new($"The {clause} clause is not allowed when the FROM clause contains a nested INSERT, UPDATE, DELETE, or MERGE statement.", 10717, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 10722: the query reading a nested DML statement
+    /// is <c>DISTINCT</c> (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NestedDmlDistinct() =>
+        new("The DISTINCT keyword is not allowed when the FROM clause contains a nested INSERT, UPDATE, DELETE, or MERGE statement.", 10722, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 5322: the query reading a nested DML statement
+    /// aggregates (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NestedDmlAggregate() =>
+        new("An aggregate function is not allowed in the SELECT clause when the FROM clause contains a nested INSERT, UPDATE, DELETE, or MERGE statement.", 5322, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 5323: the query reading a nested DML statement
+    /// holds a subquery in its <paramref name="clause"/> clause, <c>SELECT</c>
+    /// or <c>WHERE</c> (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NestedDmlSubquery(string clause) =>
+        new($"Subqueries are not allowed in the {clause} clause when the FROM clause contains a nested INSERT, UPDATE, DELETE, or MERGE statement.", 5323, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 5329: the query reading a nested DML statement
+    /// computes a windowed function (probed 2026-10-26 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException NestedDmlWindowFunction() =>
+        new("Windowed functions are not allowed in the SELECT clause when the FROM clause contains a nested INSERT, UPDATE, DELETE, or MERGE statement.", 5329, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 355: the target of an <c>INSERT</c> reading a
+    /// nested DML statement has an enabled trigger (probed 2026-10-26 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NestedWriteTargetHasTriggers(string table) =>
+        new($"The target table '{table}' of the INSERT statement cannot have any enabled triggers when the FROM clause contains a nested INSERT, UPDATE, DELETE, or MERGE statement.", 355, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 356: the target of an <c>INSERT</c> reading a
+    /// nested DML statement references or is referenced by a foreign key
+    /// (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NestedWriteTargetInForeignKey(string table) =>
+        new($"The target table '{table}' of the INSERT statement cannot be on either side of a (primary key, foreign key) relationship when the FROM clause contains a nested INSERT, UPDATE, DELETE, or MERGE statement.", 356, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 8672: a <c>MERGE</c> statement's
     /// <c>WHEN MATCHED ... THEN UPDATE</c> branch attempted to update the
     /// same target row from multiple source rows. SQL Server's <c>DELETE</c>

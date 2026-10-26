@@ -134,11 +134,12 @@ partial class Simulation
             LoadPredicateStatistics(context.Batch, table, where);
 
         var plan = new DeletePlan(targetName, table, where, positionedCursor, output, top, serializableHint, sourceView);
-        NoteDmlPlan(
+        return NoteDmlPlan(
             context,
             plan,
-            admitted: positionedCursor is null && AdmitsDmlPlan(context.Batch, table, sourceView, output));
-        return RunDelete(context, plan);
+            admitted: positionedCursor is null && AdmitsDmlPlan(context.Batch, table, sourceView, output))
+            ? RunDelete(context, plan)
+            : UnranNestedWrite;
     }
 
     /// <summary>
@@ -536,8 +537,9 @@ partial class Simulation
         Selection.NoteMutationDemand(sources, joins, targetIndex, reads);
 
         var plan = new JoinedDeletePlan(table, sources, joins, targetIndex, where, output, top);
-        NoteDmlPlan(context, plan, admitted: AdmitsDmlPlan(context.Batch, table, view: null, output));
-        return RunJoinedDelete(context, plan);
+        return NoteDmlPlan(context, plan, admitted: AdmitsDmlPlan(context.Batch, table, view: null, output))
+            ? RunJoinedDelete(context, plan)
+            : UnranNestedWrite;
     }
 
     /// <summary>

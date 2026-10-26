@@ -1140,11 +1140,6 @@ public sealed class MergeTests
     public void NestedDml_OutsideAnInsertSource_IsRefused(string statement, int number)
         => new Simulation().AssertSqlError($"create table t (id int primary key, v int); create table h (a int, id int); {statement}", number);
 
-    [TestMethod]
-    public void NestedDml_AsAnInsertSource_IsNotModeled()
-        => Contains("Composable DML", Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
-            "create table t (id int primary key, v int); create table h (a int, id int); insert h select * from (delete t output deleted.id, deleted.v) x;")).Message);
-
     /// <summary>Each action's trigger reads the whole MERGE's row count in @@ROWCOUNT, AFTER and INSTEAD OF alike (probed 2026-10-19 against SQL Server 2025).</summary>
     [TestMethod]
     [DataRow("after")]

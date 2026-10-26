@@ -374,6 +374,14 @@ Empty source → silent success, rows-affected 0.
 Mid-source constraint violations trigger statement-level rollback.
 EF doesn't emit `INSERT…SELECT` from SaveChanges; reachable from raw SQL and bulk-copy patterns.
 
+## Composable DML
+
+An `INSERT … SELECT` may read the rows a nested `INSERT`, `UPDATE`, `DELETE` or `MERGE` sends through its `OUTPUT` — `INSERT a SELECT x.k, x.act FROM (MERGE … OUTPUT inserted.k, $action) x (k, act) WHERE …` — as real's does (probed 2026-10-26 against SQL Server 2025).
+The nested statement parses where it stands in the `FROM` clause but stops at its split point (`ParserContext.NestedWrite`, which `NoteDmlPlan` fills), and its plan runs once per execution of the outer statement, when the outer `INSERT` reads its source (`Simulation.RunNestedWrite`): its writes go into the outer statement's undo log, so a failing outer `INSERT` rolls them back, and its rows are written before they go on rather than as a client reads them.
+Parsing it there rather than running it is what keeps the speculative re-reads a statement's parse takes — the `FROM` pre-pass, a binder report's second read — from running it twice.
+`@@ROWCOUNT` counts the outer `INSERT`'s rows, and `@@IDENTITY` / `SCOPE_IDENTITY()` report the nested statement's identity values, never the outer `INSERT`'s; a statement holding a nested write stays out of the plan caches.
+Real refuses the rest while compiling: a nested statement with no `OUTPUT` sending its rows on (an `OUTPUT … INTO` counts as none, Msg 10716), one anywhere but an `INSERT`'s immediate source (Msg 10729) or inside another (Msg 10731), and in the query reading it another source (Msg 10727), `DISTINCT` (Msg 10722), `TOP` / `OFFSET` / `GROUP BY` / `HAVING` / `ORDER BY` (Msg 10717), an aggregate (Msg 5322), a windowed function (Msg 5329), a subquery in the select list or `WHERE` (Msg 5323) and a set operator (Msg 10732); a target with an enabled trigger is Msg 355 and one on either side of a foreign key Msg 356.
+
 ## INSERT … EXEC
 `INSERT [INTO] target [(cols)] EXEC[UTE] <proc | (dynamic-sql)> [args]` appends the result sets the executed code yields into the target — the third source-kind arm alongside `VALUES` / `SELECT` (`Simulation.Insert.cs:ExecuteExecSource`).
 SSMS's server-properties query relies on it (`insert #SVer exec master.dbo.xp_msver`).
@@ -589,5 +597,3 @@ EF Core's `ExecuteUpdate` / `ExecuteDelete` for batched single-statement DML emi
 - MERGE into a view ships for a single-base updatable view (`MergeViewTests`), its `OUTPUT` reading the view's columns, for any view whose INSTEAD OF triggers take its actions, and for a join view whose actions each land in one base table — see [`programmable.md`](programmable.md#dml-through-a-join-view).
 - Multi-statement WHEN-clause bodies (real SQL Server only allows the one DML action per WHEN — same restriction here).
 - **An `OUTPUT` naming a source column in a MERGE whose only clauses are `WHEN NOT MATCHED BY SOURCE`** is Msg 4104 on real, which binds no source there; here it reads NULL (probed 2026-09-28).
-- **Composable DML** — a nested `INSERT` / `UPDATE` / `DELETE` / `MERGE` with `OUTPUT` as an `INSERT … SELECT`'s source (`INSERT a SELECT … FROM (MERGE … OUTPUT …) x`), with real's Msg 355 for a triggered target and Msg 8156 for a duplicate column name — raises `NotSupportedException` here (probed 2026-10-01 against SQL Server 2025).
-  A nested statement anywhere else is real's Msg 10729, and one without `OUTPUT` Msg 10716 ahead of it, both refused while the batch parses (probed 2026-10-19).

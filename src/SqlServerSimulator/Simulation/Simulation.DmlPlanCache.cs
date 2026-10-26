@@ -364,11 +364,21 @@ partial class Simulation
     /// either way the lock log disarms here, so the execution half's row locks
     /// — which it takes again every run — stay out.
     /// </summary>
-    private static void NoteDmlPlan(ParserContext context, DmlStatementPlan plan, bool admitted)
+    /// <returns>
+    /// Whether the statement runs as it parses: not one nested as an
+    /// <c>INSERT … SELECT</c>'s source, whose plan its source runs as the
+    /// outer statement reads it (<see cref="ParserContext.NestedWrite"/>).
+    /// </returns>
+    private static bool NoteDmlPlan(ParserContext context, DmlStatementPlan plan, bool admitted)
     {
+        if (context.NestedWrite is { Plan: null } nested)
+        {
+            nested.Plan = plan;
+            return false;
+        }
         var batch = context.Batch;
         if (batch.DmlPlanRecording is not { } recording)
-            return;
+            return true;
         batch.DmlPlanRecording = null;
         var locks = batch.ReplayLockLog;
         batch.ReplayLockLog = null;
@@ -387,7 +397,11 @@ partial class Simulation
                 throw new RunParseDeclinedException();
             scope.Leave(batch);
         }
+        return true;
     }
+
+    /// <summary>What a nested write's parse answers once its split point has taken its plan.</summary>
+    private static readonly SimulatedNonQuery UnranNestedWrite = new(0);
 
 #if DEBUG
     /// <summary>Ends <paramref name="recording"/>'s principal-read watch, if it still runs.</summary>

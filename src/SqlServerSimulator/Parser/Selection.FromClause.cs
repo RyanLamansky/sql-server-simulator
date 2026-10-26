@@ -2089,9 +2089,11 @@ internal sealed partial class Selection
             case ReservedKeyword { Keyword: Keyword.Values }:
                 return ParseValuesDerivedTable(context, context.OuterTypeResolver ?? scope.OuterTypeResolver);
             case ReservedKeyword { Keyword: Keyword.Insert or Keyword.Update or Keyword.Delete or Keyword.Merge }:
-                throw context.Batch.CurrentStatement.RemoteWrite is not null
-                    ? SimulatedSqlException.RemoteDmlTargetWithOutput()
-                    : NestedDmlRefusal(context, scope);
+                if (context.Batch.CurrentStatement.RemoteWrite is not null)
+                    throw SimulatedSqlException.RemoteDmlTargetWithOutput();
+                if (NestedDmlRefusal(context, scope) is { } refusal)
+                    throw refusal;
+                return NestedWriteSource(context);
         }
 
         if (afterOpenParen is not (ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' }))
@@ -2397,13 +2399,16 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// A DML statement written as a derived table, read to its closing
-    /// parenthesis: real refuses one without an <c>OUTPUT</c> clause (Msg
-    /// 10716), then one anywhere but the <c>FROM</c> of an <c>INSERT</c>'s
-    /// immediate source (Msg 10729), where it is composable DML, not built.
+    /// What real refuses of a DML statement written as a derived table, with
+    /// the cursor on its keyword, where it leaves it: one without an
+    /// <c>OUTPUT</c> clause sending its rows on, an <c>OUTPUT … INTO</c>
+    /// counting as none (Msg 10716), then one anywhere but the <c>FROM</c> of
+    /// an <c>INSERT</c>'s immediate source (Msg 10729) or inside another such
+    /// statement (Msg 10731); null for composable DML.
     /// </summary>
-    private static Exception NestedDmlRefusal(ParserContext context, QueryScope scope)
+    private static SimulatedSqlException? NestedDmlRefusal(ParserContext context, QueryScope scope)
     {
+        var start = context.SaveCheckpoint();
         var depth = 1;
         var output = false;
         while (depth > 0 && context.MoveNext())
@@ -2419,13 +2424,42 @@ internal sealed partial class Selection
                 case UnquotedString { ContextualKeyword: ContextualKeyword.Output } when depth == 1:
                     output = true;
                     break;
+                case ReservedKeyword { Keyword: Keyword.Into } when depth == 1 && output:
+                    output = false;
+                    break;
             }
         }
         if (!output)
             return SimulatedSqlException.NestedDmlWithoutOutput();
-        return scope.Position == QueryPosition.InsertSource
-            ? new NotSupportedException("Composable DML — a nested INSERT, UPDATE, DELETE or MERGE with OUTPUT as an INSERT … SELECT's source — is not modeled.")
-            : SimulatedSqlException.NestedDmlOutsideInsertSource();
+        if (scope.Position != QueryPosition.InsertSource)
+            return SimulatedSqlException.NestedDmlOutsideInsertSource();
+        if (context.NestedWrite is not null)
+            return SimulatedSqlException.NestedDmlInsideNestedDml();
+        context.RestoreCheckpoint(start);
+        return null;
+    }
+
+    /// <summary>
+    /// A DML statement nested as an <c>INSERT … SELECT</c>'s source
+    /// (composable DML), with the cursor on its keyword: parsed now, run
+    /// when the outer statement reads the rows it sends through its
+    /// <c>OUTPUT</c>, which become the derived table's (see
+    /// <see cref="Simulation.RunNestedWrite"/>).
+    /// </summary>
+    private static FromSource NestedWriteSource(ParserContext context)
+    {
+        var statement = context.Batch.CurrentStatement;
+        var (doneKind, doneCount, outputShape) = (statement.DoneKind, statement.DoneCount, statement.ClientOutputShape);
+        statement.ClientOutputShape = null;
+        var plan = Simulation.ParseNestedWrite(context);
+        var (schema, names) = statement.ClientOutputShape ?? throw SimulatedSqlException.NestedDmlWithoutOutput();
+        (statement.DoneKind, statement.DoneCount, statement.ClientOutputShape) = (doneKind, doneCount, outputShape);
+        statement.ReadsNestedWrite = true;
+        var rows = new Selection(schema, names, hasOrderBy: false, hasTopOrOffsetOrFetch: false,
+            rowSource: (batch, _) => plan is null ? [] : Simulation.RunNestedWrite(batch, plan));
+        var source = DerivedTableSource(context, rows, derivedFlattens: false);
+        source.ReadsNestedWrite = true;
+        return source;
     }
 
     /// <summary>

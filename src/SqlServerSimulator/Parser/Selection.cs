@@ -2654,6 +2654,8 @@ internal sealed partial class Selection
                     context.Batch.BindErrors?.EnterClause(context.Token, BindClause.From);
                     List<FromSource> sources;
                     List<JoinSpec> joins;
+                    var subqueriesAtFrom = context.SubqueriesParsed;
+                    var whereSubqueries = false;
                     if (preParsedSources is not null)
                     {
                         // Sources came from the pre-pass; resume from the token
@@ -2662,6 +2664,7 @@ internal sealed partial class Selection
                         joins = preParsedJoins!;
                         context.RestoreCheckpoint(afterSources);
                         ConsumeWhereOrderByWithOuterScope(context, fromClause, [.. sources], [.. joins], allowOrderBy, scope);
+                        whereSubqueries = context.SubqueriesParsed > subqueriesAtFrom;
                     }
                     else
                     {
@@ -2681,6 +2684,8 @@ internal sealed partial class Selection
                         }
                     }
 
+                    if (sources.Exists(static source => source.ReadsNestedWrite))
+                        RefuseBesideNestedWrite(context, sources, distinct, topExpression, fromClause, aggregates, windows, subqueriesAtFrom > subqueriesBeforeProjection, whereSubqueries);
                     if (topExpression is not null && fromClause.OffsetExpression is not null)
                         throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
                     RejectSequenceDrawUnderOrderBy(context, fromClause, expressions, sequenceDrawsBefore, unwindowedSequenceDrawsBefore);
@@ -3245,6 +3250,47 @@ internal sealed partial class Selection
         using var scopeJoins = ParserScope.Enter(ref context.ScopeJoins, joins);
         using var bindingMemo = SourceBindingMemo.Enter(sources);
         ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope, sources);
+    }
+
+    /// <summary>
+    /// Refuses what real refuses of a query reading a nested write
+    /// (composable DML) as it parses (probed 2026-10-26 against SQL Server
+    /// 2025): another source beside it, <c>DISTINCT</c>, <c>TOP</c> or
+    /// <c>OFFSET</c>, an aggregate, a windowed function, a subquery in the
+    /// select list or the <c>WHERE</c> clause, <c>GROUP BY</c>,
+    /// <c>HAVING</c>, <c>ORDER BY</c>, and a set operator after it.
+    /// </summary>
+    private static void RefuseBesideNestedWrite(
+        ParserContext context,
+        List<FromSource> sources,
+        bool distinct,
+        Expression? top,
+        FromClause fromClause,
+        List<AggregateExpression> aggregates,
+        List<WindowExpression> windows,
+        bool selectSubqueries,
+        bool whereSubqueries)
+    {
+        if (sources.Count > 1)
+            throw SimulatedSqlException.NestedDmlBesideJoin();
+        if (distinct)
+            throw SimulatedSqlException.NestedDmlDistinct();
+        if (top is not null || fromClause.OffsetExpression is not null)
+            throw SimulatedSqlException.NestedDmlClauseNotAllowed("TOP or OFFSET");
+        if (aggregates.Count > 0)
+            throw SimulatedSqlException.NestedDmlAggregate();
+        if (windows.Count > 0)
+            throw SimulatedSqlException.NestedDmlWindowFunction();
+        if (selectSubqueries || whereSubqueries)
+            throw SimulatedSqlException.NestedDmlSubquery(selectSubqueries ? "SELECT" : "WHERE");
+        if (fromClause.AllGroupingExpressions.Count > 0 || fromClause.GroupByAll)
+            throw SimulatedSqlException.NestedDmlClauseNotAllowed("GROUP BY");
+        if (fromClause.Having is not null)
+            throw SimulatedSqlException.NestedDmlClauseNotAllowed("HAVING");
+        if (fromClause.OrderBy.Count > 0)
+            throw SimulatedSqlException.NestedDmlClauseNotAllowed("ORDER BY");
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Union or Keyword.Except or Keyword.Intersect })
+            throw SimulatedSqlException.NestedDmlBesideSetOperator();
     }
 
     /// <summary>

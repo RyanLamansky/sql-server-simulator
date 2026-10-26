@@ -729,6 +729,14 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public (int Pending, int Definitions) NamedWindowScope;
 
     /// <summary>
+    /// Set while a DML statement nested as an <c>INSERT … SELECT</c>'s source
+    /// parses (composable DML): its split point takes the statement's plan
+    /// here and the statement returns unrun, for its source to run as the
+    /// outer statement reads it (see <c>Simulation.ParseNestedWrite</c>).
+    /// </summary>
+    public NestedWriteCapture? NestedWrite;
+
+    /// <summary>
     /// When false, registering a <see cref="Expressions.WindowExpression"/>
     /// raises Msg 4108 (`"Windowed functions can only appear in the SELECT
     /// or ORDER BY clauses."`). Default true; the Selection parser flips it

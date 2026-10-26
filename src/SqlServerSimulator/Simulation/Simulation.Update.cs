@@ -702,13 +702,14 @@ partial class Simulation
             LoadPredicateStatistics(context.Batch, table, where);
 
         var plan = new UpdatePlan(targetName, table, rawAssignments, assignments, setMasks, where, positionedCursor, output, top, serializableHint, sourceView);
-        NoteDmlPlan(
+        return NoteDmlPlan(
             context,
             plan,
             admitted: positionedCursor is null
                 && !rawAssignments.Exists(assignment => assignment.ColumnName is null || assignment.Expr is AssignmentExpression or XmlModify or JsonModify or ClrTypeMutation)
-                && AdmitsDmlPlan(context.Batch, table, sourceView, output));
-        return RunUpdate(context, plan);
+                && AdmitsDmlPlan(context.Batch, table, sourceView, output))
+            ? RunUpdate(context, plan)
+            : UnranNestedWrite;
     }
 
     /// <summary>
@@ -1238,12 +1239,13 @@ partial class Simulation
         Selection.NoteMutationDemand(sources, joins, targetIndex, reads);
 
         var plan = new JoinedUpdatePlan(table, assignments, setMasks, sources, joins, targetIndex, where, output, top);
-        NoteDmlPlan(
+        return NoteDmlPlan(
             context,
             plan,
             admitted: !rawAssignments.Exists(assignment => assignment.ColumnName is null || assignment.Expr is AssignmentExpression or XmlModify or JsonModify or ClrTypeMutation)
-                && AdmitsDmlPlan(context.Batch, table, view: null, output));
-        return RunJoinedUpdate(context, plan);
+                && AdmitsDmlPlan(context.Batch, table, view: null, output))
+            ? RunJoinedUpdate(context, plan)
+            : UnranNestedWrite;
     }
 
     /// <summary>

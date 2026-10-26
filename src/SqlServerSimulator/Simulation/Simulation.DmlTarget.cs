@@ -560,7 +560,8 @@ partial class Simulation
     /// enabled state, which no schema change records.
     /// </summary>
     private static bool AdmitsDmlPlan(BatchContext batch, HeapTable table, View? view, OutputProjection? output) =>
-        (view is null || (view is { UnstoredBody: null, PartitionedBase: null } && ReferenceEquals(view.BaseTable, table) && !ViewChainHasTrigger(batch, view)))
+        !batch.CurrentStatement.ReadsNestedWrite
+        && (view is null || (view is { UnstoredBody: null, PartitionedBase: null } && ReferenceEquals(view.BaseTable, table) && !ViewChainHasTrigger(batch, view)))
         && output is not { TargetBlocksDmlPlan: true }
         && !BlocksDmlPlan(batch, table, clientOutput: output is { HasTarget: false });
 

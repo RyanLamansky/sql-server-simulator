@@ -97,6 +97,13 @@ internal sealed class FromSource(
     /// </summary>
     public bool ConstructsRows;
 
+    /// <summary>
+    /// The rows a DML statement nested as an <c>INSERT … SELECT</c>'s source
+    /// sends through its <c>OUTPUT</c> (composable DML), which limits the
+    /// query reading them (<c>Selection.RefuseBesideNestedWrite</c>).
+    /// </summary>
+    public bool ReadsNestedWrite;
+
     /// <summary>A table value constructor whose cells read an enclosing or <c>APPLY</c>-left row.</summary>
     public bool ConstructorReadsOuterRow;
 

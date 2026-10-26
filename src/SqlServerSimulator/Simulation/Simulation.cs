@@ -1762,6 +1762,7 @@ public sealed partial class Simulation
     /// </summary>
     private static bool WritesAsItSends(BatchContext batch, OutputProjection? output) =>
         output is { HasTarget: false }
+        && !batch.CurrentStatement.RunsNestedWrite
         && StreamsWrittenRows(batch)
         && batch.CurrentStatement.RemoteWrite is null;
 
@@ -3719,6 +3720,7 @@ public sealed partial class Simulation
 
             case ReservedKeyword { Keyword: Keyword.Insert }:
                 outcome = this.RunDmlStatement(context, ParseInsert);
+                RestoreNestedWriteIdentity(batch);
                 if (!batch.IsSkipping)
                 {
                     connection.LastStatementRowCount = outcome.RecordsAffected;

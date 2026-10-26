@@ -142,9 +142,13 @@ partial class Simulation
     /// <summary>
     /// A token that neither ends a statement nor starts the next is Msg 102
     /// (156 for a reserved word); otherwise the statement was read to its end.
+    /// A statement nested as an <c>INSERT</c>'s source ends at its closing
+    /// parenthesis, which its enclosing query reads.
     /// </summary>
     private static void RejectStrayToken(ParserContext context)
     {
+        if (context.NestedWrite is not null && context.Token is Operator { Character: ')' })
+            return;
         if (!EndsStatement(context.Token))
             throw SimulatedSqlException.SyntaxErrorNear(context);
         if (context.Token is Operator { Character: '(' } paren)
@@ -359,7 +363,7 @@ partial class Simulation
         if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             SkipOutputClause(context);
         SkipOptionClause(context);
-        if (context.Token is not Operator { Character: ';' })
+        if (context.Token is not Operator { Character: ';' } && !(context.NestedWrite is not null && context.Token is Operator { Character: ')' }))
             throw EndsStatement(context.Token) ? SimulatedSqlException.MergeMustBeTerminated() : SimulatedSqlException.SyntaxErrorNear(context);
         context.Batch.CurrentStatement.DeferredReadToEnd = true;
     }
