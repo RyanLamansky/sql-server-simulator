@@ -120,6 +120,13 @@ public sealed class ErrorFidelityTests
     [DataRow("select distinct x from t2", 421)]
     [DataRow("select a from t2 where a in (select a, d from t2)", 116)]
     [DataRow("select * from (select a, a from t2) x", 8156)]
+    [DataRow("select row_number() over (order by 'x') from t2", 5309)]
+    [DataRow("select row_number() over (order by 1) from t2", 5308)]
+    [DataRow("select first_value(a) over (order by a rows between 1 following and 1 preceding) from t2", 4193)]
+    [DataRow("select sum(a) over (order by a range between 1 preceding and current row) from t2", 4194)]
+    [DataRow("select ntile(a) over (order by a) from t2", 4195)]
+    [DataRow("select string_agg(ci, ci) from t2", 8733)]
+    [DataRow("create table t3 (id int identity, a int); insert t3 values (1, 1)", 8101)]
     public void DeferredCompileError_EndsTheBatchPastItsOwnTry(string statement, int number)
     {
         var simulation = new Simulation();

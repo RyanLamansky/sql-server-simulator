@@ -3389,10 +3389,12 @@ public sealed partial class Simulation
             || ex.Number is 13900 or 13901 or 13902 or 13903 or 13905 or 13906 or 13920 or 13940 or 13948 or 13949 or 13950 or 13952 or 13953 or 13954 or 13957 or 13961 or 13962 or 13964 or 13965
             // The binder's type checks beside Msg 206 and 8117 above, its
             // refusals of an operand it can't compare, sort or deduplicate, a
-            // subquery's second select item (Msg 116) and a derived table's
-            // repeated column name (Msg 8156) (probed 2026-10-26 against SQL
-            // Server 2025).
-            || ex.Number is 116 or 257 or 305 or 402 or 421 or 468 or 8116 or 8156);
+            // subquery's second select item (Msg 116), a derived table's
+            // repeated column name (Msg 8156), a window's constant key and
+            // invalid frame (Msg 4193, 4194, 4195, 5308, 5309), STRING_AGG's
+            // separator (Msg 8733) and an identity value without a column list
+            // (Msg 8101) (probed 2026-10-26 against SQL Server 2025).
+            || ex.Number is 116 or 257 or 305 or 402 or 421 or 468 or 4193 or 4194 or 4195 or 5308 or 5309 or 8101 or 8116 or 8156 or 8733);
 
     /// <summary>
     /// Whether a TRY frame catches <paramref name="ex"/> where it is raised:
