@@ -82,7 +82,7 @@ internal sealed partial class Selection
         // refusal comes whatever the rows (probed 2026-10-20 against SQL
         // Server 2025).
         if (pattern.Length > 0)
-            Storage.MsxmlPatternCheck.Check(pattern, document.Namespaces);
+            Storage.MsxmlPatternCheck.Check(columns is null ? EdgeTablePattern(pattern) : pattern, document.Namespaces);
         foreach (var column in columns ?? [])
         {
             if (column.MetaProperty is null && column.ColumnPattern is { } colPattern)
@@ -106,6 +106,22 @@ internal sealed partial class Selection
             }
             yield return BuildOpenXmlRow(document, rowNode, columns!, schema, flagBits);
         }
+    }
+
+    /// <summary>
+    /// The pattern the edge table hands MSXML for row pattern
+    /// <paramref name="pattern"/>: the steps reaching every node beneath a
+    /// row, appended after a <c>/</c> unless the pattern ends in one, which is
+    /// the pattern a refusal quotes, so a predicate left open swallows them —
+    /// <c>/a[</c> reads as <c>/a[/descendant-or-self::node()|/a[//@*|…</c>,
+    /// <c>Expected token ']' found 'eof'</c> — while <c>/a/</c> reads and
+    /// <c>/a//</c> stops at <c>/a///@*</c> (probed 2026-10-26 against SQL
+    /// Server 2025).
+    /// </summary>
+    private static string EdgeTablePattern(string pattern)
+    {
+        var path = pattern.EndsWith('/') ? pattern : pattern + "/";
+        return $"{path}descendant-or-self::node()|{path}/@*|{path}/@*/child::text()";
     }
 
     /// <summary>

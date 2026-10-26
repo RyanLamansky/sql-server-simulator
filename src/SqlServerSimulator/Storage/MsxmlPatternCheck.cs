@@ -131,11 +131,15 @@ internal sealed class MsxmlPatternCheck
             this.RelativePath();
             return true;
         }
+        var primary = this.Current;
         var nodes = this.Primary();
         while (this.IsSymbol("["))
             this.Predicate();
         if (this.IsSymbol("/") || this.IsSymbol("//"))
         {
+            // A step can only follow nodes: `1/x` is refused at its separator.
+            if (!nodes)
+                throw SimulatedSqlException.XmlPatternInvalid("Expression does not return a DOM node.", this.Marked(primary.Start, this.Current.End));
             this.Advance();
             this.RelativePath();
             return true;

@@ -680,11 +680,24 @@ public sealed class OpenXmlTests
     [DataRow("'-/r'", "Expected token 'eof' found '-'.\r\n\n-->-<--/r")]
     [DataRow("'/r/o', 1) with (id int, c varchar(5) 'count(l)'", "Expression does not return a DOM node.\r\n\n-->count(l)<--")]
     [DataRow("'/r/zz', 1) with (id int, c varchar(5) '@id + 1'", "Expected token 'eof' found '+'.\r\n\n@id -->+<-- 1")]
+    [DataRow("'/r/o[1/c]'", "Expression does not return a DOM node.\r\n\n/r/o[-->1/<--c]")]
     public void Patterns_RefuseAsMsxmlReadsThem(string arguments, string message)
     {
         var withClause = arguments.Contains("with", StringComparison.Ordinal) ? "" : ", 1) with (id int";
         new Simulation().AssertSqlError($"declare @h int; exec sp_xml_preparedocument @h output, '<r><o id=\"1\"/></r>'; select * from openxml(@h, {arguments}{withClause})", 6603, "XML parsing error: " + message);
     }
+
+    /// <summary>
+    /// The edge table hands MSXML its row pattern followed by the steps
+    /// reaching every node beneath a row, which is what a refusal quotes, so
+    /// a predicate left open swallows them (probed 2026-10-26).
+    /// </summary>
+    [TestMethod]
+    [DataRow("/r/o[", "Expected token ']' found 'eof'.\r\n\n/r/o[/descendant-or-self::node()|/r/o[//@*|/r/o[//@*/child::text()<--")]
+    [DataRow("/r/o[1", "Expression does not return a DOM node.\r\n\n/r/o[-->1/<--descendant-or-self::node()|/r/o[1//@*|/r/o[1//@*/child::text()")]
+    [DataRow("/r//", "Expected token 'eof' found '/'.\r\n\n/r//descendant-or-self::node()|/r//-->/<--@*|/r///@*/child::text()")]
+    public void EdgeTablePatterns_RefuseAsMsxmlReadsThem(string pattern, string message)
+        => new Simulation().AssertSqlError($"declare @h int; exec sp_xml_preparedocument @h output, '<r><o id=\"1\"/></r>'; select * from openxml(@h, '{pattern}')", 6603, "XML parsing error: " + message);
 
     /// <summary>A path ending in <c>//</c> reads the nodes beneath and including its last step (probed 2026-10-20).</summary>
     [TestMethod]
