@@ -19,6 +19,21 @@ public sealed class ServiceBrokerDdlTests
         return string.Join(";", rows);
     }
 
+    /// <summary>
+    /// A system queue the database's first broker read brings into being
+    /// answers the object scalars by its id, though an earlier one read the
+    /// database's objects before it existed (probed 2026-10-26 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SystemQueue_AnswersObjectPropertyOnceItsBrokerExists()
+    {
+        var simulation = new Simulation();
+        AreEqual(DBNull.Value, simulation.ExecuteScalar("select objectproperty(1, 'IsTable')"));
+        AreEqual("1,1,1", simulation.ExecuteScalar(
+            "select string_agg(cast(isnull(objectproperty(object_id, 'IsQueue'), -1) as varchar(5)), ',') from sys.objects where type = 'SQ'"));
+    }
+
     [TestMethod]
     public void EveryDatabase_ShipsTheSystemObjects()
     {

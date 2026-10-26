@@ -4,8 +4,8 @@ using SqlServerSimulator.Parser.Expressions;
 namespace SqlServerSimulator.Schemas;
 
 /// <summary>
-/// A database's object ids — its schema objects, its Service Broker system
-/// queues, its table types and its constraints, the last by name too — indexed
+/// A database's object ids — its schema objects, its table types and its
+/// constraints, the last by name too — indexed
 /// for the object scalars (<c>OBJECTPROPERTY</c>, <c>OBJECT_ID</c>,
 /// <c>OBJECT_NAME</c>, <c>COLUMNPROPERTY</c> …), which otherwise walk every
 /// object of every schema per call, so a catalog query calling one per row was
@@ -18,7 +18,6 @@ namespace SqlServerSimulator.Schemas;
 internal sealed class ObjectIdIndex
 {
     private readonly Dictionary<int, (SchemaObject Object, Schema Schema)> schemaObjects = [];
-    private readonly Dictionary<int, SchemaObject> systemQueues = [];
     private readonly Dictionary<int, (TableType Type, Schema Schema)> tableTypes = [];
     private readonly Dictionary<int, ConstraintLookup.ConstraintReference> constraints = [];
     private readonly Dictionary<Schema, Dictionary<string, ConstraintLookup.ConstraintReference>> constraintNames = [];
@@ -35,11 +34,6 @@ internal sealed class ObjectIdIndex
             foreach (var constraint in ConstraintLookup.NamedIn(schema))
                 _ = named.TryAdd(constraint.Name, constraint);
             this.constraintNames[schema] = named;
-        }
-        if (database.ServiceBrokerIfUsed is { } broker)
-        {
-            foreach (var queue in broker.SystemQueues)
-                _ = this.systemQueues.TryAdd(queue.ObjectId, queue);
         }
         foreach (var constraint in ConstraintLookup.All(database))
             _ = this.constraints.TryAdd(constraint.ObjectId, constraint);
@@ -61,12 +55,18 @@ internal sealed class ObjectIdIndex
             : null;
     }
 
-    /// <summary>The schema object or Service Broker system queue with object id <paramref name="id"/>: <see cref="ObjectProperty.FindObject(Database, int)"/>, through the index where one serves.</summary>
+    /// <summary>
+    /// The schema object or Service Broker system queue with object id
+    /// <paramref name="id"/>: <see cref="ObjectProperty.FindObject(Database, int)"/>,
+    /// through the index where one serves. The three system queues are read
+    /// live, since the broker that holds them comes into being on its first
+    /// use, which no invalidation marks.
+    /// </summary>
     public static SchemaObject? FindObject(BatchContext batch, Database database, int id)
     {
         if (For(batch, database) is not { } index)
             return ObjectProperty.FindObject(database, id);
-        var found = index.schemaObjects.TryGetValue(id, out var entry) ? entry.Object : index.systemQueues.GetValueOrDefault(id);
+        var found = index.schemaObjects.TryGetValue(id, out var entry) ? entry.Object : SystemQueue(database, id);
 #if DEBUG
         if (!ReferenceEquals(found, ObjectProperty.FindObject(database, id)))
             throw Stale(database);
@@ -134,6 +134,16 @@ internal sealed class ObjectIdIndex
             throw Stale(schema.Database);
 #endif
         return found;
+    }
+
+    private static ServiceQueue? SystemQueue(Database database, int id)
+    {
+        foreach (var queue in database.ServiceBrokerIfUsed?.SystemQueues ?? [])
+        {
+            if (queue.ObjectId == id)
+                return queue;
+        }
+        return null;
     }
 
     private static bool WalkSchemaObjects(Database database, int id, out SchemaObject obj, out Schema schema)
