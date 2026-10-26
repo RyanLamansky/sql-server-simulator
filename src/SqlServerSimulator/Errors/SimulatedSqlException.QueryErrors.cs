@@ -264,13 +264,15 @@ partial class SimulatedSqlException
     /// Mimics SQL Server's Msg 4123 — an <c>OVER (w …)</c> refinement supplied
     /// an element (<c>PARTITION BY</c> / <c>ORDER BY</c> / frame) the named
     /// window it refines already carries. Wording verbatim, including the
-    /// two-word "can not". Probe-confirmed against SQL Server 2025
-    /// (2026-08-01): Class 15, and the state tracks the *referenced* window
-    /// rather than the conflicting element — State 2 when that window carries
-    /// a frame, State 3 when it doesn't.
+    /// two-word "can not". Class 15, and the state tracks the windowed
+    /// function rather than the conflicting element or either window — State
+    /// 3 for a ranking function (<c>ROW_NUMBER</c>, <c>RANK</c>,
+    /// <c>DENSE_RANK</c>, <c>NTILE</c>) and the <c>PERCENT_RANK</c> /
+    /// <c>CUME_DIST</c> pair, State 2 for every other (probed 2026-10-26
+    /// against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException WindowElementAlreadySpecified(bool referencedWindowHasFrame) =>
-        new("Window element in OVER clause can not also be specified in WINDOW clause.", 4123, 15, referencedWindowHasFrame ? (byte)2 : (byte)3);
+    internal static SimulatedSqlException WindowElementAlreadySpecified(bool ranking) =>
+        new("Window element in OVER clause can not also be specified in WINDOW clause.", 4123, 15, ranking ? (byte)3 : (byte)2);
 
     /// <summary>
     /// Mimics SQL Server's Msg 4106 — a frame-rejecting window function

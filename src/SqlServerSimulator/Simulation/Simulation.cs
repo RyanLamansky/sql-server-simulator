@@ -3149,14 +3149,17 @@ public sealed partial class Simulation
     /// raises a few severity-15 errors too — Msg 107, 130, 145, 147, 164 and
     /// 4108 wait with their statement, where a parse-phase one such as Msg 174
     /// or 321 doesn't (probed 2026-10-01 against SQL Server 2025), as do the
-    /// refusals of a member its receiver's type lacks, Msg 227, 258 and 8173
-    /// (probed 2026-10-26) — and so does an <c>INSERT … SELECT *</c>'s count
-    /// against its column list, Msg 120 / 121, over a table the batch creates
-    /// (probed 2026-10-09).
+    /// refusals of a member its receiver's type lacks, Msg 227, 258 and 8173,
+    /// and a window's — a nested windowed function, NTILE's count, an undefined
+    /// or cyclic named window, an element both a refinement and its window
+    /// carry, Msg 4109, 4116, 5362, 5365 and 4123 (probed 2026-10-26) — and so
+    /// does an <c>INSERT … SELECT *</c>'s count against its column list, Msg
+    /// 120 / 121, over a table the batch creates (probed 2026-10-09).
     /// </summary>
     private static bool DefersWithItsStatement(BatchContext batch, SimulatedSqlException ex)
         => IsDeferrableNameResolutionError(ex)
-            || (batch.CurrentStatement.BindsDeferredSource && (IsBinderError(ex) || ex.Number is 107 or 120 or 121 or 130 or 145 or 147 or 157 or 164 or 227 or 258 or 4108 or 8173));
+            || (batch.CurrentStatement.BindsDeferredSource
+                && (IsBinderError(ex) || ex.Number is 107 or 120 or 121 or 130 or 145 or 147 or 157 or 164 or 227 or 258 or 4108 or 4109 or 4116 or 4123 or 5362 or 5365 or 8173));
 
     /// <summary>
     /// True when <paramref name="ex"/> is a statement-terminating error that

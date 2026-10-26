@@ -410,7 +410,7 @@ A reference may add the elements the window it names doesn't already carry, and 
 The reference must lead the body — `OVER (PARTITION BY g w)` is Msg 102.
 
 - Each of PARTITION BY / ORDER BY / frame may be supplied by exactly one side; an overlap → **Msg 4123** ("Window element in OVER clause can not also be specified in WINDOW clause.").
-  Real's state tracks the *referenced* window rather than the conflicting element — State 2 when that window carries a frame, State 3 when it doesn't (probe-confirmed).
+  Real's state tracks the windowed function rather than the conflicting element or either window — State 3 for the ranking family (`ROW_NUMBER` / `RANK` / `DENSE_RANK` / `NTILE`) and the distribution pair (`PERCENT_RANK` / `CUME_DIST`), State 2 for every other (probed 2026-10-26 against SQL Server 2025).
 - In the OVER position at least one refining element is required: `OVER (w)` is **Msg 102**, even though the bare `WINDOW w2 AS (w)` definition form is legal.
 - A definition may carry a frame with no ORDER BY of its own — the reference that resolves it can supply the ordering — so the frame-needs-ordering gate waits until the merge.
 - Definitions referencing each other in a loop → **Msg 5365**.

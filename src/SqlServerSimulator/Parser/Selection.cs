@@ -3443,7 +3443,7 @@ internal sealed partial class Selection
         var (pendingStart, definitionStart) = context.NamedWindowScope;
         var pending = context.PendingNamedWindows;
         for (var i = pendingStart; i < pending.Count; i++)
-            pending[i].Window.ApplyNamedWindow(MergeWindowReference(context, pending[i].Reference, []));
+            pending[i].Window.ApplyNamedWindow(MergeWindowReference(context, pending[i].Reference, [], pending[i].Window.Kind));
         if (pending.Count > pendingStart)
             pending.RemoveRange(pendingStart, pending.Count - pendingStart);
         var definitions = context.NamedWindowDefinitions;
@@ -3485,7 +3485,8 @@ internal sealed partial class Selection
     private static Expressions.WindowExpression.WindowBody MergeWindowReference(
         ParserContext context,
         Expressions.WindowExpression.WindowBody refinement,
-        List<string> visiting)
+        List<string> visiting,
+        Expressions.WindowKind function)
     {
         if (refinement.BaseWindowName is not { } name)
             return refinement;
@@ -3506,7 +3507,7 @@ internal sealed partial class Selection
             throw SimulatedSqlException.WindowIsUndefined(name, 7);
 
         visiting.Add(name);
-        var resolved = MergeWindowReference(context, definition, visiting);
+        var resolved = MergeWindowReference(context, definition, visiting, function);
         visiting.RemoveAt(visiting.Count - 1);
 
         // Each element may be supplied by exactly one side; real reports the
@@ -3514,7 +3515,9 @@ internal sealed partial class Selection
         return (refinement.PartitionBy.Length > 0 && resolved.PartitionBy.Length > 0)
             || (refinement.OrderBy.Length > 0 && resolved.OrderBy.Length > 0)
             || (refinement.Frame is not null && resolved.Frame is not null)
-            ? throw SimulatedSqlException.WindowElementAlreadySpecified(resolved.Frame is not null)
+            ? throw SimulatedSqlException.WindowElementAlreadySpecified(
+                ranking: function is Expressions.WindowKind.RowNumber or Expressions.WindowKind.Rank or Expressions.WindowKind.DenseRank
+                    or Expressions.WindowKind.NTile or Expressions.WindowKind.PercentRank or Expressions.WindowKind.CumeDist)
             : new Expressions.WindowExpression.WindowBody(
                 refinement.PartitionBy.Length > 0 ? refinement.PartitionBy : resolved.PartitionBy,
                 refinement.OrderBy.Length > 0 ? refinement.OrderBy : resolved.OrderBy,

@@ -744,19 +744,30 @@ public sealed class WindowFunctionTests
 
     /// <summary>
     /// Msg 4123: an element written in the refinement that the referenced
-    /// window already carries. The state tracks the referenced window rather
-    /// than the conflicting element — 2 when it carries a frame, 3 otherwise.
+    /// window already carries. The state tracks the function rather than the
+    /// conflicting element or either window — 3 for the ranking functions and
+    /// the PERCENT_RANK / CUME_DIST pair, 2 for the rest (probed 2026-10-26
+    /// against SQL Server 2025).
     /// </summary>
     [TestMethod]
-    [DataRow("select row_number() over (w order by id desc) from nw window w as (partition by g order by id)")]
-    [DataRow("select row_number() over (w partition by g) from nw window w as (partition by g order by id)")]
-    [DataRow("select sum(v) over (w rows unbounded preceding) from nw window w as (order by id rows unbounded preceding)")]
-    [DataRow("select sum(v) over (w order by id) from nw window w as (partition by g order by id rows unbounded preceding)")]
-    public void NamedWindow_ConflictingRefinement_RaisesMsg4123(string commandText)
-        => new Simulation().AssertSqlError(
-            NamedWindowFixture + commandText,
-            4123,
-            "Window element in OVER clause can not also be specified in WINDOW clause.");
+    [DataRow("select row_number() over (w order by id desc) from nw window w as (partition by g order by id)", 3)]
+    [DataRow("select row_number() over (w partition by g) from nw window w as (partition by g order by id)", 3)]
+    [DataRow("select row_number() over (w partition by g) from nw window w as (partition by g)", 3)]
+    [DataRow("select dense_rank() over (w order by id desc) from nw window w as (partition by g order by id)", 3)]
+    [DataRow("select cume_dist() over (w order by id desc) from nw window w as (partition by g order by id)", 3)]
+    [DataRow("select ntile(2) over (w partition by g) from nw window w as (partition by g order by id)", 3)]
+    [DataRow("select sum(v) over (w rows unbounded preceding) from nw window w as (order by id rows unbounded preceding)", 2)]
+    [DataRow("select sum(v) over (w order by id) from nw window w as (partition by g order by id rows unbounded preceding)", 2)]
+    [DataRow("select sum(v) over (w order by id desc) from nw window w as (partition by g order by id)", 2)]
+    [DataRow("select sum(v) over (w partition by g) from nw window w as (partition by g)", 2)]
+    [DataRow("select lag(v) over (w order by id desc) from nw window w as (partition by g order by id)", 2)]
+    [DataRow("select first_value(v) over (w order by id desc) from nw window w as (partition by g order by id)", 2)]
+    public void NamedWindow_ConflictingRefinement_RaisesMsg4123(string commandText, int state)
+    {
+        var ex = new Simulation().AssertSqlError(NamedWindowFixture + commandText, 4123);
+        AreEqual("Window element in OVER clause can not also be specified in WINDOW clause.", ex.Errors[0].Message);
+        AreEqual(state, ex.Errors[0].State);
+    }
 
     /// <summary>A refinement supplies only what the referenced window lacks, so a non-overlapping element merges.</summary>
     [TestMethod]
@@ -906,6 +917,28 @@ public sealed class WindowFunctionTests
     [DataRow("percentile_cont(0.5) within group (order by s) over ()", 402)]
     public void WindowArgument_RefusedWhileCompiling(string window, int error)
         => _ = new Simulation().AssertSqlError($"{EmptyTable}select {window} from w", error);
+
+    /// <summary>
+    /// A window's refusal in a statement reading a table its batch creates
+    /// waits for the statement, as its binder errors do, so what the batch ran
+    /// ahead of it stands; over a table that already exists it stops the batch
+    /// as it compiles (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("ntile(0) over (order by id)", 4116)]
+    [DataRow("sum(row_number() over (order by id)) over ()", 4109)]
+    [DataRow("sum(v) over nope", 5362)]
+    [DataRow("sum(v) over w1 from t window w1 as (w2), w2 as (w1) --", 5365)]
+    [DataRow("sum(v) over (w1 order by v) from t window w1 as (order by id) --", 4123)]
+    public void WindowRefusal_WaitsForAStatementOverANewTable(string window, int error)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table flag (step int)");
+        _ = sim.AssertSqlError($"create table t (id int, v int); insert flag values (1); select {window} from t", error);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from flag"));
+        _ = sim.AssertSqlError($"insert flag values (2); select {window} from t", error);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from flag"));
+    }
 
     [TestMethod]
     public void PartitionBySpatial_NamesItsClause()

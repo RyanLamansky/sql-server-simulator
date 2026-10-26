@@ -1731,6 +1731,7 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
         public readonly int UnwindowedSequenceDrawsParsed = context.UnwindowedSequenceDrawsParsed;
         public readonly int StatementVariablesStart = context.StatementVariablesStart;
         public readonly int PendingNamedWindows = context.PendingNamedWindows.Count;
+        public readonly int NamedWindowDefinitions = context.NamedWindowDefinitions.Count;
         public readonly bool ReadsRowLocators = context.ReadsRowLocators;
         public readonly bool ForBrowseSeen = context.ForBrowseSeen;
         public readonly bool SimpleParameterizationBlocked = context.SimpleParameterizationBlocked;
@@ -1767,6 +1768,7 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
         this.UnwindowedSequenceDrawsParsed = state.UnwindowedSequenceDrawsParsed;
         this.StatementVariablesStart = state.StatementVariablesStart;
         this.PendingNamedWindows.RemoveRange(state.PendingNamedWindows, this.PendingNamedWindows.Count - state.PendingNamedWindows);
+        this.NamedWindowDefinitions.RemoveRange(state.NamedWindowDefinitions, this.NamedWindowDefinitions.Count - state.NamedWindowDefinitions);
         this.ReadsRowLocators = state.ReadsRowLocators;
         this.ForBrowseSeen = state.ForBrowseSeen;
         this.SimpleParameterizationBlocked = state.SimpleParameterizationBlocked;
