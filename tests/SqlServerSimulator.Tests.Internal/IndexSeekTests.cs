@@ -840,7 +840,8 @@ public sealed class IndexSeekTests
     /// stay residual. Reading it as an enclosing-scope escape would seek
     /// <c>s1</c> on the <em>outer</em> row's <c>k</c> — a real value, so the
     /// wrong rows rather than a declined probe — and the query would answer
-    /// nothing.
+    /// nothing. The read narrows by the outer row's <c>tag</c> alone, through
+    /// the statement's partition of <c>s1</c>'s unindexed column.
     /// </summary>
     [TestMethod]
     public void ShadowedSiblingColumn_BindsToTheInnerPlan()
@@ -851,7 +852,7 @@ public sealed class IndexSeekTests
               and exists (select 1 from s1 join s2 on s1.tag = s2.tag
                           where s1.k = s2.k and s1.tag = drv.id * 100)
             """);
-        Contains("Scan(s1)", trace);
+        Contains("PartitionLookup(s1)", trace);
         DoesNotContain("Seek(s1)", trace);
         HasCount(1, rows);
         AreEqual(1, rows[0]);

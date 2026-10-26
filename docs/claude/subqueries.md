@@ -47,6 +47,16 @@ A correlation reading a unique column gains nothing: every row is a new key, fil
 A quantified comparison's ordering operators answer a replayed result from its bounds — its least and greatest value and whether one is NULL, settled once for each result — rather than comparing the row with each value: `WHERE a.x >= ALL (SELECT b.x FROM t b WHERE b.g = a.g)` over 64,000 rows in 10 groups took 5.2 s and takes 0.6 s, and 1.3 s on real (2026-10-25, Release).
 Its equality operators compare the row with each value (see the backlog).
 
+### An unindexed correlation reads its table once
+
+A per-row plan whose base-table source no index can seek, but whose WHERE pins one of its columns to a value fixed for the execution — `b.g = a.g` over an unindexed `g` — reads that table once per statement, bucketed by the column, and each execution takes its key's bucket as the rows its scan would have yielded (`Selection.TryReadCorrelatedPartition`, keyed on `StatementContext.CorrelatedScanPartitions`).
+The partition is built from the scan's own row stream, so its locks, snapshot, row-level security, `STATISTICS IO` and index usage are the scan's, charged once; every conjunct stays in the residual WHERE.
+It takes one equality of one value, whose bucket keeps the scan's order, which a body without ORDER BY reads (a `FOR XML PATH('')` concatenation, a bare `TOP 1`), and declines for a column whose values could fail converting to the probe's type, a locking or fencing plan, and a probe the seek itself declines (NULL, a collation conflict).
+A probe reading the outer row builds the partition on its first execution; one fixed for the statement waits for a second, and a write to the table between two executions sends the next to the scan, so a statement writing the table as it reads reads its rows as the writes leave them.
+An ascending ORDER BY the clustered key delivers would walk the whole order per outer row instead (`TryApplyOrderedScan`), so a correlated read pinning no prefix gives the walk up for the partition and a sort, which meets ties in the walk's order.
+Real reads such a table once too, into a hash or a spool its plan probes per outer row (probed 2026-10-26 against SQL Server 2025: `STATISTICS IO` reports two scans of the table for a correlated count grouped over it, the outer query's and the subquery's, and a 500-scan worktable beside them for the `FOR XML PATH` form).
+Measured 2026-10-26 (Release) over 20,000 rows in 500 groups: the grouped `FOR XML PATH` concatenation took 1.35 s and takes 0.17 s, against real's 58 ms; a correlated `COUNT(*)` per group 1.41 s and 0.12 s, against 20 ms; with the subquery ordered by the clustered key 1.85 s and 0.19 s, against 116 ms.
+
 ## An equi-correlated body switches to a hash semi / anti-join
 
 A correlated `EXISTS` / `NOT EXISTS` / `[NOT] IN (SELECT …)` re-executes its inner plan per outer row.

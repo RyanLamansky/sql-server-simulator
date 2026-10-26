@@ -57,6 +57,15 @@ internal sealed class StatementContext
     public Dictionary<BooleanExpression, Selection.MaterializedEqualityIndex>? MaterializedEqualityIndexes;
 
     /// <summary>
+    /// Per base-table source a correlated plan scans once per outer row, its
+    /// rows bucketed by a column its equality conjunct pins
+    /// (<c>Selection.TryReadCorrelatedPartition</c>). Cleared with
+    /// <see cref="SubqueryResults"/>, as the statement is the scope over which
+    /// the rows it read stand.
+    /// </summary>
+    public Dictionary<FromSource, Selection.CorrelatedScanPartition>? CorrelatedScanPartitions;
+
+    /// <summary>
     /// The values this statement has drawn, in draw order, from each sequence
     /// its <c>NEXT VALUE FOR … OVER (ORDER BY …)</c> references read: the row
     /// ranked k takes the k-th, so the draws follow the <c>OVER</c> ordering
@@ -755,6 +764,7 @@ internal sealed class StatementContext
         this.StatementScopedValues = null;
         this.SubqueryResults = null;
         this.MaterializedEqualityIndexes = null;
+        this.CorrelatedScanPartitions = null;
         this.OrderedSequenceDraws = null;
         this.AutoOpenedKeys = null;
         this.RowAddresses = null;

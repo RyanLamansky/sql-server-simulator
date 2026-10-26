@@ -349,8 +349,136 @@ internal sealed partial class Selection
 
         if (qualifier is not null)
             return QualifiedScan(table, plan, batch, scanFences, qualifier);
+        // A join probing its inner per outer row (shape given) hashes it instead.
+        if (outerResolver is not null && shape is null && !scanFences && keyFence is null
+            && plan is { RowMode: null, SerializableRangeMode: null, Pages: null, WriteTargetAddresses: null }
+            && TryReadCorrelatedPartition(source, table, batch, outerResolver, equalities) is { } partitioned)
+        {
+            IndexSeekDiagnostics.Sink?.Add($"PartitionLookup({table.Name})");
+            return new SeekOutcome(partitioned, seeks: false);
+        }
         IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
         return default;
+    }
+
+    /// <summary>
+    /// The rows of <paramref name="source"/>'s scan a correlated plan reads
+    /// once per outer row that an equality pinning one of its columns to a
+    /// value fixed for the execution can match, read from a partition of the
+    /// scan's rows by that column (<see cref="CorrelatedScanPartition"/>),
+    /// where each execution scanned the whole table for them; null, for the
+    /// execution to scan, the first time a statement reads the source this
+    /// way with a probe fixed for the statement, after a write to its table
+    /// since the last, and wherever the partition can't stand for the scan.
+    /// Real reads such a table once too, into a hash or spool its plan probes
+    /// per outer row (probed 2026-10-26 against SQL Server 2025:
+    /// <c>STATISTICS IO</c> scans the table twice for a correlated aggregate
+    /// grouped over it, once for the outer query).
+    /// </summary>
+    /// <remarks>
+    /// The partition is built from the scan's own rows — its locks, snapshot,
+    /// row-level security and <c>STATISTICS IO</c> — by the first execution
+    /// whose probe reads the outer row, else by a second execution no write to
+    /// the table has come between, and every conjunct stays in the residual
+    /// WHERE. One equality of one value keeps a bucket's rows in the scan's
+    /// order, which a query without ORDER BY reads, and a column whose every
+    /// value converts to the probes' type without error keys every row the
+    /// equality could match; a row outside the bucket is one the equality
+    /// rejects, which the residual WHERE asks of it as an equality seek leaves
+    /// it unasked.
+    /// </remarks>
+    private static List<byte[]>? TryReadCorrelatedPartition(
+        FromSource source, HeapTable table, BatchContext batch, Func<MultiPartName, SqlValue> outerResolver, Dictionary<int, Expression[]> equalities)
+    {
+        var ordinal = -1;
+        Expression[]? valueSides = null;
+        foreach (var (column, sides) in equalities)
+        {
+            if (sides.Length == 1)
+            {
+                (ordinal, valueSides) = (column, sides);
+                break;
+            }
+        }
+        if (valueSides is null)
+            return null;
+        var generation = Volatile.Read(ref table.Heap.MutationGeneration);
+        var partitions = batch.CurrentStatement.CorrelatedScanPartitions ??= new(ReferenceEqualityComparer.Instance);
+        (SqlType Common, SqlValue[] Probes)? component;
+        if (partitions.TryGetValue(source, out var partition) && partition.Ordinal == ordinal)
+        {
+            component = EvaluateProbeComponent(source, ordinal, valueSides, batch, outerResolver);
+        }
+        else
+        {
+            partitions[source] = partition = new CorrelatedScanPartition(ordinal, generation);
+            // A probe reading the outer row is asked once per outer row, which
+            // the partition serves from the first; one fixed for the statement
+            // waits for a second execution to show the plan runs again.
+            component = EvaluateProbeComponentReadingOuter(source, ordinal, valueSides, batch, outerResolver, out var readsOuter);
+            if (!readsOuter)
+                return null;
+        }
+        if (component is not var (common, probes) || !ConvertsWithoutError(source.StoredSchema[ordinal].Type, common))
+            return null;
+        if (partition.Buckets is null || partition.Generation != generation || !SameKeyType(partition.Common!, common))
+        {
+            if (partition.Generation != generation)
+            {
+                (partition.Generation, partition.Buckets) = (generation, null);
+                return null;
+            }
+            var buckets = new Dictionary<SqlValueKey, List<byte[]>>();
+            foreach (var bytes in source.UnchargedRowsFor(batch))
+            {
+                var value = RowDecoder.DecodeColumn(source.StoredSchema, source.StoredLayout(), bytes, ordinal, source.LobStore);
+                if (!value.IsNull)
+                    (System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(buckets, new SqlValueKey([value.CoerceTo(common)]), out _) ??= []).Add(bytes);
+            }
+            (partition.Buckets, partition.Common) = (buckets, common);
+        }
+        return partition.Buckets.TryGetValue(new SqlValueKey([probes[0]]), out var bucket) ? bucket : [];
+    }
+
+    /// <summary>
+    /// <see cref="EvaluateProbeComponent"/>, noting in
+    /// <paramref name="readsOuter"/> whether the probe read the outer row.
+    /// </summary>
+    private static (SqlType Common, SqlValue[] Probes)? EvaluateProbeComponentReadingOuter(
+        FromSource source, int ordinal, Expression[] valueSides, BatchContext batch, Func<MultiPartName, SqlValue> outerResolver, out bool readsOuter)
+    {
+        var consulted = false;
+        var component = EvaluateProbeComponent(source, ordinal, valueSides, batch, name =>
+        {
+            consulted = true;
+            return outerResolver(name);
+        });
+        readsOuter = consulted;
+        return component;
+    }
+
+    /// <summary>
+    /// Whether values converted to <paramref name="a"/> and to <paramref name="b"/>
+    /// key alike: one type, as its name and collation spell it, which a
+    /// promotion can hand back as a new instance at every call.
+    /// </summary>
+    private static bool SameKeyType(SqlType a, SqlType b) =>
+        ReferenceEquals(a, b)
+        || (a.GetType() == b.GetType() && a.ToString() == b.ToString() && a.Collation?.Name == b.Collation?.Name);
+
+    /// <summary>
+    /// One base-table source's scan rows as <see cref="TryReadCorrelatedPartition"/>
+    /// keeps them for a statement: bucketed by the column at storage ordinal
+    /// <see cref="Ordinal"/>, each value converted to <see cref="Common"/>,
+    /// as of the table's <see cref="Generation"/>; no buckets until an
+    /// execution builds them.
+    /// </summary>
+    internal sealed class CorrelatedScanPartition(int ordinal, long generation)
+    {
+        public readonly int Ordinal = ordinal;
+        public long Generation = generation;
+        public Dictionary<SqlValueKey, List<byte[]>>? Buckets;
+        public SqlType? Common;
     }
 
     /// <summary>
@@ -1655,6 +1783,15 @@ internal sealed partial class Selection
         // seek); keys before indexes.
         if (!TryFindOrderedSeekPrefix(table, pins, [.. effective], out var fullPrefix, out var pinnedLength, out var continuedByKey))
             return false;
+        // A correlated read pinning no prefix would walk the whole order once
+        // per outer row; its pin on an unindexed column reads a partition of
+        // the scan's rows instead (TryReadCorrelatedPartition), which the sort
+        // orders as the walk would — ascending, ties falling in the scan's order.
+        if (pinnedLength == 0 && pins.Count != 0 && outerResolver is not null && !descending
+            && plan is { RowMode: null, SerializableRangeMode: null, Pages: null, WriteTargetAddresses: null })
+        {
+            return false;
+        }
         // A heap's index continued by a unique key reads a cache of its own,
         // so the index's own seeks keep listing a group by row address; the
         // usage counters see the index the prefix seeks.

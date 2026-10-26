@@ -299,8 +299,15 @@ internal sealed class FromSource(
     {
         if (this.LateralPlan is null)
             NoteRead(this.BackingTable, this.SeekOrdinals, this.Seeks, this.SeekIsEquality, batch);
-        return this.Rows is PerExecutionRows perExecution ? perExecution.For(batch) : this.Rows;
+        return this.UnchargedRowsFor(batch);
     }
+
+    /// <summary>
+    /// <see cref="RowsFor"/> without its charge to the index usage counters,
+    /// for a read whose rows reach the plan through a source that charges them.
+    /// </summary>
+    public IEnumerable<byte[]> UnchargedRowsFor(BatchContext batch) =>
+        this.Rows is PerExecutionRows perExecution ? perExecution.For(batch) : this.Rows;
 
     /// <summary>
     /// Charges the index usage counters with a read of <paramref name="table"/>

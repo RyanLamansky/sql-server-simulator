@@ -78,6 +78,19 @@ public sealed partial class StatisticsIoTimeTests
             string.Join("\n", Run(connection, "select * from t\nselect * from t where id = 2\nselect * from t where id = 99\nselect * from t where id in (1, 2)\nselect 1")));
     }
 
+    /// <summary>
+    /// A correlated subquery equating an unindexed column with the outer row
+    /// reads its table once, as real's hash or spool reads it, rather than once
+    /// per outer row: two scans, the outer query's and the subquery's (probed
+    /// 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Io_CorrelatedScanReadsItsTableOnce()
+    {
+        using var connection = Open("create table t (id int primary key, g int); insert t select value, value % 50 from generate_series(1, 2000); set statistics io on");
+        Contains(Io(1, "t", 2, 10), Run(connection, "select sum(c) from (select g, (select count(*) from t t2 where t2.g = t1.g) c from t t1 group by g) q"));
+    }
+
     [TestMethod]
     public void Io_EmptyHeapIsOneScanOfNoPages()
     {
