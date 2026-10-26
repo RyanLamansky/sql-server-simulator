@@ -134,7 +134,9 @@ Coverage is broad; the compact map below is the shape of it, not the full invent
 - **Query surface.**
   All JOIN and APPLY forms, correlated subqueries at arbitrary depth, window functions, recursive CTEs, set operations, `PIVOT`/`UNPIVOT`, `OFFSET`/`FETCH`, cursors (T-SQL and API server cursors).
 - **DML and DDL.**
-  `INSERT`/`UPDATE`/`DELETE`/`MERGE`/`SELECT INTO` with `OUTPUT`, statement-level atomicity, and `CREATE`/`ALTER`/`DROP` across tables, views, procedures, functions, triggers, sequences, indexes (including filtered and indexed views), types, and schemas.
+  `INSERT`/`UPDATE`/`DELETE`/`MERGE`/`SELECT INTO` with `OUTPUT` and composable DML, statement-level atomicity, and `CREATE`/`ALTER`/`DROP` across tables, views, procedures, functions, triggers, sequences, indexes (including filtered, columnstore and indexed views), types, and schemas.
+- **Table features.**
+  Temporal tables, change tracking, partitioning, memory-optimized tables with natively compiled modules, graph tables with `MATCH` and `SHORTEST_PATH`, and rules and defaults.
 - **Programmability.**
   Stored procedures, scalar UDFs and TVFs, DML, DDL and logon triggers, dynamic SQL, table-valued parameters, control flow with `TRY`/`CATCH`/`THROW`, and CLR assemblies (set `EnableClr` on the `Simulation`).
 - **Concurrency.**
@@ -142,14 +144,17 @@ Coverage is broad; the compact map below is the shape of it, not the full invent
 - **Constraints.**
   `PRIMARY KEY`/`UNIQUE`/`CHECK`/`NOT NULL` and `FOREIGN KEY` with all four referential actions on both `ON DELETE` and `ON UPDATE`.
 - **System surfaces.**
-  A `sys.*` / `INFORMATION_SCHEMA.*` catalog broad enough to satisfy SSMS, SMO, and DacFx; temporal tables; `SERVERPROPERTY` and friends as true `sql_variant`.
+  A `sys.*` / `INFORMATION_SCHEMA.*` catalog broad enough to satisfy SSMS, SMO, and DacFx; `SERVERPROPERTY` and friends as true `sql_variant`; `DBCC`; Query Store; and `SET SHOWPLAN_*` plans.
+- **Server infrastructure.**
+  Service Broker with activation, Extended Events, SQL Trace, SQL Server Audit, SQL Server Agent's `msdb` procedures (as a server whose Agent is stopped answers them), and Database Mail's configuration and queue.
 - **JSON, XML, spatial, full-text, vectors.**
   The `JSON_*`/`OPENJSON` family and the native `json` type, XML methods and schema collections, the spatial method surface, full-text search with `CONTAINS`/`FREETEXT`, and SQL Server 2025's `vector` type and `REGEXP_*` functions.
 - **Security.**
   Logins, users, and database + server roles (fixed and custom), with authenticated logins mapped to their database user the way SQL Server does.
   `GRANT`/`DENY`/`REVOKE` are enforced for restricted principals at column, object, schema, and database scope — alongside `EXECUTE AS` impersonation, module `WITH EXECUTE AS`, ownership chaining, catalog metadata filtered to a principal's visibility, and `VIEW SERVER STATE`-gated DMVs.
+  Row-level security, dynamic data masking, and the master key, certificates, asymmetric and symmetric keys with the functions that encrypt, decrypt and sign with them.
 - **Scale-out shapes.**
-  Multiple databases with cross-database reads, linked servers between simulations, BACPAC import for bootstrapping from a real database, and full-database `BACKUP` / `RESTORE`.
+  Multiple databases with cross-database reads and writes, linked servers between simulations, BACPAC import for bootstrapping from a real database, full and differential `BACKUP` / `RESTORE` with log backups, and `BULK INSERT` / `OPENROWSET(BULK …)` over files supplied through `OpenBulkFile`.
 
 Deeper per-feature notes live under [`docs/claude/`](docs/claude/).
 
@@ -161,9 +166,9 @@ Write a bug report if you're blocked.
 The larger areas not built yet:
 
 - Encryption: certificates and keys loaded from files, module signing, Always Encrypted and transparent data encryption.
-- Server infrastructure: Service Broker, Extended Events, event notifications, endpoints, SQL Server Audit, Resource Governor and availability groups.
-- External data and storage: PolyBase external tables and data sources, ledger tables, database snapshots and FILESTREAM.
-- Execution plans: `SET SHOWPLAN_*` and `SET STATISTICS XML` are accepted but return no plans.
+- Server infrastructure: endpoints, Resource Governor, availability groups and replication.
+- External data and storage: PolyBase external tables and data sources, change data capture, ledger tables, database snapshots and FILESTREAM.
+- Execution plans: `SET SHOWPLAN_*` describes each statement without an operator tree, and `SET STATISTICS XML` returns no plans.
 
 Running a `CREATE ASSEMBLY` routine executes the assembly's code inside your process.
 The simulator verifies a `SAFE` assembly statically, but .NET has no Code Access Security, so that check is not a sandbox: only register assemblies you trust.
