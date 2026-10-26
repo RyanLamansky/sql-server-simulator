@@ -24,11 +24,13 @@ internal abstract class DateDiff : Expression
     protected readonly string functionLowerName;
     protected readonly SqlType resultType;
 
-    protected DateDiff(ParserContext context, string functionLowerName, SqlType resultType)
+    protected DateDiff(ParserContext context, string functionLowerName, SqlType resultType, bool odbcInterval = false)
     {
         this.functionLowerName = functionLowerName;
         this.resultType = resultType;
-        this.kind = DatePartKinds.Read(context, functionLowerName, out this.keywordText);
+        this.kind = odbcInterval
+            ? DatePartKinds.ReadOdbcInterval(context, "TIMESTAMPDIFF", out this.keywordText)
+            : DatePartKinds.Read(context, functionLowerName, out this.keywordText);
         if (context.GetNextRequired() is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.start = Parse(context.MoveNextRequiredReturnSelf());
@@ -78,7 +80,12 @@ internal abstract class DateDiff : Expression
 
     internal sealed override void Describe(NodeShape shape) => shape.Local(this.kind).Child(this.start).Child(this.end);
 
-    internal sealed class Standard(ParserContext context) : DateDiff(context, "datediff", SqlType.Int32)
+    /// <summary>
+    /// <c>DATEDIFF</c>, or with <paramref name="odbcInterval"/> ODBC's
+    /// <c>{fn TIMESTAMPDIFF(SQL_TSI_unit, a, b)}</c>, whose unit is an ODBC
+    /// interval (<see cref="DatePartKinds.ReadOdbcInterval"/>).
+    /// </summary>
+    internal sealed class Standard(ParserContext context, bool odbcInterval = false) : DateDiff(context, "datediff", SqlType.Int32, odbcInterval)
     {
         protected override SqlValue WrapResult(long diff) =>
             diff is < int.MinValue or > int.MaxValue

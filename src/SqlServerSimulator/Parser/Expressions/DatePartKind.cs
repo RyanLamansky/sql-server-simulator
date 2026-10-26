@@ -41,6 +41,36 @@ internal static class DatePartKinds
         Resolve(keyword) ?? throw SimulatedSqlException.NotARecognizedDatepartOption(keyword, functionLowerName);
 
     /// <summary>
+    /// Reads ODBC's <c>SQL_TSI_</c> interval, which <c>{fn TIMESTAMPADD}</c> and
+    /// <c>{fn TIMESTAMPDIFF}</c> take in a datepart's place, the cursor on its
+    /// token and left there: <c>SQL_TSI_FRAC_SECOND</c> counts milliseconds,
+    /// and any other word — a datepart's own name too — is Msg 155 naming
+    /// <paramref name="functionName"/> (probed 2026-10-26 against SQL Server
+    /// 2025). <paramref name="keywordText"/> is the datepart a refusal of the
+    /// unit names, as <c>DATEADD</c>'s and <c>DATEDIFF</c>'s do.
+    /// </summary>
+    public static DatePartKind ReadOdbcInterval(ParserContext context, string functionName, out string keywordText)
+    {
+        var word = context.Token is Tokens.Name name ? name.Value : context.Token?.Source.ToString() ?? "";
+        Span<char> upper = stackalloc char[word.Length];
+        _ = word.ToUpperInvariant(upper);
+        (var kind, keywordText) = upper switch
+        {
+            "SQL_TSI_DAY" => (DatePartKind.Day, "day"),
+            "SQL_TSI_FRAC_SECOND" => (DatePartKind.Millisecond, "millisecond"),
+            "SQL_TSI_HOUR" => (DatePartKind.Hour, "hour"),
+            "SQL_TSI_MINUTE" => (DatePartKind.Minute, "minute"),
+            "SQL_TSI_MONTH" => (DatePartKind.Month, "month"),
+            "SQL_TSI_QUARTER" => (DatePartKind.Quarter, "quarter"),
+            "SQL_TSI_SECOND" => (DatePartKind.Second, "second"),
+            "SQL_TSI_WEEK" => (DatePartKind.Week, "week"),
+            "SQL_TSI_YEAR" => (DatePartKind.Year, "year"),
+            _ => throw SimulatedSqlException.NotARecognizedDatepartOption(word, functionName),
+        };
+        return kind;
+    }
+
+    /// <summary>
     /// Reads the datepart a date function takes as its first argument, the
     /// cursor on its first token and left on its last. It is a word, not an
     /// expression: a string, a number, a variable, a function call or

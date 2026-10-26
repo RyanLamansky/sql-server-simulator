@@ -2082,8 +2082,10 @@ internal abstract class Expression : ExpressionNode
     /// part, <c>DAYOFWEEK</c> and <c>WEEK</c> following <c>DATEFIRST</c> as
     /// those do, <c>MOD</c> as <c>%</c>, <c>TRUNCATE</c> as
     /// <c>ROUND(x, y, 1)</c>, <c>OCTET_LENGTH</c> and <c>BIT_LENGTH</c> as
-    /// <c>DATALENGTH</c> in bytes and in bits, and the clock as text
-    /// (<see cref="OdbcClockText"/>). Null for any other name.
+    /// <c>DATALENGTH</c> in bytes and in bits, <c>TIMESTAMPADD</c> /
+    /// <c>TIMESTAMPDIFF</c> as <c>DATEADD</c> / <c>DATEDIFF</c> of an ODBC
+    /// interval, and the clock as text (<see cref="OdbcClockText"/>). Null for
+    /// any other name.
     /// </summary>
     private static Expression? ParseOdbcOnlyFunction(string name, ParserContext context)
     {
@@ -2126,6 +2128,10 @@ internal abstract class Expression : ExpressionNode
                 return new DatePart(context, DatePartKind.Quarter, "quarter");
             case "SECOND":
                 return new DatePart(context, DatePartKind.Second, "second");
+            case "TIMESTAMPADD":
+                return new DateAdd(context, odbcInterval: true);
+            case "TIMESTAMPDIFF":
+                return new DateDiff.Standard(context, odbcInterval: true);
             case "TRUNCATE":
                 return new Round(context, truncating: true);
             case "WEEK":

@@ -368,6 +368,10 @@ public sealed class SyntaxAlternativesTests
     [DataRow("{fn USER()}", "dbo")]
     [DataRow("{fn DATABASE()}", "simulated")]
     [DataRow("sql_variant_property({fn MOD(7, 3)}, 'BaseType')", "int")]
+    [DataRow("{fn TIMESTAMPADD(SQL_TSI_MONTH, 1, '2020-01-31')}", "Feb 29 2020 12:00AM")]
+    [DataRow("datediff(millisecond, '2020-01-01', {fn TIMESTAMPADD(sql_tsi_frac_second, 1000, '2020-01-01')})", "1000")]
+    [DataRow("{fn TIMESTAMPDIFF(SQL_TSI_FRAC_SECOND, '2020-01-01', '2020-01-01 00:00:01')}", "1000")]
+    [DataRow("{fn TIMESTAMPDIFF(SQL_TSI_QUARTER, '2020-01-01', '2021-01-01')}", "4")]
     public void OdbcFn_AnswersAsRealRewritesIt(string call, string expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"select cast({call} as varchar(30))"));
 
@@ -398,6 +402,13 @@ public sealed class SyntaxAlternativesTests
     [DataRow("select {fn CURRENT_DATE(1)}", 102)]
     public void OdbcClockFn_RefusesAnArgumentItTakesNone(string sql, int number)
         => new Simulation().AssertSqlError(sql, number);
+
+    /// <summary>A timestamp function's unit is an ODBC interval; a datepart's own name there is Msg 155 naming the function.</summary>
+    [TestMethod]
+    [DataRow("select {fn TIMESTAMPADD(day, 1, '2020-01-01')}", "'day' is not a recognized TIMESTAMPADD option.")]
+    [DataRow("select {fn TIMESTAMPDIFF(SQL_TSI_NOPE, '2020-01-01', '2020-01-02')}", "'SQL_TSI_NOPE' is not a recognized TIMESTAMPDIFF option.")]
+    public void OdbcTimestampFn_OtherUnit_RaisesMsg155(string sql, string message)
+        => new Simulation().AssertSqlError(sql, 155, message);
 
     /// <summary>
     /// ODBC's outer-join escape groups its join chain as parentheses do, and

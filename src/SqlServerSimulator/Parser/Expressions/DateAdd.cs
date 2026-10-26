@@ -17,8 +17,20 @@ internal sealed class DateAdd : Expression
     private readonly Expression source;
 
     public DateAdd(ParserContext context)
+        : this(context, odbcInterval: false)
     {
-        this.kind = DatePartKinds.Read(context, "dateadd", out this.keywordText);
+    }
+
+    /// <summary>
+    /// Parses the call's arguments, or with <paramref name="odbcInterval"/>
+    /// ODBC's <c>{fn TIMESTAMPADD(SQL_TSI_unit, n, x)}</c>, whose unit is an
+    /// ODBC interval (<see cref="DatePartKinds.ReadOdbcInterval"/>).
+    /// </summary>
+    public DateAdd(ParserContext context, bool odbcInterval)
+    {
+        this.kind = odbcInterval
+            ? DatePartKinds.ReadOdbcInterval(context, "TIMESTAMPADD", out this.keywordText)
+            : DatePartKinds.Read(context, "dateadd", out this.keywordText);
         if (context.GetNextRequired() is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.number = Parse(context.MoveNextRequiredReturnSelf());
