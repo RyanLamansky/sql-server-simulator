@@ -3554,7 +3554,7 @@ public sealed class IndexSeekTests
         var held = cache.Seek(heap, table.StoredColumns, heap, ordinals, [Storage.SqlType.Int32], probe);
         var before = held.ToArray();
         Exec(c, "delete t where id = 2");
-        AreEqual(3, cache.Seek(heap, table.StoredColumns, heap, ordinals, [Storage.SqlType.Int32], probe).Length);
+        HasCount(3, cache.Seek(heap, table.StoredColumns, heap, ordinals, [Storage.SqlType.Int32], probe));
 
         // The removal replays into a fresh bucket; shifting the old one in place
         // would hand the reader still enumerating it a skipped row.

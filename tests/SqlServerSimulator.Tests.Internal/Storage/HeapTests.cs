@@ -16,7 +16,7 @@ public class HeapTests
         var heap = new Heap();
         IsEmpty(heap.Pages);
         AreEqual(0, heap.RowCount);
-        IsFalse(heap.EnumerateRows().Any());
+        IsEmpty(heap.EnumerateRows());
     }
 
     [TestMethod]
@@ -101,7 +101,7 @@ public class HeapTests
         AreEqual(3, heap.RowCount);
 
         // Across however many pages the heap chose, EnumerateRows returns all 3 rows.
-        AreEqual(3, heap.EnumerateRows().Count());
+        HasCount(3, heap.EnumerateRows());
     }
 
     /// <summary>

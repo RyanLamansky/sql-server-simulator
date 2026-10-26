@@ -23,8 +23,8 @@ public sealed class BetweenTests
     [DataRow("5 between 10 and 1", 0)]
     [DataRow("5 not between 10 and 1", 1)]
     public void Basic(string predicate, int expectedCount) =>
-        AreEqual(expectedCount,
-            new Simulation().ExecuteReader($"select 1 where {predicate}").EnumerateRecords().Count());
+        HasCount(expectedCount,
+            new Simulation().ExecuteReader($"select 1 where {predicate}").EnumerateRecords());
 
     [TestMethod]
     [DataRow("cast(null as int) between 1 and 10")]
@@ -35,8 +35,8 @@ public sealed class BetweenTests
     [DataRow("5 not between cast(null as int) and 10")]
     [DataRow("5 not between 1 and cast(null as int)")]
     public void NullOperand_ExcludesFromWhere(string predicate) =>
-        AreEqual(0,
-            new Simulation().ExecuteReader($"select 1 where {predicate}").EnumerateRecords().Count());
+        IsEmpty(
+            new Simulation().ExecuteReader($"select 1 where {predicate}").EnumerateRecords());
 
     [TestMethod]
     public void DefinitelyOutOfRange_WithNullBound_StillFalse()
@@ -44,35 +44,35 @@ public sealed class BetweenTests
         // Probe-confirmed: even though the NULL-side comparison is UNKNOWN,
         // three-valued AND with the definite-false side collapses to FALSE,
         // so the row is excluded.
-        AreEqual(0,
-            new Simulation().ExecuteReader("select 1 where 100 between cast(null as int) and 10").EnumerateRecords().Count());
-        AreEqual(0,
-            new Simulation().ExecuteReader("select 1 where -5 between 1 and cast(null as int)").EnumerateRecords().Count());
+        IsEmpty(
+            new Simulation().ExecuteReader("select 1 where 100 between cast(null as int) and 10").EnumerateRecords());
+        IsEmpty(
+            new Simulation().ExecuteReader("select 1 where -5 between 1 and cast(null as int)").EnumerateRecords());
     }
 
     [TestMethod]
     public void StringBetween()
     {
         // 'mango' falls between 'apple' and 'pear' in ANSI string order.
-        AreEqual(1,
-            new Simulation().ExecuteReader("select 1 where 'mango' between 'apple' and 'pear'").EnumerateRecords().Count());
-        AreEqual(0,
-            new Simulation().ExecuteReader("select 1 where 'mango' not between 'apple' and 'pear'").EnumerateRecords().Count());
+        HasCount(1,
+            new Simulation().ExecuteReader("select 1 where 'mango' between 'apple' and 'pear'").EnumerateRecords());
+        IsEmpty(
+            new Simulation().ExecuteReader("select 1 where 'mango' not between 'apple' and 'pear'").EnumerateRecords());
     }
 
     [TestMethod]
     public void DecimalBetween_IntBounds_TypePromotion()
     {
-        AreEqual(1,
-            new Simulation().ExecuteReader("select 1 where cast(2.5 as decimal(5,2)) between 1 and 5").EnumerateRecords().Count());
+        HasCount(1,
+            new Simulation().ExecuteReader("select 1 where cast(2.5 as decimal(5,2)) between 1 and 5").EnumerateRecords());
     }
 
     [TestMethod]
     public void DateBetween_StringBounds_CoercionWorks()
     {
-        AreEqual(1,
+        HasCount(1,
             new Simulation().ExecuteReader(
-                "select 1 where cast('2026-05-15' as date) between '2026-01-01' and '2026-12-31'").EnumerateRecords().Count());
+                "select 1 where cast('2026-05-15' as date) between '2026-01-01' and '2026-12-31'").EnumerateRecords());
     }
 
     [TestMethod]
@@ -80,15 +80,15 @@ public sealed class BetweenTests
     {
         // `5 between 1 and 10 and 1 = 1` parses as
         // `(5 between 1 and 10) AND (1 = 1)` — both true → row passes.
-        AreEqual(1,
-            new Simulation().ExecuteReader("select 1 where 5 between 1 and 10 and 1 = 1").EnumerateRecords().Count());
+        HasCount(1,
+            new Simulation().ExecuteReader("select 1 where 5 between 1 and 10 and 1 = 1").EnumerateRecords());
     }
 
     [TestMethod]
     public void Precedence_BetweenInsideOr()
     {
-        AreEqual(1,
-            new Simulation().ExecuteReader("select 1 where 1 = 0 or 5 between 1 and 10").EnumerateRecords().Count());
+        HasCount(1,
+            new Simulation().ExecuteReader("select 1 where 1 = 0 or 5 between 1 and 10").EnumerateRecords());
     }
 
     [TestMethod]
@@ -96,8 +96,8 @@ public sealed class BetweenTests
     {
         // Bounds accept arithmetic expressions — Expression.Parse stops at
         // the AND keyword (boolean combinator) without consuming it.
-        AreEqual(1,
-            new Simulation().ExecuteReader("select 1 where 5 between 1 - 1 and 10 + 1").EnumerateRecords().Count());
+        HasCount(1,
+            new Simulation().ExecuteReader("select 1 where 5 between 1 - 1 and 10 + 1").EnumerateRecords());
     }
 
     [TestMethod]

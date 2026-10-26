@@ -48,11 +48,11 @@ public class WhereTests
     [DataRow("1 ! < 1", 1)]
     [DataRow("1 ! < 2", 0)]
     public void PureExpressionFilter(string whereExpression, int expectedCount) =>
-        AreEqual(expectedCount, new Simulation().ExecuteReader($"select 1 where {whereExpression}").EnumerateRecords().Count());
+        HasCount(expectedCount, new Simulation().ExecuteReader($"select 1 where {whereExpression}").EnumerateRecords());
 
     [TestMethod]
     public void TablelessWhere_NullOperand_ReturnsZeroRows()
-        => AreEqual(0, new Simulation().ExecuteReader("select 1 where null = 1").EnumerateRecords().Count());
+        => IsEmpty(new Simulation().ExecuteReader("select 1 where null = 1").EnumerateRecords());
 
     [TestMethod]
     public void FromTableWhere_FiltersByEqualityToLiteral()

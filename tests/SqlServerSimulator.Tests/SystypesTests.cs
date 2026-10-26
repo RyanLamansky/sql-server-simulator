@@ -10,7 +10,7 @@ public class SystypesTests
     public void Returns36Rows()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        AreEqual(36, connection.CreateCommand("select name from systypes").ExecuteReader().EnumerateRecords().Count());
+        HasCount(36, connection.CreateCommand("select name from systypes").ExecuteReader().EnumerateRecords());
     }
 
     [TestMethod]

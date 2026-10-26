@@ -23,27 +23,27 @@ public sealed class DistinctFromTests
     [DataRow("cast(null as int) is not distinct from 5", 0)]
     [DataRow("cast(null as int) is not distinct from cast(null as int)", 1)]
     public void Basic(string predicate, int expectedCount) =>
-        AreEqual(expectedCount,
-            new Simulation().ExecuteReader($"select 1 where {predicate}").EnumerateRecords().Count());
+        HasCount(expectedCount,
+            new Simulation().ExecuteReader($"select 1 where {predicate}").EnumerateRecords());
 
     [TestMethod]
     public void TypePromotion_IntVsDecimal_NumericallyEqual()
     {
         // 5 (int) vs 5.0 (decimal) — values numerically equal; not distinct.
-        AreEqual(0,
+        IsEmpty(
             new Simulation().ExecuteReader(
-                "select 1 where 5 is distinct from cast(5.0 as decimal(5,2))").EnumerateRecords().Count());
-        AreEqual(1,
+                "select 1 where 5 is distinct from cast(5.0 as decimal(5,2))").EnumerateRecords());
+        HasCount(1,
             new Simulation().ExecuteReader(
-                "select 1 where 5 is distinct from cast(5.5 as decimal(5,2))").EnumerateRecords().Count());
+                "select 1 where 5 is distinct from cast(5.5 as decimal(5,2))").EnumerateRecords());
     }
 
     [TestMethod]
     public void TypePromotion_VarcharVsNvarchar_Equal()
     {
-        AreEqual(0,
+        IsEmpty(
             new Simulation().ExecuteReader(
-                "select 1 where 'hello' is distinct from cast('hello' as nvarchar(10))").EnumerateRecords().Count());
+                "select 1 where 'hello' is distinct from cast('hello' as nvarchar(10))").EnumerateRecords());
     }
 
     [TestMethod]
@@ -136,13 +136,13 @@ public sealed class DistinctFromTests
         // IS NOT NULL branches still route correctly. Existing IsNullExpression
         // tests in other suites cover broader semantics — this is a smoke
         // test for the refactor.
-        AreEqual(1, new Simulation().ExecuteReader(
-            "select 1 where cast(null as int) is null").EnumerateRecords().Count());
-        AreEqual(0, new Simulation().ExecuteReader(
-            "select 1 where 5 is null").EnumerateRecords().Count());
-        AreEqual(1, new Simulation().ExecuteReader(
-            "select 1 where 5 is not null").EnumerateRecords().Count());
-        AreEqual(0, new Simulation().ExecuteReader(
-            "select 1 where cast(null as int) is not null").EnumerateRecords().Count());
+        HasCount(1, new Simulation().ExecuteReader(
+            "select 1 where cast(null as int) is null").EnumerateRecords());
+        IsEmpty(new Simulation().ExecuteReader(
+            "select 1 where 5 is null").EnumerateRecords());
+        HasCount(1, new Simulation().ExecuteReader(
+            "select 1 where 5 is not null").EnumerateRecords());
+        IsEmpty(new Simulation().ExecuteReader(
+            "select 1 where cast(null as int) is not null").EnumerateRecords());
     }
 }

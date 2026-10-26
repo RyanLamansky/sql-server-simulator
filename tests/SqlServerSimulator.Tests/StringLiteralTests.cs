@@ -24,7 +24,7 @@ public class StringLiteralTests
     [DataRow("'café' = 'cafe'", 0)]            // accent-sensitive
     [DataRow("'café' = 'CAFÉ'", 1)]            // accents preserved across case fold
     public void VarcharEquality(string condition, int expectedRows) =>
-        AreEqual(expectedRows, new Simulation().ExecuteReader($"select 1 where {condition}").EnumerateRecords().Count());
+        HasCount(expectedRows, new Simulation().ExecuteReader($"select 1 where {condition}").EnumerateRecords());
 
     [TestMethod]
     [DataRow("N'a' = N'A'", 1)]
@@ -32,7 +32,7 @@ public class StringLiteralTests
     [DataRow("N'Bjørn  ' = N'BJØRN'", 1)]
     [DataRow("N'a' = N'b'", 0)]
     public void NVarcharEquality(string condition, int expectedRows) =>
-        AreEqual(expectedRows, new Simulation().ExecuteReader($"select 1 where {condition}").EnumerateRecords().Count());
+        HasCount(expectedRows, new Simulation().ExecuteReader($"select 1 where {condition}").EnumerateRecords());
 
     [TestMethod]
     [DataRow("'a' < 'b'", 1)]
@@ -44,7 +44,7 @@ public class StringLiteralTests
     [DataRow("'apple' < 'banana'", 1)]
     [DataRow("'banana' > 'apple'", 1)]
     public void VarcharOrdering(string condition, int expectedRows) =>
-        AreEqual(expectedRows, new Simulation().ExecuteReader($"select 1 where {condition}").EnumerateRecords().Count());
+        HasCount(expectedRows, new Simulation().ExecuteReader($"select 1 where {condition}").EnumerateRecords());
 
     [TestMethod]
     [DataRow("0x0102 < 0x0103", 1)]
@@ -54,7 +54,7 @@ public class StringLiteralTests
     [DataRow("0x01 < 0x0101", 1)]
     [DataRow("0x01 = 0x01", 1)]
     public void VarbinaryOrdering(string condition, int expectedRows) =>
-        AreEqual(expectedRows, new Simulation().ExecuteReader($"select 1 where {condition}").EnumerateRecords().Count());
+        HasCount(expectedRows, new Simulation().ExecuteReader($"select 1 where {condition}").EnumerateRecords());
 
     [TestMethod]
     [DataRow("'a' = null", 0)]                    // any comparison with NULL is UNKNOWN, no row
@@ -62,7 +62,7 @@ public class StringLiteralTests
     [DataRow("null = null", 0)]                   // even NULL = NULL is UNKNOWN
     [DataRow("'' = null", 0)]
     public void NullVsString_AlwaysUnknown(string condition, int expectedRows) =>
-        AreEqual(expectedRows, new Simulation().ExecuteReader($"select 1 where {condition}").EnumerateRecords().Count());
+        HasCount(expectedRows, new Simulation().ExecuteReader($"select 1 where {condition}").EnumerateRecords());
 
     [TestMethod]
     [DataRow("0xDEAD = 0xDEAD", 1)]
@@ -72,13 +72,13 @@ public class StringLiteralTests
     [DataRow("0x = 0x", 1)]                    // bodiless 0x is the empty varbinary
     [DataRow("0x = 0xAB", 0)]                  // empty != non-empty
     public void VarbinaryEquality(string condition, int expectedRows) =>
-        AreEqual(expectedRows, new Simulation().ExecuteReader($"select 1 where {condition}").EnumerateRecords().Count());
+        HasCount(expectedRows, new Simulation().ExecuteReader($"select 1 where {condition}").EnumerateRecords());
 
     [TestMethod]
     public void HexLiteral_OddLengthZeroPadsHighNibble()
     {
         // 0xABC → 0x0ABC (high nibble defaulted to 0, matching SQL Server).
-        AreEqual(1, new Simulation().ExecuteReader("select 1 where 0xABC = 0x0ABC").EnumerateRecords().Count());
+        HasCount(1, new Simulation().ExecuteReader("select 1 where 0xABC = 0x0ABC").EnumerateRecords());
     }
 
     [TestMethod]

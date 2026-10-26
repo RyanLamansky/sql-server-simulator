@@ -351,8 +351,8 @@ public sealed class PlanCacheTests
             foreach (var run in new[] { uncached, cached })
             {
                 HasCount(2, run);
-                AreEqual(1, run[0].Distinct().Count(), "draw is per statement, not per row");
-                AreEqual(1, run[1].Distinct().Count(), "draw is per statement, not per row");
+                HasCount(1, run[0].Distinct(), "draw is per statement, not per row");
+                HasCount(1, run[1].Distinct(), "draw is per statement, not per row");
                 AreNotEqual(run[0][0], run[1][0], "each statement draws its own value");
             }
         }

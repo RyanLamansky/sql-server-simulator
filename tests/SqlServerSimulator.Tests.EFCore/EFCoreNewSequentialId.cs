@@ -47,7 +47,7 @@ public class EFCoreNewSequentialId
         // is "NEWSEQUENTIALID emits a strictly ascending sequence" — not
         // "EF Core preserves Add-order through MERGE".
         var ids = tokens.Select(t => t.Id).ToArray();
-        Assert.AreEqual(ids.Length, ids.Distinct().Count(), "Generated GUIDs were not unique");
+        Assert.HasCount(ids.Length, ids.Distinct(), "Generated GUIDs were not unique");
         Array.Sort(ids);
         for (var i = 1; i < ids.Length; i++)
             Assert.IsGreaterThan(ids[i - 1], ids[i]);

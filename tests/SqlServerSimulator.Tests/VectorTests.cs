@@ -451,7 +451,7 @@ public sealed class VectorTests
 
     [TestMethod]
     public void Catalog_SpColumnsListsNoVectorColumn() =>
-        AreEqual(1, new Simulation().ExecuteBatchesReader("create table t (id int, v vector(3))", "exec sp_columns 't'").EnumerateRecords().Count());
+        HasCount(1, new Simulation().ExecuteBatchesReader("create table t (id int, v vector(3))", "exec sp_columns 't'").EnumerateRecords());
 
     [TestMethod]
     public void Catalog_DescribeFirstResultSet()

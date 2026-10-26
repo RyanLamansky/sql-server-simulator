@@ -160,6 +160,6 @@ public sealed class FilteredStatisticsTests
         AreEqual("2,3", string.Join(",", simulation.ExecuteReader("dbcc show_statistics('t','s') with histogram, no_infomsgs").EnumerateRecords().Select(r => r.GetInt32(0))));
         AreEqual("s|a", simulation.ExecuteBatchesReader("exec sp_helpstats 't'").EnumerateRecords().Select(r => $"{r.GetString(0)}|{r.GetString(1)}").Single());
         _ = simulation.ExecuteNonQuery("create statistics e on t (a) where b = 9");
-        AreEqual(0, simulation.ExecuteReader("dbcc show_statistics('t','e') with histogram, no_infomsgs").EnumerateRecords().Count());
+        IsEmpty(simulation.ExecuteReader("dbcc show_statistics('t','e') with histogram, no_infomsgs").EnumerateRecords());
     }
 }

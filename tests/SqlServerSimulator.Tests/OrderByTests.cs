@@ -194,7 +194,7 @@ public class OrderByTests
 
     [TestMethod]
     public void OrderBy_OnTablelessSelect_NoOpButParses()
-        => AreEqual(1, new Simulation().ExecuteReader("select 1 order by 1").EnumerateRecords().Count());
+        => HasCount(1, new Simulation().ExecuteReader("select 1 order by 1").EnumerateRecords());
 
     [TestMethod]
     public void OrderBy_StableSort_PreservesInsertionOrderForEqualKeys()

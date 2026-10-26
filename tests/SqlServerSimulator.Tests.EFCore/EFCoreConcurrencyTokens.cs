@@ -86,7 +86,7 @@ public class EFCoreConcurrencyTokens
         using var context = SeededContext();
         var widget = context.Items.Single(i => i.Id == 1);
         Assert.IsNotNull(widget.RowVersion);
-        Assert.AreNotEqual(0, widget.RowVersion.Length);
+        Assert.IsNotEmpty(widget.RowVersion);
     }
 
     [TestMethod]

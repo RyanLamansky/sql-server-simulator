@@ -273,9 +273,9 @@ public class LikeTests
     }
 
     private static void AssertRowCount(string condition, int expectedRows) =>
-        Assert.AreEqual(
+        Assert.HasCount(
             expectedRows,
-            new Simulation().ExecuteReader($"select 1 where {condition}").EnumerateRecords().Count());
+            new Simulation().ExecuteReader($"select 1 where {condition}").EnumerateRecords());
 
     private static void AssertParameterizedRowCount(string subject, string pattern, int expectedRows)
     {
@@ -283,7 +283,7 @@ public class LikeTests
         using var connection = new Simulation().CreateOpenConnection();
         using var command = connection.CreateCommand("select 1 where @s like @p", ("@s", subject), ("@p", pattern));
         using var reader = command.ExecuteReader();
-        Assert.AreEqual(expectedRows, reader.EnumerateRecords().Count());
+        Assert.HasCount(expectedRows, reader.EnumerateRecords());
     }
 
     /// <summary>An escape with nothing after it makes the pattern match nothing.</summary>

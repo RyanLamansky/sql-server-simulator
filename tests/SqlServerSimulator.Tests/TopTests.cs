@@ -46,7 +46,7 @@ public class TopTests
 
     [TestMethod]
     public void Top_OnTablelessSelect_LargerThanOneStillReturnsOne()
-        => AreEqual(1, new Simulation().ExecuteReader("select top 5 1").EnumerateRecords().Count());
+        => HasCount(1, new Simulation().ExecuteReader("select top 5 1").EnumerateRecords());
 
     [TestMethod]
     public void Top_OnFromTable_TakesFirstNRows()

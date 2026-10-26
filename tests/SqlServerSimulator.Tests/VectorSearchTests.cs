@@ -61,7 +61,7 @@ public sealed class VectorSearchTests
         AreEqual(1152000, sim.ExecuteScalar("select indexproperty(object_id('t'), 'vx', 'IndexID')"));
         AreEqual(0, sim.ExecuteScalar("select count(*) from sys.stats where object_id = object_id('t') and stats_id > 1"));
         using var reader = sim.ExecuteReader("exec sp_helpindex 't'");
-        AreEqual(1, reader.EnumerateRecords().Count());
+        HasCount(1, reader.EnumerateRecords());
     }
 
     [TestMethod]
