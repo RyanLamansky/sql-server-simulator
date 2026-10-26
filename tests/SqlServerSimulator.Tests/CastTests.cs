@@ -1247,6 +1247,35 @@ public sealed class CastTests
     public void DateTimeAgainstDateTime2_ComparesExactly(string predicate, int expected) =>
         AreEqual(expected, new Simulation().ExecuteScalar($"declare @d datetime = '2024-01-01 00:00:00.003'; select case when {predicate} then 1 else 0 end"));
 
+    /// <summary>
+    /// The paths that match on a key or a bound converted to one type — a hash
+    /// join, MERGE's match, an <c>IN</c> subquery's probe set, a range seek
+    /// from either side — compare a <c>datetime</c> exactly too, where the
+    /// converted value paired <c>.003</c> with <c>.0033333</c> and a strict
+    /// bound lost the row the value rounded onto (probed 2026-10-26 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select count(*) from #o o join #d d on d.d = o.od", 1)]
+    [DataRow("select count(*) from #o o left join #d d on d.d = o.od where d.id is null", 2)]
+    [DataRow("select count(*) from #o o join (select cast(d as datetimeoffset(7)) z from #d) d on d.z = o.od", 1)]
+    [DataRow("select count(*) from #o o where o.od in (select d from #d)", 1)]
+    [DataRow("select count(*) from #o o where o.od not in (select d from #d)", 2)]
+    [DataRow("select count(*) from #o o where o.od in (select d.d from #d d where d.id = o.oid)", 1)]
+    [DataRow("merge #d t using #o s on t.d = s.od when matched then update set id = t.id + 10; select count(*) from #d where id > 10", 1)]
+    [DataRow("create index ix on #d (d); select count(*) from #d where d < @x", 1)]
+    [DataRow("create index ix on #o (od); select count(*) from #o where od > @p", 3)]
+    [DataRow("create index ix on #o (od); select count(*) from #o where od < @q", 2)]
+    public void DateTimeAgainstDateTime2_KeyedPathsCompareExactly(string query, int expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($"""
+            create table #d (id int primary key, d datetime2(7));
+            insert #d values (1, '2020-01-01 00:00:00.0033333'), (2, '2020-01-01 00:00:00.0066667'), (3, '2020-01-01 00:00:00.010');
+            create table #o (oid int primary key, od datetime);
+            insert #o values (1, '2020-01-01 00:00:00.003'), (2, '2020-01-01 00:00:00.007'), (3, '2020-01-01 00:00:00.010');
+            declare @x datetime = '2020-01-01 00:00:00.003', @p datetime2(7) = '2020-01-01 00:00:00.0033333', @q datetime2(7) = '2020-01-01 00:00:00.0066667';
+            {query}
+            """));
+
     /// <summary>A CONVERT style the conversion can't take names the target's own family.</summary>
     [TestMethod]
     [DataRow("select convert(nvarchar(30), cast('2024-03-05' as date), 8)", 8114, "Error converting data type date to nvarchar.")]

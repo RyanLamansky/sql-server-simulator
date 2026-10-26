@@ -2822,12 +2822,15 @@ internal abstract class BooleanExpression : ExpressionNode
         /// The <see cref="SqlTypeCategory.Other"/> family is excluded outright:
         /// <c>sql_variant</c> carries its own per-value type, and the binary
         /// types compare across declared lengths that their hash doesn't share.
+        /// So is a <c>datetime</c> beside a <c>datetime2</c> or
+        /// <c>datetimeoffset</c> (<see cref="ComparesAtExactDateTime"/>).
         /// </summary>
         private static bool QualifiesForHashing(SqlType source, SqlType column) =>
             source.Category == column.Category
                 && source.Category != SqlTypeCategory.Other
                 && !source.IsLob
-                && !column.IsLob;
+                && !column.IsLob
+                && !ComparesAtExactDateTime(source, column);
 
         /// <summary>
         /// Hashes every value at <paramref name="promoted"/>, or gives up
@@ -3288,12 +3291,19 @@ internal abstract class BooleanExpression : ExpressionNode
     /// (probed 2026-10-02 against SQL Server 2025). Answers the operands'
     /// order in units of a third of a tick, or null for any other pair.
     /// </summary>
-    private static int? ExactDateTimeOrder(SqlValue l, SqlValue r) => (l.Type, r.Type) switch
-    {
-        (DateTimeSqlType, DateTime2SqlType or DateTimeOffsetSqlType) or (DateTime2SqlType or DateTimeOffsetSqlType, DateTimeSqlType)
-            => ThirdTicks(l).CompareTo(ThirdTicks(r)),
-        _ => null,
-    };
+    private static int? ExactDateTimeOrder(SqlValue l, SqlValue r) =>
+        ComparesAtExactDateTime(l.Type, r.Type) ? ThirdTicks(l).CompareTo(ThirdTicks(r)) : null;
+
+    /// <summary>
+    /// Whether a comparison of the two types reads the <c>datetime</c> side at
+    /// its exact value (<see cref="ExactDateTimeOrder"/>) rather than at the
+    /// one it converts to. A key both sides are coerced to can't hold that
+    /// value, so a hashed match or a seek bound declines the pair: a hash
+    /// would pair <c>.003</c> with <c>.0033333</c>, and a strict bound would
+    /// lose the row its value rounds onto.
+    /// </summary>
+    internal static bool ComparesAtExactDateTime(SqlType left, SqlType right) =>
+        (left, right) is (DateTimeSqlType, DateTime2SqlType or DateTimeOffsetSqlType) or (DateTime2SqlType or DateTimeOffsetSqlType, DateTimeSqlType);
 
     private static Int128 ThirdTicks(SqlValue value) => value.Type switch
     {

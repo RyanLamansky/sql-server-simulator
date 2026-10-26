@@ -774,7 +774,9 @@ internal sealed partial class Selection
     /// <summary>
     /// The promotion target two equated operand types share, or false when the
     /// runtime <c>=</c> wouldn't reach one — a LOB operand, a collation conflict,
-    /// or a pair <see cref="SqlType.Promote"/> rejects outright. Shared by the
+    /// a pair <see cref="SqlType.Promote"/> rejects outright, or a
+    /// <c>datetime</c> the <c>=</c> reads at its exact value
+    /// (<see cref="BooleanExpression.ComparesAtExactDateTime"/>). Shared by the
     /// join planner and the MERGE match planner, which both need a hashed key
     /// pair to mean exactly what evaluating the equality would have meant.
     /// </summary>
@@ -782,7 +784,7 @@ internal sealed partial class Selection
         SqlType left, SqlType right, [NotNullWhen(true)] out SqlType? common)
     {
         common = null;
-        if (left.IsIncomparable || right.IsIncomparable)
+        if (left.IsIncomparable || right.IsIncomparable || BooleanExpression.ComparesAtExactDateTime(left, right))
         {
             return false;
         }

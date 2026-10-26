@@ -1604,9 +1604,11 @@ internal sealed partial class Selection
     }
 
     // Evaluates a bound expression and promotes it against the column type.
-    // Decline → fall back to the scan (collation / promotion failure, or a
-    // SimulatedSqlException while evaluating). Null → the bound is NULL, so the
-    // range matches nothing. Value → `value` (coerced to `common`) is usable.
+    // Decline → fall back to the scan (collation / promotion failure, a
+    // SimulatedSqlException while evaluating, or a datetime the comparison
+    // reads at its exact value, which the coerced bound rounds). Null → the
+    // bound is NULL, so the range matches nothing. Value → `value` (coerced to
+    // `common`) is usable.
     private static BoundEval EvaluateBound(
         Expression expr, SqlType columnType, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, out SqlValue value, out SqlType common)
     {
@@ -1627,9 +1629,10 @@ internal sealed partial class Selection
         if (evaluated.IsNull)
             return BoundEval.Null;
 
-        if (columnType.Category == SqlTypeCategory.String
-            && evaluated.Type.Category == SqlTypeCategory.String
-            && Collation.Resolve(columnType, evaluated.Type) is null)
+        if ((columnType.Category == SqlTypeCategory.String
+                && evaluated.Type.Category == SqlTypeCategory.String
+                && Collation.Resolve(columnType, evaluated.Type) is null)
+            || BooleanExpression.ComparesAtExactDateTime(columnType, evaluated.Type))
         {
             return BoundEval.Decline;
         }

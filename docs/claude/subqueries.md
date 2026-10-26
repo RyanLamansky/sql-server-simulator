@@ -114,6 +114,7 @@ An uncorrelated `IN (SELECT …)` materializes its inner column once — non-NUL
 
 The probe set is built only where promotion stays inside one type family (same `SqlTypeCategory`, neither side LOB, category not `Other`), so coercing a value to the common type is a widening rather than the value-dependent conversion a cross-family pair runs.
 That matters for error fidelity: `int IN (SELECT <varchar column>)` has to raise its Msg 245 from the comparison, in row order, not while a probe set is being built — so that pair declines the hash and takes the walk.
+A `datetime` beside a `datetime2` or `datetimeoffset` stays in one family yet declines too, since `=` reads the `datetime` at its exact 1/300-second value, which no converted key holds ([`joins.md`](joins.md#equi-join-fast-path)).
 The set is also keyed by the LHS type it was built against; an LHS of any other type (a `sql_variant` row, a runtime-narrowed value) falls back to the walk for that row.
 A correlated `IN` keeps the per-row streaming walk, short-circuiting on the first match, until the semi-join switch above takes over.
 
