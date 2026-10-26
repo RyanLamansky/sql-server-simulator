@@ -560,7 +560,10 @@ partial class Selection
         // The columns the query itself reads off its own select list: an
         // ORDER BY ordinal or alias, and every column a DISTINCT compares —
         // save one over a key, whose duplicates can't occur, so real drops it
-        // and needs only the key.
+        // and needs only the key. Under DISTINCT an ORDER BY term naming the
+        // source column behind a projected one reads that projected column
+        // too (ComputeOrderKeys), as an ORM aliasing every output positionally
+        // writes it.
         var selfRead = new bool[expressions.Count];
         foreach (var term in orderBy)
         {
@@ -572,12 +575,14 @@ partial class Selection
             }
             term.Expr!.VisitColumnReferences(name =>
             {
-                if (name.ImmediateQualifier is not null)
-                    return;
-                for (var j = 0; j < outputColumnNames.Length && j < selfRead.Length; j++)
+                for (var j = 0; j < selfRead.Length; j++)
                 {
-                    if (BuiltInToken.Equals(outputColumnNames[j], name.Leaf))
+                    if ((name.ImmediateQualifier is null && j < outputColumnNames.Length && BuiltInToken.Equals(outputColumnNames[j], name.Leaf))
+                        || (distinct && (expressions[j] is NamedExpression named ? named.Inner : expressions[j]) is Reference projected
+                            && SourceReferenceMatches(projected.ReferencedName, name)))
+                    {
                         selfRead[j] = true;
+                    }
                 }
             });
         }

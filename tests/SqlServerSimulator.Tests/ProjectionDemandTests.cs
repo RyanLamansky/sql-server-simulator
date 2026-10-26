@@ -396,4 +396,22 @@ public sealed class ProjectionDemandTests
             select count(*) / 2 from #t;
             """));
     }
+
+    /// <summary>
+    /// Under DISTINCT an ORDER BY term naming the source column behind a
+    /// projected one reads that projected column, so a reader naming only the
+    /// others leaves it computed and the TOP keeps the rows it orders first
+    /// (probed 2026-10-26 against SQL Server 2025: Django's sliced distinct
+    /// count).
+    /// </summary>
+    [TestMethod]
+    public void DistinctTop_OrderedByAProjectedSourceColumn_KeepsIt()
+        => AreEqual("1,2,4", new Simulation().ExecuteScalar("""
+            create table c (id int primary key, name nvarchar(10));
+            create table t (id int primary key, name nvarchar(10), cid int);
+            insert c values (1, N'b'), (2, N'a'), (3, N'c');
+            insert t values (1, N't1', 1), (2, N't2', 2), (3, N't3', 3), (4, N't4', 2), (5, N't5', 1);
+            select string_agg(cast(col1 as varchar(9)), ',') within group (order by col1)
+            from (select d.col1 from (select distinct top 3 t.id as col1, t.name as col2, c.name as col5 from t join c on c.id = t.cid order by c.name, t.id) d) q
+            """));
 }
