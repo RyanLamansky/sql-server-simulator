@@ -256,8 +256,12 @@ internal readonly struct SubqueryMemo(object? result, OuterRowProbe? probe)
 internal sealed class OuterRowProbe
 {
     /// <summary>
-    /// The resolver to execute the plan with: records the consult, then hands
-    /// the name to the caller's own resolver unchanged.
+    /// The resolver to execute the plan with: hands the name to the caller's
+    /// own resolver unchanged, recording the consult once that answers. A
+    /// name the enclosing row can't answer was consulted of nothing — an
+    /// inner plan's values materialized ahead of the scan its correlation
+    /// reads ask for that scan's column through this resolver, fail and
+    /// decline — so it never joins a keyed site's key.
     /// </summary>
     internal readonly Func<MultiPartName, SqlValue> Resolver;
 
@@ -279,8 +283,9 @@ internal sealed class OuterRowProbe
         this.Key = key;
         this.Resolver = name =>
         {
+            var value = outer(name);
             this.Note(name);
-            return outer(name);
+            return value;
         };
         this.volatileEvaluationsAtStart = runtime.Batch.Connection.VolatileEvaluations;
     }

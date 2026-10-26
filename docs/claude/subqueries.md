@@ -41,6 +41,7 @@ It also counts reads of a value the enclosing query binds per group — an aggre
 ### A correlated plan replays for a row reading the same values
 
 A site whose first execution read the outer row keys its results by the values of the names it consulted (`UncorrelatedSubqueryCache.KeyedSite`), compared as they render (`SqlValue.IsIdenticalTo`), so a later row reading the same values replays the result rather than running the plan.
+A name counts as consulted once the outer row answers it: seeking a scan by the values of an `IN` subquery that reads that same scan materializes those values ahead of the scan, asks the scan's column of the outer row, fails and declines, and the name it asked for joins no key.
 A deterministic plan handed the same values takes the same path through its rows, so the replay is exact; a run that consults a name outside the key starts the memo over under the wider key, and one that draws a per-call value sends the site per row as above.
 Measured 2026-10-25 (Release, the faster of two runs): over 4,000 rows, `WHERE a.x > (SELECT AVG(b.x) FROM t b WHERE b.g = a.g)` across 10 groups took 1.7 s and takes 23 ms, and `WHERE a.id = (SELECT MAX(b.id) FROM t b WHERE b.s = a.s)` across 13 groups 2.6 s and 46 ms.
 A correlation reading a unique column gains nothing: every row is a new key, filed until the site's capacity.

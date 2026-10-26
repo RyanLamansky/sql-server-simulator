@@ -448,4 +448,23 @@ public sealed class UncorrelatedSubqueryTests
             cross apply (select o.k as k2) a
             where exists (select 1 from inner_rows i where i.v = a.k2)
             """));
+
+    /// <summary>
+    /// A correlated subquery whose own <c>IN</c> subquery reads its scan files
+    /// its result under the enclosing row's values alone: seeking the scan by
+    /// the inner's values asks the scan's column of the enclosing row, fails
+    /// and declines, which consults nothing (probed 2026-10-26 against SQL
+    /// Server 2025: Django's nested outer reference).
+    /// </summary>
+    [TestMethod]
+    public void NestedCorrelation_ToTheInnerScan_ReplaysByTheEnclosingRow()
+        => AreEqual("1,2,3", new Simulation().ExecuteScalar("""
+            create table e (id int identity primary key, n int);
+            create table c (id int identity primary key, ceo_id int not null);
+            create index ix_ceo on c (ceo_id);
+            insert e (n) values (1), (2), (3);
+            insert c (ceo_id) values (1), (2), (3);
+            select string_agg(cast(x as varchar(9)), ',') within group (order by x) from (
+                select (select v.id from c v where v.ceo_id in (select u.id from e u where u.id = v.ceo_id) and v.ceo_id = e.id) as x from e) q
+            """));
 }
