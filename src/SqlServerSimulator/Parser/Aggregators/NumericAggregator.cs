@@ -162,14 +162,21 @@ internal abstract class NumericAggregator<TAccumulator>(SqlType resultType, bool
 
     protected sealed override void Accumulate(SqlValue value)
     {
+        TAccumulator total;
         try
         {
-            this.Accumulator = checked(this.Accumulator + this.ExtractCoerced(value));
+            total = checked(this.Accumulator + this.ExtractCoerced(value));
         }
         catch (OverflowException)
         {
             throw this.AccumulatorOverflow();
         }
+        // A float total past the type's range is real's Msg 8115 at the row
+        // that took it there (probed 2026-10-26 against SQL Server 2025),
+        // where double arithmetic answers an infinity rather than throwing.
+        if (!TAccumulator.IsFinite(total))
+            throw this.AccumulatorOverflow();
+        this.Accumulator = total;
     }
 
     protected sealed override void Deduct(SqlValue value) => this.Accumulator -= this.ExtractCoerced(value);
@@ -177,15 +184,19 @@ internal abstract class NumericAggregator<TAccumulator>(SqlType resultType, bool
     protected sealed override bool TryMergeTotals(NumericAggregatorBase other)
     {
         var source = (NumericAggregator<TAccumulator>)other;
+        TAccumulator total;
         try
         {
-            this.Accumulator = checked(this.Accumulator + source.Accumulator);
+            total = checked(this.Accumulator + source.Accumulator);
         }
         catch (OverflowException)
         {
             return false;
         }
 
+        if (!TAccumulator.IsFinite(total))
+            return false;
+        this.Accumulator = total;
         return true;
     }
 

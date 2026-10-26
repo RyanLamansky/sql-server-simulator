@@ -10,8 +10,9 @@ namespace SqlServerSimulator.Parser.Aggregators;
 /// <see cref="Decimal38"/> at the promoted result type, so a total past
 /// <c>decimal(38, s)</c> raises real's own Msg 8115 state 2. float and real
 /// alike sum in .NET <see cref="double"/> — real's result type is float, and
-/// each single widens exactly on the way in — with infinity / NaN as
-/// observed. Empty input or all-NULL input → NULL of result type.
+/// each single widens exactly on the way in — and a running total past
+/// float's range is Msg 8115 too. Empty input or all-NULL input → NULL of
+/// result type.
 /// DISTINCT dedups via <see cref="HashSet{SqlValue}"/> on the operand
 /// before accumulation.
 /// </summary>

@@ -783,6 +783,24 @@ public sealed class AggregateTests
         => new Simulation().AssertSqlError($"select {aggregate}(f) from (values (1e300), (-1e300)) v(f)", 8115, "Arithmetic overflow error converting expression to data type float.");
 
     /// <summary>
+    /// A float SUM or AVG whose running total passes float's range is Msg 8115
+    /// at the row that takes it there, so the same values in another order
+    /// answer (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select sum(f) from (values (1e308), (1e308)) v(f)")]
+    [DataRow("select avg(f) from (values (1e308), (1e308)) v(f)")]
+    [DataRow("select sum(f) over () from (values (1e308), (1e308)) v(f)")]
+    [DataRow("select sum(f) from (values (1e308), (1e308), (-1e308)) v(f)")]
+    [DataRow("select * from (values (1, 'b', 1e308), (1, 'b', 1e308)) v(k, c, f) pivot (sum(f) for c in ([b])) p")]
+    public void AFloatTotalPastFloatsRange_IsMsg8115(string sql)
+        => new Simulation().AssertSqlError(sql, 8115, "Arithmetic overflow error converting expression to data type float.");
+
+    [TestMethod]
+    public void AFloatTotalThatComesBackInRange_Answers()
+        => AreEqual(1e308, new Simulation().ExecuteScalar("select sum(f) from (values (1e308), (-1e308), (1e308)) v(f)"));
+
+    /// <summary>
     /// A <c>DISTINCT</c> / <c>ALL</c> quantifier makes any call an aggregate
     /// call to real's grammar, so the name's own grammar never sees it and the
     /// refusal follows from what the name turns out to be.
