@@ -66,7 +66,7 @@ internal sealed class StatementPlanRecording(int messagesAtStart)
     /// <summary>The kept <c>inserted</c> / <c>deleted</c> pair the parse bound, if any.</summary>
     public PseudoTableSlot? PseudoTables;
 
-    /// <summary>The <c>#temp</c> tables the parse bound, by name, if any (see <see cref="BatchContext.StatementTempTables"/>).</summary>
+    /// <summary>The <c>#temp</c> tables and table variables the parse bound, by name, if any (see <see cref="BatchContext.StatementTempTables"/>).</summary>
     public (string Name, Storage.HeapTable Table)[]? TempTables;
 #if DEBUG
 
@@ -154,18 +154,22 @@ internal sealed class StatementPlanEntry(StatementPlanRecording recording, long 
     public readonly PseudoTableSlot? PseudoTables = recording.PseudoTables;
 
     /// <summary>
-    /// The local <c>#temp</c> tables the plan binds, by the names it reads
-    /// them under, which only a run finding the same tables under those names
-    /// replays (<see cref="TempTablesHold"/>); null when it binds none.
+    /// The local <c>#temp</c> tables and table variables the plan binds, by
+    /// the names it reads them under, which only a run finding the same tables
+    /// under those names replays (<see cref="TempTablesHold"/>); null when it
+    /// binds none.
     /// </summary>
     public readonly (string Name, Storage.HeapTable Table)[]? TempTables = recording.TempTables;
 
-    /// <summary>Whether <paramref name="connection"/> finds under each name the plan binds a temp table by the table it bound.</summary>
-    public bool TempTablesHold(SimulatedDbConnection connection)
+    /// <summary>Whether <paramref name="batch"/> finds under each name the plan binds a temp table or table variable by the table it bound.</summary>
+    public bool TempTablesHold(BatchContext batch)
     {
         foreach (var (name, table) in this.TempTables ?? [])
         {
-            if (!connection.TempTables.TryGetValue(name, out var found) || !ReferenceEquals(found, table))
+            var found = BatchContext.IsTableVariableName(name)
+                ? batch.TryGetTableVariable(name[1..], out var variable) ? variable : null
+                : batch.Connection.TempTables.GetValueOrDefault(name);
+            if (!ReferenceEquals(found, table))
                 return false;
         }
         return true;

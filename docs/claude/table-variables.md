@@ -45,6 +45,7 @@ Coverage:
 - **`rowversion` / `timestamp`** — backed by the database-scoped 8-byte counter, same as regular tables.
   Two rowversion columns in one `@t` raise Msg 2738.
 - **Inline `INDEX`** in both forms, with CREATE TABLE's grammar and enforcement (see [`indexes.md`](indexes.md)) — a unique one raises Msg 2601 naming `dbo.@t` (probed 2026-09-25).
+  A read seeks a table variable's keys and indexes as it seeks a `#temp` table's, locking nothing: 2,000 point lookups by primary key over 100,000 rows took 21 s, every one a scan, and take 66 ms (measured 2026-10-26, Release).
   A table type takes them too and builds them per instance; a multi-statement function's return table raises `NotSupportedException`.
 
 Rejected at parse time (probe-confirmed against real SQL Server's grammar):

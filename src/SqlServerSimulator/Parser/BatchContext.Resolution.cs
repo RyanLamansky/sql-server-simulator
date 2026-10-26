@@ -190,10 +190,14 @@ internal sealed partial class BatchContext
                 table = null;
                 return false;
             }
-            this.HasSessionScopedReference = true;
             this.CurrentStatement.ReadsTemporaryObject = true;
             this.CurrentStatement.ReadsTableVariable = true;
-            return this.TryGetTableVariable(name.Leaf[1..], out table);
+            // Bound as a #temp table is; a parameter's rows belong to the call.
+            if (this.TryGetTableVariable(name.Leaf[1..], out table) && !table.IsTableValuedParameter && this.StatementTempTables is { } bound)
+                bound.Add((name.Leaf, table));
+            else
+                this.HasSessionScopedReference = true;
+            return table is not null;
         }
 
         if (!this.TryResolveSchema(name, out var schema))

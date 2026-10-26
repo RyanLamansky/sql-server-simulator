@@ -1955,6 +1955,9 @@ internal sealed partial class Selection
                     lobStore: tvTable.Heap,
                     rows: new UnlockedScanRows(tvTable),
                     backingTable: tvTable,
+                    // Locking nothing, as a #temp table's read does, it seeks
+                    // its keys as one does.
+                    heapPlan: DataLockPlan.Bypass,
                     writtenObjectName: tvName.Leaf);
 
             case ReservedKeyword { Keyword: Keyword.OpenXml }:

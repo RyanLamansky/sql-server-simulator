@@ -381,6 +381,7 @@ partial class Simulation
         // object name") — same convention the DML routing uses.
         var targetName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
         var enteredSessionScoped = context.Batch.HasSessionScopedReference;
+        var enteredBindings = context.Batch.StatementTempTables?.Count ?? 0;
         if (!context.Batch.TryResolveTable(targetName, out var targetTable))
         {
             throw BatchContext.IsTableVariableName(targetName.Leaf)
@@ -395,7 +396,11 @@ partial class Simulation
         // the statement's plan shareable; a parameter's rows are another matter.
         var declaredTableVariable = targetTable is { IsTableVariable: true, IsTableValuedParameter: false };
         if (declaredTableVariable)
+        {
             context.Batch.HasSessionScopedReference = enteredSessionScoped;
+            if (context.Batch.StatementTempTables is { } bound && bound.Count > enteredBindings)
+                bound.RemoveRange(enteredBindings, bound.Count - enteredBindings);
+        }
         context.MoveNextOptional();
 
         int[] columnOrdinals;

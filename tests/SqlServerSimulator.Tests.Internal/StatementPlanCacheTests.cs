@@ -101,6 +101,22 @@ public sealed class StatementPlanCacheTests
             "exec c"));
 
     [TestMethod]
+    public void TableVariable_ReplaysInItsBatchsLoop()
+        => AreEqual((2L, 2L), ReplaysOverThreeRuns(
+            "",
+            """
+            declare @t table (id int primary key, v int); insert @t values (1, 1), (2, 2);
+            declare @i int = 0, @s int;
+            while @i < 3 begin set @i += 1; select @s = v from @t where id = 1; update t set v = v + (select count(*) from @t) where id = 2; end
+            """) is var (selects, writes) ? (selects / 3, writes / 3) : default);
+
+    [TestMethod]
+    public void TableVariable_DeclaredByEachRun_ParsesEveryRun()
+        => AreEqual((0L, 0L), ReplaysOverThreeRuns(
+            "",
+            "declare @t table (id int); insert @t values (1); select id from @t; update @t set id = 2"));
+
+    [TestMethod]
     public void TableValuedParameter_ParsesEveryCall()
         => AreEqual((0L, 0L), ReplaysOverThreeRuns(
             "create type ids as table (id int)\ngo\ncreate procedure tv @ids ids readonly as select id from @ids; update t set v = 0 where id in (select id from @ids)",

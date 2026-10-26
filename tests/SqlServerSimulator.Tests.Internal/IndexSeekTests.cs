@@ -843,6 +843,17 @@ public sealed class IndexSeekTests
     /// nothing. The read narrows by the outer row's <c>tag</c> alone, through
     /// the statement's partition of <c>s1</c>'s unindexed column.
     /// </summary>
+    /// <summary>A table variable's key seeks as a table's does.</summary>
+    [TestMethod]
+    public void TableVariableKey_Seeks()
+    {
+        var (trace, rows) = Run("select 1", "declare @t table (id int primary key, v int); insert @t select value, value * 10 from generate_series(1, 100); select v from @t where id = 5");
+        Contains("Seek(@t)", trace);
+        DoesNotContain("Scan(@t)", trace);
+        HasCount(1, rows);
+        AreEqual(50, rows[0]);
+    }
+
     [TestMethod]
     public void ShadowedSiblingColumn_BindsToTheInnerPlan()
     {

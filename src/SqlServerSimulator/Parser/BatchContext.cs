@@ -1021,11 +1021,11 @@ internal sealed partial class BatchContext
     public PseudoTableSlot? StatementPseudoTables;
 
     /// <summary>
-    /// The local <c>#temp</c> tables the statement being recorded binds, by
-    /// the names it reads them under, which its plan names so only a run
-    /// finding the same tables under those names replays it
+    /// The local <c>#temp</c> tables and table variables the statement being
+    /// recorded binds, by the names it reads them under, which its plan names
+    /// so only a run finding the same tables under those names replays it
     /// (<see cref="StatementPlanEntry.TempTables"/>); null while no statement
-    /// records, when a temp table declines the plan as any session-scoped
+    /// records, when such a table declines the plan as any session-scoped
     /// reference does. Folded into <see cref="HasSessionScopedReference"/> once
     /// the statement has parsed, as what the batch read still belongs to the
     /// session.

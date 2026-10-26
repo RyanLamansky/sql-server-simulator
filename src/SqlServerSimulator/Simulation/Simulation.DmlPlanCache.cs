@@ -243,7 +243,7 @@ partial class Simulation
     /// <summary>
     /// <paramref name="entry"/> when it was recorded under the current schema
     /// version, in the database the batch is in, over the pseudo-tables its
-    /// firing holds and the temp tables the session holds (see
+    /// firing holds and the temp tables and table variables the batch holds (see
     /// <see cref="CurrentStatementPlan"/>); otherwise null.
     /// </summary>
     private StatementPlanEntry? Current(ParserContext context, StatementPlanEntry? entry) =>
@@ -251,7 +251,7 @@ partial class Simulation
             && entry.SchemaVersion == Volatile.Read(ref this.SchemaVersion)
             && ReferenceEquals(entry.Database, context.CurrentDatabase)
             && (entry.PseudoTables is null || ReferenceEquals(entry.PseudoTables, context.Batch.TriggerFrame?.PseudoTables))
-            && entry.TempTablesHold(context.Connection)
+            && entry.TempTablesHold(context.Batch)
                 ? entry
                 : null;
 

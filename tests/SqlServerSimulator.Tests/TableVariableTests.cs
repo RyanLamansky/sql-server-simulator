@@ -639,4 +639,18 @@ public sealed class TableVariableTests
         var check = sim.AssertSqlError("declare @t tt; insert @t values ('x')", 547);
         MatchesRegex(@"""CK__#[0-9A-F]{8}__a__[0-9A-F]{8}""\. The conflict occurred in database ""tempdb"", table ""@t""\.$", check.Errors[0].Message);
     }
+
+    /// <summary>
+    /// A lookup by a table variable's primary key seeks it, where each lookup
+    /// scanned every row.
+    /// </summary>
+    [TestMethod]
+    [Timeout(20000)]
+    public void KeyLookupLoop_RunsInLinearTime() =>
+        AreEqual(96034, new Simulation().ExecuteScalar("""
+            declare @t table (id int primary key, v int); insert @t select value, value % 97 from generate_series(1, 100000);
+            declare @i int = 0, @s int = 0, @v int;
+            while @i < 2000 begin set @i += 1; select @v = v from @t where id = @i * 37; set @s += @v; end;
+            select @s
+            """));
 }

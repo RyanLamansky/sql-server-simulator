@@ -189,7 +189,7 @@ The seek isn't a free pass around concurrency control: under a lock-based plan i
 A tx-scoped row-lock plan (`REPEATABLE READ` / `UPDLOCK` / `XLOCK`) seeks too, and lets go of the lock on a candidate its query's own `WHERE` rejects, so the transaction keeps only the rows it returns, as real's does — see [`locking.md`](locking.md#key-range-locks).
 It **declines** — falling back to the full scan — for:
 
-- non-base-table sources (derived tables, table variables, `FOR SYSTEM_TIME`), a WHERE with no equality conjunct on any index's leading column (a range-only predicate is handled separately — see [Range seeks](#range-seeks)), and `NULL` / non-resolvable-collation value sides.
+- non-base-table sources (derived tables, `FOR SYSTEM_TIME`), a WHERE with no equality conjunct on any index's leading column (a range-only predicate is handled separately — see [Range seeks](#range-seeks)), and `NULL` / non-resolvable-collation value sides.
 
 ### The equality seek's span gate
 
