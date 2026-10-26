@@ -451,4 +451,4 @@ Within the limit, whatever reads a whole chain walks its spine iteratively — `
 
 A `UNION ALL` chain is a tree as deep as it is long, but real doesn't count it as nesting — it runs 10,000 branches (probed 2026-10-24 against SQL Server 2025) — so the walks over one are iterative: execution reads the chain's branches off its left spine (`ConcatBranchRows`), `Selection.ReachOf` collects their reach on a stack of its own, and the constant-row keys are settled once per chain (`KeyConstantBranches`).
 
-**Not modeled yet:** each operator still copies the branch list to its left (`Selection.UnionAllBranches`), so parsing a chain is quadratic past several thousand branches — 10,000 take about 2.5 s (Release, measured 2026-10-24).
+The chain's operators share one branch list down its left spine, each reading its own first branches (`Selection.UnionAllBranches`), where each copying every branch to its left made parsing quadratic: a batch inserting 20,000 `UNION ALL` branches went from 7.2 s to 1.2 s and 10,000 from 1.8 s to 0.72 s (Release, measured 2026-10-26), and real runs a 20,000-branch `SELECT` in about a second.

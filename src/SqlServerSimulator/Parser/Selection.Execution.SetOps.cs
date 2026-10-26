@@ -23,8 +23,60 @@ internal sealed partial class Selection
     /// The branches of a <c>UNION ALL</c> chain this plan tops, nested
     /// <c>UNION ALL</c> chains flattened, in order — the members a write
     /// through a partitioned view routes to; null on every other plan.
+    /// Listed as the plan first reads them: the chain's operators share one
+    /// list down its left spine, each reading the first
+    /// <see cref="unionAllCount"/> of it, since each copying every branch to
+    /// its left made a chain of thousands quadratic to parse.
     /// </summary>
-    internal Selection[]? UnionAllBranches;
+    internal Selection[]? UnionAllBranches =>
+        this.unionAllMembers is { } members ? field ??= members.First(this.unionAllCount) : null;
+
+    private UnionAllMembers? unionAllMembers;
+    private int unionAllCount;
+
+    /// <summary>
+    /// A <c>UNION ALL</c> chain's branches as its operators parse: an operator
+    /// over a plan whose list nothing has appended to since appends to it in
+    /// place (<see cref="CombineUnionAllMembers"/>).
+    /// </summary>
+    private sealed class UnionAllMembers
+    {
+        private Selection[] items = new Selection[4];
+        public int Count;
+
+        public void Add(Selection branch)
+        {
+            if (this.Count == this.items.Length)
+                Array.Resize(ref this.items, this.items.Length * 2);
+            this.items[this.Count++] = branch;
+        }
+
+        public Selection[] First(int count) => this.items.AsSpan(0, count).ToArray();
+    }
+
+    /// <summary>
+    /// The branch list a <c>UNION ALL</c> of <paramref name="left"/> and
+    /// <paramref name="right"/> reads: <paramref name="left"/>'s own, appended
+    /// to in place when it ends at <paramref name="left"/>'s last branch, which
+    /// a chain parsed left to right always does.
+    /// </summary>
+    private static UnionAllMembers CombineUnionAllMembers(Selection left, Selection right)
+    {
+        UnionAllMembers members;
+        if (left.unionAllMembers is { } leftMembers && leftMembers.Count == left.unionAllCount)
+        {
+            members = leftMembers;
+        }
+        else
+        {
+            members = new UnionAllMembers();
+            foreach (var branch in left.UnionAllBranches ?? [left])
+                members.Add(branch);
+        }
+        foreach (var branch in right.UnionAllBranches ?? [right])
+            members.Add(branch);
+        return members;
+    }
 
     /// <summary>
     /// The set operation that reads this plan as an operand, set as that
@@ -384,6 +436,7 @@ internal sealed partial class Selection
 
         var isBareConstantRows = left.IsBareConstantRow && right.IsBareConstantRow;
         var readsStorage = left.ReadsStorage || right.ReadsStorage;
+        var unionAllMembers = kind == SetOpKind.UnionAll ? CombineUnionAllMembers(left, right) : null;
         Selection combined = null!;
         combined = new Selection(combinedSchema, combinedNames,
             hasOrderBy: false,
@@ -406,7 +459,8 @@ internal sealed partial class Selection
             // ApplyTopLevelOrderBy).
             ProjectionExpressions = left.ProjectionExpressions,
             BranchFromSources = left.BranchFromSources,
-            UnionAllBranches = kind == SetOpKind.UnionAll ? [.. left.UnionAllBranches ?? [left], .. right.UnionAllBranches ?? [right]] : null,
+            unionAllMembers = unionAllMembers,
+            unionAllCount = unionAllMembers?.Count ?? 0,
             IsSetOperationResult = true,
             SetOperands = (left, right, kind),
             // AUTO over a set-op result flattens to a single level named after

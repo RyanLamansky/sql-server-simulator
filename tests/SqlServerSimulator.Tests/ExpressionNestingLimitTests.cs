@@ -439,6 +439,17 @@ public sealed class ExpressionNestingLimitTests
     }
 
     /// <summary>
+    /// Parsing a chain is linear in its branches, where each operator copying
+    /// every branch to its left made 20,000 take seconds; real runs them
+    /// (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [Timeout(20000)]
+    public void UnionAllChain_OfTwentyThousand_ParsesInLinearTime()
+        => AreEqual(20000, new Simulation().ExecuteScalar(
+            "select count(*) from (" + string.Join(" union all ", Enumerable.Range(0, 20000).Select(i => $"select {i.ToInvariantString()} as x")) + ") u"));
+
+    /// <summary>
     /// A chain of CTEs, each reading the last, hands its projection demand
     /// down the whole chain: real reads 850 of them (probed 2026-10-25 against
     /// SQL Server 2025), and past the thread's stack the hand-down is Msg 8631
