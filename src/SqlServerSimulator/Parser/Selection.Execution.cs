@@ -2374,7 +2374,7 @@ internal sealed partial class Selection
                 // array), so a nested-loop join stops re-generating them per
                 // outer row and the equi-join hash path can key them.
                 // Correlated sources are left untouched.
-                execSources = MaterializeUncorrelatedDeferredSources(execSources, joins, batch, outerResolver);
+                execSources = MaterializeUncorrelatedDeferredSources(execSources, joins, batch, outerResolver, leftmostAsParsed: sources.Length != 0 && ReferenceEquals(execSources[0], sources[0]));
                 // An emptiness probe of this plan (HasAnyRow) needs its rows,
                 // not their values, so it projects nothing — unless an ORDER BY
                 // reads the projection.
@@ -3299,7 +3299,16 @@ internal sealed partial class Selection
     /// The leftmost source is left deferred: a fold range's leftmost slot
     /// already executes its plan exactly once and streams, so materializing it
     /// buys nothing and costs the buffer. The leftmost slot of a parenthesized
-    /// join group is skipped for the same reason.
+    /// join group is skipped for the same reason. A query run once per
+    /// enclosing row (<paramref name="leftmostAsParsed"/>, its slot as parsed)
+    /// runs its leftmost plan again for every such row, though: the first run
+    /// streams, as its reader may stop early — an <c>EXISTS</c> at its first
+    /// row — and the second runs it whole under the probe, keeping its rows on
+    /// the statement for every later run when it read nothing of the
+    /// enclosing row, and marking the plan to stream per row otherwise, so a
+    /// correlated body runs whole once at most. Inside a recursive member's
+    /// iteration nothing is kept, since a body over the member's own reference
+    /// reads rows each iteration changes without reading the enclosing row.
     /// </para>
     /// <para>
     /// A source whose rows a <em>generator</em> produces — a TVF, VALUES,
@@ -3329,13 +3338,28 @@ internal sealed partial class Selection
     /// </para>
     /// </remarks>
     private static FromSource[] MaterializeUncorrelatedDeferredSources(
-        FromSource[] sources, JoinSpec[] joins, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+        FromSource[] sources, JoinSpec[] joins, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, bool leftmostAsParsed = false)
     {
         FromSource[]? rewritten = null;
         for (var i = 0; i < sources.Length; i++)
         {
-            if (sources[i].LateralPlan is not { } plan || !MaterializesOncePerEnumeration(sources, joins, i))
+            if (sources[i].LateralPlan is not { } plan)
                 continue;
+            // The statement's memo when the slot is a leftmost one run again.
+            Dictionary<object, object>? leftmostMarks = null;
+            if (!MaterializesOncePerEnumeration(sources, joins, i))
+            {
+                if (i != 0 || !leftmostAsParsed || outerResolver is null || batch.RecursiveIterations != 0)
+                    continue;
+                leftmostMarks = batch.CurrentStatement.SubqueryResults ??= new Dictionary<object, object>(ReferenceEqualityComparer.Instance);
+                if (!leftmostMarks.TryGetValue(plan, out var mark))
+                {
+                    leftmostMarks[plan] = LeftmostStreamedOnce;
+                    continue;
+                }
+                if (ReferenceEquals(mark, LeftmostStreamsPerRow))
+                    continue;
+            }
             // A whole cacheable catalog view is its cached rowset, handed over
             // as is so a hash join can probe the rowset's persisted index.
             if (sources[i] is { BackingCatalogView: { Cacheable: true } view, BackingCatalogDatabase: { } catalogDatabase, CatalogSeek: false })
@@ -3370,16 +3394,25 @@ internal sealed partial class Selection
                 if (batch.Connection.VolatileEvaluations != volatileEvaluationsAtStart
                     && plan.VolatileColumns is not ({ FixesValues: true } or { Complete: true }))
                 {
+                    _ = leftmostMarks?[plan] = LeftmostStreamsPerRow;
                     continue;
                 }
                 if (probe is not null && probe.CanReplay(enclosing))
                     (batch.CurrentStatement.SubqueryResults ??= new Dictionary<object, object>(ReferenceEqualityComparer.Instance))[plan] = materialized;
+                else
+                    _ = leftmostMarks?[plan] = LeftmostStreamsPerRow;
             }
             rewritten ??= (FromSource[])sources.Clone();
             rewritten[i] = sources[i].WithMaterializedRows(materialized);
         }
         return rewritten ?? sources;
     }
+
+    // The marks the leftmost slot of a query run once per enclosing row leaves
+    // on the statement under its plan (MaterializeUncorrelatedDeferredSources):
+    // run once, streaming; or found to read the enclosing row or to draw per
+    // call, streaming per row from then on.
+    private static readonly object LeftmostStreamedOnce = new(), LeftmostStreamsPerRow = new();
 
     /// <summary>
     /// The rows an earlier enumeration in this statement materialized for
@@ -3392,7 +3425,7 @@ internal sealed partial class Selection
     /// rows: the statement is the scope over which the data it read is fixed.
     /// </summary>
     private static List<byte[]>? StatementMaterializedRows(BatchContext batch, Selection plan) =>
-        batch.CurrentStatement.SubqueryResults is { } memo && memo.TryGetValue(plan, out var rows) ? (List<byte[]>)rows : null;
+        batch.CurrentStatement.SubqueryResults is { } memo && memo.TryGetValue(plan, out var rows) ? rows as List<byte[]> : null;
 
     /// <summary>
     /// The row-source passes a <b>joined UPDATE / DELETE</b> takes before it

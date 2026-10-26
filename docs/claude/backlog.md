@@ -175,9 +175,7 @@ Open residuals, in measured-impact order:
   Item 1's unexplained fork cost is additionally the hard gate on flipping the pilot's default, whenever the topic reopens.
 - **What EF Core's functional classes still spend in the simulator** (measured 2026-10-03, see [`plan-cache.md`](plan-cache.md#second-pass-the-simulator-inside-the-test-process)) — inside a test process the simulator's methods mostly never leave tier 0, which is the consumer's tiering settings rather than the library's; of what the library controls, the costs left are:
   an uncached statement whose batch hasn't compiled before builds two `BatchContext`s, each with eager dictionaries, so `SELECT 1` costs ~3 µs and ~9 KB;
-  the first catalog read builds every catalog view (~50 ms per process, about half of it compiling the `Register*` methods), and `BuiltInResources`' initializer still carries `sys.types`' rows, the configuration table and the time-zone list (~7 ms of that);
-  a correlated subquery reading only an outer-outer row re-runs per inner row — Northwind's `EXISTS` over three `TOP (1)` scalar subqueries on the customer runs them 20,000 times for 8 customers (~27 ms), where a memo keyed by the consulted outer values would run them 24 times;
-  and a leftmost uncorrelated derived table inside a per-row body (`EXISTS (SELECT 1 FROM (SELECT TOP (100) … ORDER BY …) o1 WHERE …)`) re-sorts per outer row until the semi-join switch (~40 ms), because its consumer may stop early and the statement-scoped reuse the non-leftmost slots take only stores a fully drained source.
+  and the first catalog read builds every catalog view (~50 ms per process, about half of it compiling the `Register*` methods), and `BuiltInResources`' initializer still carries `sys.types`' rows, the configuration table and the time-zone list (~7 ms of that).
   The first pass's per-row ordered seek (`CappedCandidates`) didn't rank in these six classes.
 
 ### Built-in functions

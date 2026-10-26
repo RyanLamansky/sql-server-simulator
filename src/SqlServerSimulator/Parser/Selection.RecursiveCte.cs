@@ -67,6 +67,7 @@ internal sealed partial class Selection
             batch.ThrowIfCancelled();
 
             binding.CurrentIterationRows = current;
+            batch.RecursiveIterations++;
             var next = new List<byte[]>();
             try
             {
@@ -78,6 +79,7 @@ internal sealed partial class Selection
             }
             finally
             {
+                batch.RecursiveIterations--;
                 binding.CurrentIterationRows = null;
             }
 

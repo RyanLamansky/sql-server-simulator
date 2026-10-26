@@ -5,7 +5,8 @@ namespace SqlServerSimulator;
 /// <summary>
 /// Behavior a FROM source keeps once a non-leftmost, non-APPLY deferred plan —
 /// a derived table, a CTE reference or a view — runs once per enumeration
-/// instead of once per left-side row: the rows every join kind produces, the
+/// instead of once per left-side row, and a leftmost one once per statement
+/// inside a query run per enclosing row: the rows every join kind produces, the
 /// laterality APPLY keeps, the per-call-varying built-in that declines the
 /// reuse, and the correlation a rowset function's arguments still carry. The
 /// join strategy the materialized source becomes eligible for is asserted in
@@ -289,6 +290,56 @@ public sealed class DeferredSourceMaterializationTests
                         join (select v from amounts where amounts.id = o.id) d on 1 = 1) as s
                 from ids o) x
             """));
+
+    // ---- the leftmost source of a query run per enclosing row ---------------
+
+    /// <summary>
+    /// A leftmost derived table reading nothing of the enclosing row runs once
+    /// for the statement, from the query's second run on, where each of the
+    /// 2,000 runs sorted all 20,000 rows again.
+    /// </summary>
+    [TestMethod]
+    [Timeout(20000)]
+    public void LeftmostDerivedTable_InAQueryRunPerRow_RunsOnce()
+        => AreEqual(500, new Simulation().ExecuteScalar("""
+            create table c (id int primary key); create table o (id int primary key, cid int, v int);
+            insert c select value from generate_series(1, 2000);
+            insert o select value, value % 2000 + 1, (value * 7919) % 20011 from generate_series(1, 20000);
+            select count(*) from c where (select max(d.v) from (select top (500) o.v, o.cid from o order by o.v) d where d.cid = c.id) is not null
+            """));
+
+    /// <summary>
+    /// A leftmost derived table reading the enclosing row keeps running per
+    /// row once its second run shows the read.
+    /// </summary>
+    [TestMethod]
+    public void LeftmostDerivedTable_ReadingTheEnclosingRow_RunsPerRow()
+        => AreEqual(233358, new Simulation().ExecuteScalar("""
+            create table c (id int primary key); create table o (id int primary key, cid int, v int);
+            insert c select value from generate_series(1, 2000);
+            insert o select value, value % 2000 + 1, (value * 7919) % 20011 from generate_series(1, 20000);
+            select sum(x) from (select (select sum(d.v) from (select top (2) o.v from o where o.cid = c.id order by o.v) d) x from c where c.id <= 50) q
+            """));
+
+    /// <summary>
+    /// A recursive member's leftmost body over the member's own reference
+    /// reads each iteration's rows, read inside a query run per row too.
+    /// </summary>
+    [TestMethod]
+    public void LeftmostBodyOverARecursiveReference_ReadsEachIteration()
+        => AreEqual(7, WithTenRows().ExecuteScalar("""
+            with r (n) as (select 1 union all select d.n + 1 from (select n from r) d where d.n < 7)
+            select count(*) from ten t where exists (select 1 from r where r.n = t.id)
+            """));
+
+    /// <summary>
+    /// A leftmost body drawing <c>NEWID()</c> keeps drawing per enclosing row
+    /// (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void NewIdInALeftmostBody_KeepsDrawingPerEnclosingRow()
+        => AreEqual(10, WithTenRows().ExecuteScalar(
+            "select count(distinct a.g) from ten t cross apply (select top (1) d.g from (select top (5) newid() g, x.id from ten x order by x.id) d) a"));
 
     /// <summary>
     /// The materialized rows belong to one execution, never to the plan: the

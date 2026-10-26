@@ -330,6 +330,13 @@ EF Core's `ExecuteDelete` over a navigation (`DELETE … WHERE EXISTS (SELECT 1 
 The leftmost source stays deferred — a fold range's leftmost slot already executes its plan once and streams, so materializing it buys nothing and costs the buffer.
 The leftmost slot of a parenthesized join group is skipped for the same reason (`GroupJoin` materializes the whole interior as a unit).
 
+**A query run once per enclosing row runs its leftmost body whole once, from its second run.**
+Inside a correlated `EXISTS`, a scalar subquery or an `APPLY` body, the leftmost slot's plan runs again for every enclosing row, so the first run streams — its reader may stop at its first row — and the second runs it whole under the probe, keeping its rows on the statement when it read nothing of the enclosing row and drew nothing per call, and marking the plan to stream per row otherwise, so a correlated body runs whole once at most.
+Nothing is kept inside a recursive member's iteration (`BatchContext.RecursiveIterations`), where a body over the member's own reference reads rows each iteration changes without reading the enclosing row.
+A slot a pass rewrote for the run — a pushed filter, a bounded row number — is a plan of that run's own and streams.
+`EXISTS (SELECT 1 FROM (SELECT TOP (100) … FROM o ORDER BY o.v) d WHERE d.cid = c.id)` over 100 rows of `c` and 20,000 of `o` went from 196 ms to 21 ms, against real's 4 ms (Release, measured 2026-10-26).
+The second run reads the whole body where real's lazy spool reads only what its readers ask for, so a column the reader reads that raises on a body row past every reader's stop raises here and not there.
+
 A **generator-backed source** — a TVF, `VALUES`, `OPENJSON` / `OPENXML`, `STRING_SPLIT`, a linked-server query, `xml.nodes()` — qualifies on the same terms, because its arguments provably read no sibling: naming one is Msg 4104 (the section above), and everything else they can read (a literal, a variable, an enclosing scope's column) is fixed for one execution of this plan.
 Measured on WWI, `Sales.Invoices` (70,510 rows) joined to `GENERATE_SERIES(1, 20)` on an equi key: **160.9 ms / 83.9 MB → 24.5 ms / 9.7 MB**, since materializing is also what lets `TryPlanEquiJoin` hash the level instead of re-running the generator per left row.
 

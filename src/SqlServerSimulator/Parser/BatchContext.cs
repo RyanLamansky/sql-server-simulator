@@ -885,6 +885,16 @@ internal sealed partial class BatchContext
     public bool YieldsBetweenStatements;
 
     /// <summary>
+    /// How many recursive common table expressions are running a recursive
+    /// member's iteration, inside which a source's rows can change between
+    /// two enumerations without its reading the enclosing row — a body over
+    /// the member's own reference reads the previous iteration's rows — so the
+    /// leftmost slot keeps no rows for the statement there
+    /// (<see cref="Selection"/>'s deferred-source materialization).
+    /// </summary>
+    public int RecursiveIterations;
+
+    /// <summary>
     /// How many statements are running inside one another: 1 while a
     /// statement the batch's own dispatch loop reached runs, more inside a
     /// block, a <c>TRY</c>, an <c>IF</c> or a <c>WHILE</c>, whose statements
