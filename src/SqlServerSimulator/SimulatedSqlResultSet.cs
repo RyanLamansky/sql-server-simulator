@@ -204,9 +204,14 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
             if (values is List<SqlValue[]>)
                 return null;
             List<SqlValue[]>? produced = null;
+            // A row's error leaves the rows before it in a finally rather
+            // than in a catch that rethrows the error, which would dispatch
+            // it once more.
+            var started = false;
             try
             {
                 var stream = ResultStream<SqlValue[], ValueRowMeasure>.Start(values, this.columnNames, ValueRowMeasure.For(this.schema, this.ColumnNullability), statement, connection, out produced);
+                started = true;
                 if (stream is null)
                 {
                     this.rowValues = produced;
@@ -216,10 +221,10 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
                 stream.Result = this;
                 return this.Stream = stream;
             }
-            catch (SimulatedSqlException)
+            finally
             {
-                this.rowValues = produced ?? [];
-                throw;
+                if (!started)
+                    this.rowValues = produced ?? [];
             }
         }
 
@@ -236,9 +241,11 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
         where TMeasure : IRowMeasure<byte[]>
     {
         List<byte[]>? producedBytes = null;
+        var started = false;
         try
         {
             var byteStream = ResultStream<byte[], TMeasure>.Start(this.rowBytes!, this.columnNames, measure, statement, connection, out producedBytes);
+            started = true;
             if (byteStream is null)
             {
                 this.rowBytes = producedBytes;
@@ -248,10 +255,10 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
             byteStream.Result = this;
             return this.Stream = byteStream;
         }
-        catch (SimulatedSqlException)
+        finally
         {
-            this.rowBytes = producedBytes ?? [];
-            throw;
+            if (!started)
+                this.rowBytes = producedBytes ?? [];
         }
     }
 

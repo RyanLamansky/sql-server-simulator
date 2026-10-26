@@ -369,7 +369,7 @@ public sealed class SimulatedDbCommand : DbCommand
         var browse = behavior.HasFlag(CommandBehavior.KeyInfo) && this.CommandType == CommandType.Text && this.Connection is { NoBrowseTable: false };
         if (browse)
             this.Connection!.NoBrowseTable = true;
-        SimulatedDbDataReader reader;
+        SimulatedDbDataReader? reader = null;
         this.Request = null;
         this.ReadByReader = true;
         this.StreamsResultRows = true;
@@ -377,17 +377,18 @@ public sealed class SimulatedDbCommand : DbCommand
         {
             reader = new SimulatedDbDataReader(this.simulation.CreateResultSetsForCommand(this), this.Connection, this);
         }
-        catch
-        {
-            if (browse)
-                this.Connection!.NoBrowseTable = false;
-            // The batch was read whole for the error it raised.
-            if (this.Request is { } failed)
-                this.Connection!.ConsumeRequest(failed);
-            throw;
-        }
         finally
         {
+            // A failure is undone here rather than in a catch that rethrows
+            // the error, which would dispatch the client's every error twice.
+            if (reader is null)
+            {
+                if (browse)
+                    this.Connection!.NoBrowseTable = false;
+                // The batch was read whole for the error it raised.
+                if (this.Request is { } failed)
+                    this.Connection!.ConsumeRequest(failed);
+            }
             this.ReadByReader = false;
             this.StreamsResultRows = false;
         }

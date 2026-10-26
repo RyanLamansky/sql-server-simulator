@@ -801,6 +801,9 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
         var window = contended ? PacketBytes
             : connection is { MarsPacketBytes: > 0 and var marsPacket } ? Math.Min(FirstWindowBytes, (long)FirstWindowPackets * marsPacket)
             : FirstWindowBytes;
+        // The source is disposed in a finally rather than in a catch that
+        // rethrows a row's error, which would dispatch the error once more.
+        var handedOn = false;
         try
         {
             var probed = false;
@@ -809,17 +812,14 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
             {
                 var probes = statement?.RowsProbed ?? 0;
                 if (!source.MoveNext())
-                {
-                    source.Dispose();
                     return null;
-                }
                 probed = statement is not null && statement.RowsProbed != probes;
                 probesFrom = probes;
                 var row = source.Current;
                 produced.Add(row);
                 bytes += measure.Of(row);
             }
-            return new ResultStream<T, TMeasure>(source, measure, produced, header)
+            var stream = new ResultStream<T, TMeasure>(source, measure, produced, header)
             {
                 statement = statement,
                 lastRowProbed = probed,
@@ -828,11 +828,13 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
                 owner = owner,
                 producesAhead = contended,
             };
+            handedOn = true;
+            return stream;
         }
-        catch
+        finally
         {
-            source.Dispose();
-            throw;
+            if (!handedOn)
+                source.Dispose();
         }
     }
 
