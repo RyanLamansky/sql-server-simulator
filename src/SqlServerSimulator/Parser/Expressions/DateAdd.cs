@@ -41,6 +41,8 @@ internal sealed class DateAdd : Expression
 
     internal override bool ParallelSafe => this.number.ParallelSafe && this.source.ParallelSafe;
 
+    internal override bool IsRowIndependent => this.number.IsRowIndependent && this.source.IsRowIndependent;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         // The number evaluates first, so an error in it outranks one in the

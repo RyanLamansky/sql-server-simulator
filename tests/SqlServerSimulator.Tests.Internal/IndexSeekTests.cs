@@ -1469,6 +1469,23 @@ public sealed class IndexSeekTests
         AreEqual(expected, string.Join(",", rows));
     }
 
+    /// <summary>
+    /// A bound reading no row — the statement's clock, a DATEADD over it —
+    /// anchors a seek as a variable does, as real's runtime constants do.
+    /// </summary>
+    [TestMethod]
+    [DataRow("d > getdate()", "2")]
+    [DataRow("d > dateadd(day, -3, sysdatetime())", "1,2")]
+    [DataRow("d between dateadd(day, -3, getdate()) and getdate()", "1")]
+    public void ClockBound_RangeSeeks(string predicate, string expected)
+    {
+        var (trace, rows) = Run(
+            "create table t (id int primary key, d datetime2 index ix_d); insert t values (1, dateadd(day, -2, sysdatetime())), (2, dateadd(day, 2, sysdatetime())), (3, dateadd(day, -9, sysdatetime()))",
+            $"select id from t where {predicate}");
+        Contains("RangeSeek(t)", trace);
+        AreEqual(expected, string.Join(",", rows));
+    }
+
     [TestMethod]
     public void GreaterOrEqual_OnPrimaryKey_RangeSeeks()
     {

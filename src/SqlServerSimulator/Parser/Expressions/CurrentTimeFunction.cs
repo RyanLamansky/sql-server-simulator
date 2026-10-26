@@ -100,6 +100,9 @@ internal sealed class CurrentTimeFunction(CurrentTimeKind kind) : Expression
 
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
+    /// <summary>The statement's own instant, frozen as it began, which no row moves.</summary>
+    internal override bool IsRowIndependent => true;
+
     internal override string DebugDisplay() => this.Kind switch
     {
         CurrentTimeKind.GetDate => "GETDATE()",

@@ -5241,14 +5241,16 @@ internal sealed partial class Selection
     // is harmless. Pure conversion wrappers (CAST / CONVERT / parens) are peeled
     // first — `id = CAST(@v AS bigint)` is as stable as `id = @v`, matching real
     // SQL Server keeping the cast sargable. The stable leaves are a literal, a
-    // session variable, or a column reference that escapes to the enclosing
-    // scope (see IsEnclosingScopeReference). An arithmetic node (which is how the
-    // parser represents a negative literal: `-1` is `0 - 1`) is stable when both
-    // its operands are — a deterministic operator over row-invariant operands is
-    // itself row-invariant, so `id = -1` / `id = @v + 1` seek too, and the
-    // recursion still excludes a column of the plan's own FROM or a
-    // non-deterministic / side-effecting function / subquery leaf (those
-    // decline).
+    // session variable, a column reference that escapes to the enclosing
+    // scope (see IsEnclosingScopeReference), or a node that reads no row
+    // (Expression.IsRowIndependent — the statement's frozen clock, a DATEADD
+    // over it), so `d > DATEADD(day, -7, GETDATE())` seeks as real's runtime
+    // constant does. An arithmetic node (which is how the parser represents a
+    // negative literal: `-1` is `0 - 1`) is stable when both its operands are —
+    // a deterministic operator over row-invariant operands is itself
+    // row-invariant, so `id = -1` / `id = @v + 1` seek too, and the recursion
+    // still excludes a column of the plan's own FROM or a non-deterministic /
+    // side-effecting function / subquery leaf (those decline).
     // <paramref name="allowCorrelatedColumnValue"/> is false at a site with no
     // enclosing scope to read a column from (a single-table mutation), where no
     // column reference can be a probe value at all.
@@ -5269,7 +5271,9 @@ internal sealed partial class Selection
             TwoSidedExpression arithmetic => arithmetic.BothOperandsMatch(
                 operand => IsStableValueSide(operand, source, allowCorrelatedColumnValue, planSources)),
             Negate negate => IsStableValueSide(negate.Operand, source, allowCorrelatedColumnValue, planSources),
-            _ => false,
+            // A function reading no row — the statement's clock, a DATEADD
+            // over it — is a bound as fixed as a variable.
+            _ => expression.IsRowIndependent,
         };
     }
 
