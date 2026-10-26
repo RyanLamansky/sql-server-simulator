@@ -1,3 +1,4 @@
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
@@ -264,6 +265,12 @@ internal sealed class CursorSourcePlan
     /// rows it reads. Copied from <see cref="Selection.InstallsRowAddresses"/>.
     /// </summary>
     public bool InstallsRowAddresses;
+
+    /// <summary>
+    /// Which writes keep a DYNAMIC cursor's order over this plan, settled at
+    /// its first fetch (<see cref="Selection.DynamicOrder"/>); null until then.
+    /// </summary>
+    public Selection.CursorOrderRules? OrderRules;
 
     public CursorSourcePlan(
         FromSource[] sources,
@@ -819,27 +826,42 @@ internal sealed partial class Selection
     /// </summary>
     internal static CursorRow? TryReadKeysetMember(CursorSourcePlan plan, BatchContext batch, CursorRow member)
     {
-        if (plan.Slots.Length != 1 || plan.Slots[0].Table is not { } table || member.Rids[0] is not { } address
+        if (plan.Slots.Length != 1 || plan.Slots[0].Table is not { } table || member.Rids[0] is null
             || batch.Connection.StatementIo is not null || !IdentityIsUnique(table, plan.IdentityKeys[0]))
         {
             return null;
         }
-        var rows = EnumerateCursorRows(plan, batch, outerResolver: null, applyRowLimit: false, onlyAddress: address);
+        var rows = EnumerateCursorRows(plan, batch, outerResolver: null, applyRowLimit: false, onlyAddresses: member.Rids);
         return rows.Count == 1 && CursorIdentityMatches(plan, rows[0], member) ? rows[0] : null;
     }
 
     /// <summary>
-    /// A one-table DYNAMIC cursor's live rows in its order, by identity alone
-    /// — no WHERE, no select list — as of a generation of the table's heap
-    /// (<see cref="DynamicOrder"/>). A fetch searches it for the last row
-    /// read and evaluates rows from there until one passes the WHERE, which
-    /// is the row the walk of every live row (<see cref="EnumerateForCursor"/>)
-    /// would find next, the two sharing <see cref="CompareCursorRows"/>.
+    /// Whether a row of the plan's result can be read at its addresses alone,
+    /// each source confined to the row at its own: no APPLY right side, whose
+    /// rows the left row decides, and no row limit under it, which a view's
+    /// body applies again over all its rows at every fetch.
     /// </summary>
-    internal sealed class CursorOrder(CursorSourcePlan plan, long generation, CursorRow[] rows)
+    private static bool ReadsAtAddresses(CursorSourcePlan plan)
     {
-        public readonly long Generation = generation;
+        for (var i = 0; i < plan.Slots.Length; i++)
+        {
+            if (IsApplySlot(plan, i) || (plan.Slots[i].Nested is { } nested && (nested.HasRowLimit || !ReadsAtAddresses(nested))))
+                return false;
+        }
+        return true;
+    }
 
+    /// <summary>
+    /// A DYNAMIC cursor's joined rows in its order, by identity alone — no
+    /// WHERE, no select list — as of a generation of each base table's heap
+    /// (<see cref="DynamicOrder"/>). A fetch searches it for the last row
+    /// read and reads rows at their addresses from there until one joins and
+    /// passes the WHERE, which is the row the walk of every live row
+    /// (<see cref="EnumerateForCursor"/>) would find next, the two sharing
+    /// <see cref="CompareCursorRows"/>.
+    /// </summary>
+    internal sealed class CursorOrder(CursorSourcePlan plan, long[] generations, CursorRow[] rows)
+    {
         public int Count => rows.Length;
 
         /// <summary>
@@ -861,93 +883,243 @@ internal sealed partial class Selection
             return before ? lo - 1 : lo;
         }
 
-        /// <summary>This order, read on at <paramref name="generation"/>, which writes keeping every row in its place reached.</summary>
-        public CursorOrder At(long generation) => new(plan, generation, rows);
+        /// <summary>
+        /// This order while no base table's heap has changed since it was
+        /// read, or has changed only by writes keeping every row in its place
+        /// (<see cref="CursorOrderRules.Keeps"/>), read on at the generations
+        /// those writes reached; null when a write may have moved a row or
+        /// joined a new one, or the journal no longer reaches back to the
+        /// order.
+        /// </summary>
+        public CursorOrder? ReadOn(CursorOrderRules rules)
+        {
+            var tables = plan.IdentityTables;
+            long[]? reached = null;
+            for (var i = 0; i < tables.Length; i++)
+            {
+                var heap = tables[i].Heap;
+                if (Volatile.Read(ref heap.MutationGeneration) == generations[i])
+                    continue;
+                if (heap.SnapshotSeekJournalSince(generations[i], out var current) is not { } writes)
+                    return null;
+                foreach (var write in writes)
+                {
+                    if (!rules.Keeps(write, i, plan))
+                        return null;
+                }
+                (reached ??= (long[])generations.Clone())[i] = current;
+            }
+            return reached is null ? this : new(plan, reached, rows);
+        }
 
-        /// <summary>The first row from position <paramref name="from"/> on, stepping by <paramref name="step"/>, that passes the cursor's WHERE, evaluated as the walk would.</summary>
+        /// <summary>The first row from position <paramref name="from"/> on, stepping by <paramref name="step"/>, that joins and passes the cursor's WHERE where it stood, evaluated as the walk would.</summary>
         public CursorRow? FirstPassing(BatchContext batch, int from, int step)
         {
             for (var i = from; i >= 0 && i < rows.Length; i += step)
             {
-                var read = EnumerateCursorRows(plan, batch, outerResolver: null, applyRowLimit: false, onlyAddress: rows[i].Rids[0]);
-                if (read.Count == 1)
+                var read = EnumerateCursorRows(plan, batch, outerResolver: null, applyRowLimit: false, onlyAddresses: rows[i].Rids);
+                if (read.Count == 1 && SameAddresses(read[0].Rids, rows[i].Rids))
                     return read[0];
             }
             return null;
         }
+
+        private static bool SameAddresses((int Page, int Slot)?[] a, (int Page, int Slot)?[] b)
+        {
+            for (var i = 0; i < a.Length; i++)
+            {
+                if (!Nullable.Equals(a[i], b[i]))
+                    return false;
+            }
+            return true;
+        }
     }
 
     /// <summary>
-    /// <paramref name="cached"/> while the table's heap hasn't changed since
+    /// Which writes to a DYNAMIC cursor's base tables leave every row of its
+    /// order (<see cref="CursorOrder"/>) in its place, settled once per plan
+    /// (<see cref="CursorSourcePlan.OrderRules"/>): an insert never, as it can
+    /// take any place, an emptied address included; a delete unless an outer
+    /// join NULL-extends its table's side, where the rows it matched can be
+    /// left unmatched; and an update unless it changes the clustered key a
+    /// clustered table's order follows or a column an ON predicate reads,
+    /// which can join its row to others. A table under a view or derived
+    /// table keeps the order through no write, its body's WHERE and select
+    /// list deciding what its rows join.
+    /// </summary>
+    internal sealed class CursorOrderRules
+    {
+        /// <summary>The rules of a plan no order serves: one whose rows can't be read at their addresses, or whose joins read more than their rows.</summary>
+        public static readonly CursorOrderRules Unordered = new([], []);
+
+        /// <summary>Per identity table, the stored columns its ON predicates read, or null where any update may change what its rows join.</summary>
+        private readonly int[]?[] joinColumns;
+
+        /// <summary>Per identity table, whether a delete keeps the order.</summary>
+        private readonly bool[] deleteKeeps;
+
+        private CursorOrderRules(int[]?[] joinColumns, bool[] deleteKeeps)
+        {
+            this.joinColumns = joinColumns;
+            this.deleteKeeps = deleteKeeps;
+        }
+
+        /// <summary>
+        /// The rules for <paramref name="plan"/>, or <see cref="Unordered"/>
+        /// when no order serves it: its rows can't be read at their addresses
+        /// (<see cref="ReadsAtAddresses"/>), or an ON predicate, or a nested
+        /// body's WHERE or select list, reads more than its rows, so a fetch
+        /// could join rows the order was read without.
+        /// </summary>
+        public static CursorOrderRules For(CursorSourcePlan plan)
+        {
+            if (plan.OrderBy.Count != 0 || plan.HasRowLimit || !ReadsAtAddresses(plan) || !DecidedByRows(plan, nested: false))
+                return Unordered;
+            var width = plan.Slots.Length;
+            var extended = new bool[width];
+            for (var level = 1; level < width; level++)
+            {
+                switch (plan.Joins[level - 1].Kind)
+                {
+                    case JoinKind.Left:
+                        extended[level] = true;
+                        break;
+                    case JoinKind.Right:
+                        Array.Fill(extended, true, 0, level);
+                        break;
+                    case JoinKind.Full:
+                        Array.Fill(extended, true, 0, level + 1);
+                        break;
+                }
+            }
+            var walk = (plan.Sources, Read: new List<int>?[width], Unresolved: false);
+            for (var i = 0; i < width; i++)
+                walk.Read[i] = plan.Slots[i].Table is null ? null : [];
+            foreach (var join in plan.Joins)
+            {
+                join.OnPredicate?.Walk(ref walk, static (node, _, ref walk) =>
+                {
+                    if (node is not Reference reference)
+                        return true;
+                    var (source, column) = FindSourceColumn(walk.Sources, reference.ReferencedName, reads: false);
+                    if (source < 0)
+                    {
+                        walk.Unresolved = true;
+                    }
+                    else if (walk.Read[source] is { } read)
+                    {
+                        var from = walk.Sources[source];
+                        if (from.StorageOrdinals is { } ordinals && from.Columns[column] is not { Computed: not null, IsPersisted: false })
+                            read.Add(ordinals[column]);
+                        else
+                            walk.Read[source] = null;
+                    }
+                    return false;
+                });
+            }
+            if (walk.Unresolved)
+                return Unordered;
+            var joinColumns = new int[]?[plan.IdentityTables.Length];
+            var deleteKeeps = new bool[plan.IdentityTables.Length];
+            for (var i = 0; i < width; i++)
+            {
+                if (plan.Slots[i].Table is null)
+                    continue;
+                var entry = plan.SlotIdentityOffset[i];
+                joinColumns[entry] = walk.Read[i] is { } read ? [.. read] : null;
+                deleteKeeps[entry] = !extended[i];
+            }
+            return new(joinColumns, deleteKeeps);
+        }
+
+        /// <summary>
+        /// Whether what the plan's sources join is decided by their rows
+        /// alone, so the same rows join the same way at every fetch: every ON
+        /// predicate, and a nested body's WHERE and select list too, reads
+        /// only its rows (<see cref="Expression.ParallelSafe"/>) — a variable
+        /// among them, which the cursor reads as its DECLARE found it.
+        /// </summary>
+        private static bool DecidedByRows(CursorSourcePlan plan, bool nested)
+        {
+            foreach (var join in plan.Joins)
+            {
+                if (join.OnPredicate is { ParallelSafe: false })
+                    return false;
+            }
+            if (nested && (!Array.TrueForAll(plan.Excluders, static excluder => excluder.ParallelSafe)
+                || !Array.TrueForAll(plan.Projections, static projection => projection.ParallelSafe)))
+            {
+                return false;
+            }
+            foreach (var slot in plan.Slots)
+            {
+                if (slot.Nested is { } body && !DecidedByRows(body, nested: true))
+                    return false;
+            }
+            return true;
+        }
+
+        /// <summary>Whether <paramref name="write"/> to identity table <paramref name="entry"/> of <paramref name="plan"/> keeps every row of the order in its place.</summary>
+        public bool Keeps(Heap.SeekJournalEvent write, int entry, CursorSourcePlan plan)
+        {
+            switch (write.Kind)
+            {
+                case Heap.SeekJournalKind.Delete:
+                    return this.deleteKeeps[entry];
+                case Heap.SeekJournalKind.Update when this.joinColumns[entry] is { } columns:
+                    var table = plan.IdentityTables[entry];
+                    return (plan.IdentityKeys[entry] is not { ClusteredDescending: not null, Ordinals: { } key } || Unchanged(table, write, key))
+                        && Unchanged(table, write, columns);
+                default:
+                    return false;
+            }
+        }
+
+        private static bool Unchanged(HeapTable table, Heap.SeekJournalEvent write, int[] ordinals)
+        {
+            foreach (var ordinal in ordinals)
+            {
+                if (!RowDecoder.DecodeColumn(table.StoredColumns, write.OldImage!, ordinal, table.Heap)
+                    .IsIdenticalTo(RowDecoder.DecodeColumn(table.StoredColumns, write.NewImage!, ordinal, table.Heap)))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// <paramref name="cached"/> while no base table's heap has changed since
     /// it was read, or has changed only by writes keeping every row in its
-    /// place (<see cref="KeepsCursorOrder"/>), else the live rows read again,
-    /// for a DYNAMIC cursor over one table with no ORDER BY, row limit or
-    /// row-level security filter; null for any other, and while a
-    /// <c>STATISTICS IO</c> report counts the walk's reads.
+    /// place (<see cref="CursorOrderRules"/>), else the joined rows read
+    /// again, for a DYNAMIC cursor with no ORDER BY, row limit or row-level
+    /// security filter whose rows can be read at their addresses; null for
+    /// any other, and while a <c>STATISTICS IO</c> report counts the walk's
+    /// reads.
     /// </summary>
     /// <remarks>
-    /// The writes are read off the heap's seek journal, which reading the
+    /// The writes are read off the heaps' seek journals, which reading the
     /// order turns on, so a <c>WHERE CURRENT OF</c> update loop reads the
     /// order once rather than at every fetch after an update.
     /// </remarks>
     internal static CursorOrder? DynamicOrder(CursorSourcePlan plan, BatchContext batch, CursorOrder? cached)
     {
-        if (plan.Slots.Length != 1 || plan.Slots[0].Table is not { } table || plan.OrderBy.Count != 0 || plan.RowLimit is not null
-            || batch.Connection.StatementIo is not null || RowSecurity.For(batch, table) is { Filter: not null })
-        {
+        var rules = plan.OrderRules ??= CursorOrderRules.For(plan);
+        if (rules == CursorOrderRules.Unordered || batch.Connection.StatementIo is not null)
             return null;
-        }
-        var heap = table.Heap;
-        if (cached is not null)
+        var tables = plan.IdentityTables;
+        foreach (var table in tables)
         {
-            if (cached.Generation == Volatile.Read(ref heap.MutationGeneration))
-                return cached;
-            if (heap.SnapshotSeekJournalSince(cached.Generation, out var current) is { } writes
-                && Array.TrueForAll(writes, write => KeepsCursorOrder(write, table, plan.IdentityKeys[0])))
-            {
-                return cached.At(current);
-            }
+            if (RowSecurity.For(batch, table) is { Filter: not null })
+                return null;
         }
+        if (cached?.ReadOn(rules) is { } kept)
+            return kept;
         // Read before the scan, so a write landing during it is journaled past
         // the order's generation for the next fetch to judge.
-        var generation = heap.ActivateSeekJournal();
-        var scan = new CursorSlotScan(identityWidth: 1);
-        AppendCursorSlotRows(scan, plan, 0, batch, outerResolver: null, applyRowLimit: false);
-        var rows = new CursorRow[scan.Bytes.Count];
-        for (var i = 0; i < rows.Length; i++)
-            rows[i] = new CursorRow([], [], [scan.IdentityKeys[i]], [scan.Uniquifiers[i]], [scan.Rids[i]]);
-        Array.Sort(rows, (a, b) => CompareCursorRows(plan, a, b));
-        return new CursorOrder(plan, generation, rows);
-    }
-
-    /// <summary>
-    /// Whether a write leaves every row of a DYNAMIC cursor's order in its
-    /// place: a delete, whose row a fetch passes over as it reads the row's
-    /// address, and an update, unless it changes the clustered key a clustered
-    /// table's order follows — a heap's follows the address, which an update
-    /// keeps. An insert can take any place, an emptied address included.
-    /// </summary>
-    private static bool KeepsCursorOrder(Heap.SeekJournalEvent write, HeapTable table, CursorIdentityKey identity)
-    {
-        switch (write.Kind)
-        {
-            case Heap.SeekJournalKind.Delete:
-                return true;
-            case Heap.SeekJournalKind.Update when identity is { ClusteredDescending: not null, Ordinals: { } ordinals }:
-                foreach (var ordinal in ordinals)
-                {
-                    if (!RowDecoder.DecodeColumn(table.StoredColumns, write.OldImage!, ordinal, table.Heap)
-                        .IsIdenticalTo(RowDecoder.DecodeColumn(table.StoredColumns, write.NewImage!, ordinal, table.Heap)))
-                    {
-                        return false;
-                    }
-                }
-                return true;
-            case Heap.SeekJournalKind.Update:
-                return true;
-            default:
-                return false;
-        }
+        var generations = Array.ConvertAll(tables, static table => table.Heap.ActivateSeekJournal());
+        return new CursorOrder(plan, generations, [.. EnumerateCursorRows(plan, batch, outerResolver: null, applyRowLimit: false, identityOnly: true)]);
     }
 
     /// <summary>
@@ -979,10 +1151,20 @@ internal sealed partial class Selection
     /// slot re-enters here on its own plan, so its rows carry the addresses of
     /// the base tables its body read; <paramref name="outerResolver"/> is the
     /// enclosing tuple's resolver, non-null when this plan is an APPLY right
-    /// side (or sits under one). <paramref name="onlyAddress"/> confines a
-    /// one-table plan's scan to the row at that address.
+    /// side (or sits under one). <paramref name="onlyAddresses"/>, one per
+    /// identity table as a row's <see cref="CursorRow.Rids"/> holds them,
+    /// confines each base table's scan to the row at its address, or to none
+    /// where the address is null. <paramref name="identityOnly"/> leaves the
+    /// rows' WHERE unjudged and their select list unread, for the order a
+    /// DYNAMIC cursor keeps (<see cref="DynamicOrder"/>).
     /// </summary>
-    private static List<CursorRow> EnumerateCursorRows(CursorSourcePlan plan, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, bool applyRowLimit, (int Page, int Slot)? onlyAddress = null)
+    private static List<CursorRow> EnumerateCursorRows(
+        CursorSourcePlan plan,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver,
+        bool applyRowLimit,
+        (int Page, int Slot)?[]? onlyAddresses = null,
+        bool identityOnly = false)
     {
         if (plan.InstallsRowAddresses)
             batch.CurrentStatement.RowAddresses ??= new();
@@ -1014,7 +1196,7 @@ internal sealed partial class Selection
         {
             scans[i] = new CursorSlotScan(plan.SlotIdentityWidth[i]);
             if (!IsApplySlot(plan, i))
-                AppendCursorSlotRows(scans[i], plan, i, batch, outerResolver, applyRowLimit, onlyAddress);
+                AppendCursorSlotRows(scans[i], plan, i, batch, outerResolver, applyRowLimit, onlyAddresses);
         }
 
         var tuples = FoldCursorTuples(plan, scans, current, runtime, batch, resolve, applyRowLimit);
@@ -1042,6 +1224,11 @@ internal sealed partial class Selection
                     identityKeys[offset + k] = scan.IdentityKeys[span + k];
                     uniquifiers[offset + k] = scan.Uniquifiers[span + k];
                 }
+            }
+            if (identityOnly)
+            {
+                rows.Add(new CursorRow([], [], identityKeys, uniquifiers, rids));
+                continue;
             }
 
             var keep = true;
@@ -1135,7 +1322,9 @@ internal sealed partial class Selection
     /// A <em>view</em> slot re-raises <paramref name="applyRowLimit"/> for its
     /// subtree: real re-evaluates a view's own row limit on every FETCH, while
     /// a derived table's or CTE's limit only picks the KEYSET membership at
-    /// OPEN (both probe-confirmed).
+    /// OPEN (both probe-confirmed). <paramref name="onlyAddresses"/> confines
+    /// the slot to its span of them, as <see cref="EnumerateCursorRows"/>
+    /// takes them.
     /// </summary>
     private static void AppendCursorSlotRows(
         CursorSlotScan scan,
@@ -1144,7 +1333,7 @@ internal sealed partial class Selection
         BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver,
         bool applyRowLimit,
-        (int Page, int Slot)? onlyAddress = null)
+        (int Page, int Slot)?[]? onlyAddresses = null)
     {
         if (plan.Slots[index].Table is { } table)
         {
@@ -1158,7 +1347,9 @@ internal sealed partial class Selection
             _ = counts?.ScanCount += 1;
             var lastPage = -1;
             var addresses = batch.CurrentStatement.RowAddresses;
-            var rows = onlyAddress is { } address ? RowAt(table.Heap, address) : table.Heap.EnumerateRowsWithAddress();
+            var rows = onlyAddresses is null ? table.Heap.EnumerateRowsWithAddress()
+                : onlyAddresses[plan.SlotIdentityOffset[index]] is { } address ? RowAt(table.Heap, address)
+                : [];
             foreach (var (page, slot, bytes) in RowSecurity.FilterAddressedRows(table, rows, batch))
             {
                 counts?.Enter(page, ref lastPage);
@@ -1186,7 +1377,8 @@ internal sealed partial class Selection
         // stream carries on the ordinary read path.
         var deferred = plan.Slots[index];
         var storedSchema = plan.Sources[index].StoredSchema;
-        foreach (var row in EnumerateCursorRows(deferred.Nested!, batch, outerResolver, applyRowLimit || deferred.ThroughView is not null))
+        var nestedAddresses = onlyAddresses?[plan.SlotIdentityOffset[index]..(plan.SlotIdentityOffset[index] + plan.SlotIdentityWidth[index])];
+        foreach (var row in EnumerateCursorRows(deferred.Nested!, batch, outerResolver, applyRowLimit || deferred.ThroughView is not null, nestedAddresses))
         {
             if (row.ProjectionError is { } error)
                 throw error;
@@ -1206,10 +1398,12 @@ internal sealed partial class Selection
     /// <summary>
     /// Folds the cursor's JOIN chain into one row-index tuple per joined row:
     /// slot <c>i</c> holds the index into <c>scans[i]</c>, or <c>-1</c> for a
-    /// NULL-extended outer-join side. A left-deep nested loop — the equi-join
-    /// hash / seek strategies of the read path don't apply here because every
-    /// intermediate row must keep its per-source addresses, and the cursor
-    /// re-folds on every FETCH anyway.
+    /// NULL-extended outer-join side. A left-deep loop over index tuples,
+    /// since every joined row keeps its per-source addresses; a level whose
+    /// ON predicate equates its source with the sources left of it buckets
+    /// its rows by those keys, as the read path's hash join does, and judges
+    /// what remains of the predicate over the rows a left tuple's keys find,
+    /// in scan order, where the nested loop judged it over every pair.
     /// </summary>
     /// <remarks>
     /// The ON predicate evaluates through the shared <paramref name="current"/>
@@ -1251,6 +1445,9 @@ internal sealed partial class Selection
             var keepUnmatchedRight = join.Kind is JoinKind.Right or JoinKind.Full;
             var matched = new bool[lateral ? 0 : right.Bytes.Count];
             var next = new List<int[]>();
+            var hashed = lateral || join.OnPredicate is not { } predicate || TryPlanEquiKeys(predicate, plan.Sources, level, batch) is not { } equi
+                ? null
+                : new CursorLevelBuckets(equi, right, current, level, runtime);
             foreach (var left in accumulated)
             {
                 for (var i = 0; i < width; i++)
@@ -1269,10 +1466,12 @@ internal sealed partial class Selection
                 }
 
                 var any = false;
-                for (var r = from; r < to; r++)
+                // A hashed level passes only the rows its keys find, judging
+                // what remains of the predicate over them.
+                for (var r = hashed?.First(runtime) ?? from; r >= 0 && r < to; r = hashed?.Next(r) ?? (r + 1))
                 {
                     current[level] = right.Bytes[r];
-                    if (join.OnPredicate is { } on && on.Run(runtime) != true)
+                    if (hashed is null ? join.OnPredicate is { } on && on.Run(runtime) != true : !ResidualMatches(hashed.Residual, runtime))
                         continue;
                     var row = (int[])left.Clone();
                     row[level] = r;
@@ -1300,6 +1499,72 @@ internal sealed partial class Selection
         }
 
         return accumulated;
+    }
+
+    /// <summary>
+    /// A join level's rows bucketed by the keys its ON predicate equates with
+    /// the sources left of it (<see cref="TryPlanEquiKeys"/>), for
+    /// <see cref="FoldCursorTuples"/>: the rows a left tuple's keys find, in
+    /// scan order, are each key's first row and the chain from it. A row with
+    /// a NULL key is in no bucket.
+    /// </summary>
+    private sealed class CursorLevelBuckets
+    {
+        /// <summary>What remains of the ON predicate past the keys, judged over the rows they find.</summary>
+        public readonly BooleanExpression[] Residual;
+
+        private readonly EquiKey[] keys;
+        private readonly Dictionary<SqlValueKey, (int Head, int Tail)> buckets;
+
+        /// <summary>Each row's successor with its key, or -1.</summary>
+        private readonly int[] chains;
+
+        private readonly SqlValue[] probe;
+
+        /// <summary>Buckets <paramref name="scan"/>'s rows, each read in slot <paramref name="level"/> of <paramref name="current"/>.</summary>
+        public CursorLevelBuckets(EquiJoinPlan plan, CursorSlotScan scan, byte[]?[] current, int level, RuntimeContext runtime)
+        {
+            this.Residual = plan.Residual;
+            this.keys = plan.Keys;
+            this.probe = new SqlValue[plan.Keys.Length];
+            var count = scan.Bytes.Count;
+            this.chains = new int[count];
+            this.buckets = new(count);
+            var scratch = new SqlValue[plan.Keys.Length];
+            for (var r = 0; r < count; r++)
+            {
+                this.chains[r] = -1;
+                current[level] = scan.Bytes[r];
+                if (!TryComputeKeyInto(plan.Keys, runtime, rightSide: true, scratch, out var key))
+                    continue;
+                ref var chain = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(this.buckets, key, out var existed);
+                if (existed)
+                {
+                    this.chains[chain.Tail] = r;
+                    chain.Tail = r;
+                }
+                else
+                {
+                    // The dictionary holds the scratch array as its key.
+                    chain = (r, r);
+                    scratch = new SqlValue[plan.Keys.Length];
+                }
+            }
+            current[level] = null;
+        }
+
+        /// <summary>
+        /// The first row the keys of the left tuple <paramref name="runtime"/>
+        /// reads find, or -1; as in the read path's hash join, an empty level
+        /// computes no key.
+        /// </summary>
+        public int First(RuntimeContext runtime) =>
+            this.chains.Length > 0 && TryComputeKeyInto(this.keys, runtime, rightSide: false, this.probe, out var key) && this.buckets.TryGetValue(key, out var chain)
+                ? chain.Head
+                : -1;
+
+        /// <summary>The row after <paramref name="row"/> with its key, or -1.</summary>
+        public int Next(int row) => this.chains[row];
     }
 
     /// <summary>
