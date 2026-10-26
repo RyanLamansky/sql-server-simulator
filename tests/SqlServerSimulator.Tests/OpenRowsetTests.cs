@@ -9,73 +9,73 @@ public class OpenRowsetTests
     private static readonly byte[] Utf16File = [.. Encoding.Unicode.GetPreamble(), .. Encoding.Unicode.GetBytes("hé")];
 
     private static Simulation Files() => BulkInsertTests.WithFileBytes(
-        ("j.json", Encoding.UTF8.GetBytes("""[{"id":1,"name":"a"},{"id":2,"name":"bé"}]""")),
-        ("bin.dat", [0, 1, 2, 255]),
-        ("u16.txt", Utf16File),
-        ("u8.txt", Encoding.UTF8.GetBytes("b\u00e9\u20ac")),
-        ("bad.txt", [(byte)'b', 0xE9]),
-        ("a.csv", Encoding.UTF8.GetBytes("1,alpha\n2,beta\n")),
-        ("f.fmt", Encoding.UTF8.GetBytes("14.0\n2\n1 SQLCHAR 0 10 \",\" 1 id \"\"\n2 SQLCHAR 0 20 \"\\n\" 2 name SQL_Latin1_General_CP1_CI_AS\n")));
+        ("/j.json", Encoding.UTF8.GetBytes("""[{"id":1,"name":"a"},{"id":2,"name":"bé"}]""")),
+        ("/bin.dat", [0, 1, 2, 255]),
+        ("/u16.txt", Utf16File),
+        ("/u8.txt", Encoding.UTF8.GetBytes("b\u00e9\u20ac")),
+        ("/bad.txt", [(byte)'b', 0xE9]),
+        ("/a.csv", Encoding.UTF8.GetBytes("1,alpha\n2,beta\n")),
+        ("/f.fmt", Encoding.UTF8.GetBytes("14.0\n2\n1 SQLCHAR 0 10 \",\" 1 id \"\"\n2 SQLCHAR 0 20 \"\\n\" 2 name SQL_Latin1_General_CP1_CI_AS\n")));
 
     [TestMethod]
     public void SingleBlob_IsTheFilesBytes()
-        => CollectionAssert.AreEqual(new byte[] { 0, 1, 2, 255 }, (byte[])Files().ExecuteScalar("select BulkColumn from openrowset(bulk 'bin.dat', single_blob) as x")!);
+        => CollectionAssert.AreEqual(new byte[] { 0, 1, 2, 255 }, (byte[])Files().ExecuteScalar("select BulkColumn from openrowset(bulk '/bin.dat', single_blob) as x")!);
 
     [TestMethod]
     public void SingleForms_ColumnTypes()
         => AreEqual("varbinary:-1|varchar:-1|nvarchar:-1", Files().ExecuteScalar("""
-            select * into b from openrowset(bulk 'bin.dat', single_blob) x;
-            select * into c from openrowset(bulk 'j.json', single_clob) x;
-            select * into n from openrowset(bulk 'u16.txt', single_nclob) x;
+            select * into b from openrowset(bulk '/bin.dat', single_blob) x;
+            select * into c from openrowset(bulk '/j.json', single_clob) x;
+            select * into n from openrowset(bulk '/u16.txt', single_nclob) x;
             select string_agg(concat(type_name(system_type_id), ':', max_length), '|') within group (order by object_id)
             from sys.columns where name = 'BulkColumn' and object_id in (object_id('b'), object_id('c'), object_id('n'))
             """));
 
     [TestMethod]
     public void SingleClob_DecodesUtf8IntoTheCodePage()
-        => AreEqual("bé€:3", Files().ExecuteScalar("select concat(BulkColumn, ':', datalength(BulkColumn)) from openrowset(bulk 'u8.txt', single_clob) x"));
+        => AreEqual("bé€:3", Files().ExecuteScalar("select concat(BulkColumn, ':', datalength(BulkColumn)) from openrowset(bulk '/u8.txt', single_clob) x"));
 
     [TestMethod]
     public void SingleClob_InvalidUtf8_IsTruncation()
-        => AreEqual(4, Files().AssertSqlError("select * from openrowset(bulk 'bad.txt', single_clob) x", 4863).State);
+        => AreEqual(4, Files().AssertSqlError("select * from openrowset(bulk '/bad.txt', single_clob) x", 4863).State);
 
     [TestMethod]
     public void SingleNclob_NeedsAByteOrderMark()
     {
         var sim = Files();
-        AreEqual("hé", sim.ExecuteScalar("select BulkColumn from openrowset(bulk 'u16.txt', single_nclob) x"));
-        _ = sim.AssertSqlError("select * from openrowset(bulk 'j.json', single_nclob) x", 4809);
-        _ = sim.AssertSqlError("select * from openrowset(bulk 'u16.txt', single_clob) x", 4806);
+        AreEqual("hé", sim.ExecuteScalar("select BulkColumn from openrowset(bulk '/u16.txt', single_nclob) x"));
+        _ = sim.AssertSqlError("select * from openrowset(bulk '/j.json', single_nclob) x", 4809);
+        _ = sim.AssertSqlError("select * from openrowset(bulk '/u16.txt', single_clob) x", 4806);
     }
 
     [TestMethod]
     public void OpenJsonOverSingleClob()
         => AreEqual("1:a,2:bé", Files().ExecuteScalar("""
             select string_agg(concat(j.id, ':', j.name), ',') within group (order by j.id)
-            from openrowset(bulk 'j.json', single_clob) as f
+            from openrowset(bulk '/j.json', single_clob) as f
             cross apply openjson(f.BulkColumn) with (id int, name nvarchar(10)) as j
             """));
 
     [TestMethod]
     public void XmlFromSingleBlob()
-        => AreEqual(2, BulkInsertTests.WithFiles(("x.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\"?><r><i/><i/></r>"))
-            .ExecuteScalar("select cast(BulkColumn as xml).value('count(/r/i)', 'int') from openrowset(bulk 'x.xml', single_blob) x"));
+        => AreEqual(2, BulkInsertTests.WithFiles(("/x.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\"?><r><i/><i/></r>"))
+            .ExecuteScalar("select cast(BulkColumn as xml).value('count(/r/i)', 'int') from openrowset(bulk '/x.xml', single_blob) x"));
 
     [TestMethod]
     public void ColumnAliasList_RenamesBulkColumn()
-        => AreEqual(4L, Files().ExecuteScalar("select datalength(c) from openrowset(bulk 'bin.dat', single_blob) x(c)"));
+        => AreEqual(4L, Files().ExecuteScalar("select datalength(c) from openrowset(bulk '/bin.dat', single_blob) x(c)"));
 
     [TestMethod]
     public void Grammar()
     {
         var sim = Files();
-        _ = sim.AssertSqlError("select * from openrowset(bulk 'bin.dat', single_blob)", 491);
-        _ = sim.AssertSqlError("select * from openrowset(bulk 'bin.dat', single_blob, single_clob) x", 471);
-        _ = sim.AssertSqlError("select * from openrowset(bulk 'a.csv') x", 15808);
-        _ = sim.AssertSqlError("select * from openrowset(bulk 'a.csv', format = 'CSV') x", 472);
-        _ = sim.AssertSqlError("select * from openrowset(bulk 'a.csv', format = 'CSV') with (id int) x", 5374);
-        _ = sim.AssertSqlError("insert openrowset(bulk 'a.csv', single_clob) x values ('a')", 156);
-        sim.ValidateSyntaxError("declare @p varchar(9) = 'a.csv'; select * from openrowset(bulk @p, single_clob) x", "@p");
+        _ = sim.AssertSqlError("select * from openrowset(bulk '/bin.dat', single_blob)", 491);
+        _ = sim.AssertSqlError("select * from openrowset(bulk '/bin.dat', single_blob, single_clob) x", 471);
+        _ = sim.AssertSqlError("select * from openrowset(bulk '/a.csv') x", 15808);
+        _ = sim.AssertSqlError("select * from openrowset(bulk '/a.csv', format = 'CSV') x", 472);
+        _ = sim.AssertSqlError("select * from openrowset(bulk '/a.csv', format = 'CSV') with (id int) x", 5374);
+        _ = sim.AssertSqlError("insert openrowset(bulk '/a.csv', single_clob) x values ('a')", 156);
+        sim.ValidateSyntaxError("declare @p varchar(9) = '/a.csv'; select * from openrowset(bulk @p, single_clob) x", "@p");
     }
 
     [TestMethod]
@@ -91,13 +91,13 @@ public class OpenRowsetTests
     public void FormatFile_RowsAndFirstRow()
     {
         var sim = Files();
-        AreEqual("1:alpha,2:beta", sim.ExecuteScalar("select string_agg(concat(id, ':', name), ',') from openrowset(bulk 'a.csv', formatfile = 'f.fmt') x"));
-        AreEqual("beta", sim.ExecuteScalar("select name from openrowset(bulk 'a.csv', formatfile = 'f.fmt', firstrow = 2) x"));
+        AreEqual("1:alpha,2:beta", sim.ExecuteScalar("select string_agg(concat(id, ':', name), ',') from openrowset(bulk '/a.csv', formatfile = '/f.fmt') x"));
+        AreEqual("beta", sim.ExecuteScalar("select name from openrowset(bulk '/a.csv', formatfile = '/f.fmt', firstrow = 2) x"));
         AreEqual("varchar:10", sim.ExecuteScalar("""
-            select * into t from openrowset(bulk 'a.csv', formatfile = 'f.fmt') x;
+            select * into t from openrowset(bulk '/a.csv', formatfile = '/f.fmt') x;
             select concat(type_name(system_type_id), ':', max_length) from sys.columns where object_id = object_id('t') and name = 'id'
             """));
-        AreEqual(3, sim.AssertSqlError("select * from openrowset(bulk 'a.csv', formatfile = 'nope.fmt') x", 4860).State);
+        AreEqual(3, sim.AssertSqlError("select * from openrowset(bulk '/a.csv', formatfile = '/nope.fmt') x", 4860).State);
     }
 
     [TestMethod]
@@ -105,7 +105,7 @@ public class OpenRowsetTests
     {
         var sim = Files();
         _ = sim.ExecuteNonQuery("create login bl with password = 'Xx!12345678'; create user bl for login bl");
-        AreEqual(75, sim.AssertSqlError("execute as login = 'bl'; select * from openrowset(bulk 'bin.dat', single_blob) x", 4860).State);
+        AreEqual(75, sim.AssertSqlError("execute as login = 'bl'; select * from openrowset(bulk '/bin.dat', single_blob) x", 4860).State);
     }
 
     private const string EnableAdHoc = "exec sp_configure 'show advanced options', 1; reconfigure; exec sp_configure 'Ad Hoc Distributed Queries', 1; reconfigure;";
@@ -220,7 +220,7 @@ public class OpenRowsetTests
 
     [TestMethod]
     public void FormatFileWithDecimalHostType_Raises4838()
-        => BulkInsertTests.WithFiles(("p.txt", "1\n"), ("d.fmt", "14.0\n1\n1 SQLDECIMAL 0 19 \"\" 1 d \"\"\n"))
-            .AssertSqlError("select * from openrowset(bulk 'p.txt', formatfile = 'd.fmt') x", 4838,
+        => BulkInsertTests.WithFiles(("/p.txt", "1\n"), ("/d.fmt", "14.0\n1\n1 SQLDECIMAL 0 19 \"\" 1 d \"\"\n"))
+            .AssertSqlError("select * from openrowset(bulk '/p.txt', formatfile = '/d.fmt') x", 4838,
                 "The bulk data source does not support the SQLNUMERIC or SQLDECIMAL data types.");
 }

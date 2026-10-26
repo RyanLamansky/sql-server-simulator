@@ -92,7 +92,7 @@ public sealed class ConcurrentUniqueKeyTests
                 Shape.InsertSelect => "insert t select a, b, @w, 0 from (values (@a, @b)) v (a, b)",
                 Shape.Merge => "merge t using (values (@a, @b)) s (a, b) on t.a = s.a and t.b = s.b when not matched then insert values (s.a, s.b, @w, 0);",
                 Shape.Update => "update t set a = @a, b = @b where w = @w and i = @k",
-                _ => $"bulk insert t from '{a}.{b}.{worker}.txt'",
+                _ => $"bulk insert t from '/{a}.{b}.{worker}.txt'",
             }, ("@a", a), ("@b", b), ("@a2", a2), ("@b2", b2), ("@w", worker), ("@k", k));
         });
 
@@ -136,7 +136,7 @@ public sealed class ConcurrentUniqueKeyTests
 
     private static byte[] BulkFile(string path)
     {
-        var parts = path[..^4].Split('.');
+        var parts = path[1..^4].Split('.');
         return Encoding.UTF8.GetBytes($"{parts[0]}\t{parts[1]}\t{parts[2]}\t0\n");
     }
 

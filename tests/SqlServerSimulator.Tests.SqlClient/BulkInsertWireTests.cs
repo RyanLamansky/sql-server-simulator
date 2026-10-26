@@ -17,7 +17,7 @@ public sealed class BulkInsertWireTests
     private static Simulation WithFile(string text)
     {
         var bytes = Encoding.UTF8.GetBytes(text);
-        return new Simulation { OpenBulkFile = path => path == "f.txt" ? new MemoryStream(bytes) : null };
+        return new Simulation { OpenBulkFile = path => path == "/f.txt" ? new MemoryStream(bytes) : null };
     }
 
     [TestMethod]
@@ -26,7 +26,7 @@ public sealed class BulkInsertWireTests
         var simulation = WithFile("1|a\n2|b\n3|c\n4|d\n5|e\n");
         await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
-        await using var command = new SqlCommand("create table t (id int, name varchar(9)); bulk insert t from 'f.txt' with (fieldterminator = '|', batchsize = 2)", connection);
+        await using var command = new SqlCommand("create table t (id int, name varchar(9)); bulk insert t from '/f.txt' with (fieldterminator = '|', batchsize = 2)", connection);
         var counts = new List<int>();
         command.StatementCompleted += (_, e) => counts.Add(e.RecordCount);
         _ = await command.ExecuteNonQueryAsync(TestContext.CancellationToken);
@@ -43,7 +43,7 @@ public sealed class BulkInsertWireTests
             _ = await create.ExecuteNonQueryAsync(TestContext.CancellationToken);
         var ex = await Assert.ThrowsAsync<SqlException>(async () =>
         {
-            await using var command = new SqlCommand("bulk insert t from 'f.txt' with (fieldterminator = ','); insert log values (@n)", connection);
+            await using var command = new SqlCommand("bulk insert t from '/f.txt' with (fieldterminator = ','); insert log values (@n)", connection);
             _ = command.Parameters.AddWithValue("@n", 7);
             _ = await command.ExecuteNonQueryAsync(TestContext.CancellationToken);
         });
