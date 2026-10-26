@@ -52,6 +52,24 @@ public sealed class AuditRecordTests
         AreEqual("sa|sa|dbo|simulated", Read(sim, "server_principal_name, session_server_principal_name, database_principal_name, database_name", "action_id = 'EX'"));
     }
 
+    /// <summary>
+    /// An <c>UPDATE</c> reading its target's columns records <c>SL</c> ahead
+    /// of its <c>UP</c>, from its <c>SET</c> list as from a <c>WHERE</c>
+    /// (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ObjectAccess_AnUpdateReadingItsTarget_RecordsSelect()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (a int, b int); insert t values (1, 2)",
+            "use master; create server audit a to file (filepath = '/var/opt/mssql/log/') with (queue_delay = 0); alter server audit a with (state = on)",
+            "use simulated; create database audit specification d for server audit a add (select, update on object::dbo.t by public) with (state = on)",
+            "update t set a = b; update t set a = 5; update t set a = 7 where b = 2");
+        AreEqual("SL|update t set a = b,UP|update t set a = b,UP|update t set a = 5,SL|update t set a = 7 where b = 2,UP|update t set a = 7 where b = 2",
+            Read(sim, "rtrim(action_id), statement", "action_id in ('SL', 'UP')"));
+    }
+
     // Real records the base table a view or procedure reads, the ownership
     // chain sparing its check, and a table joined to itself once.
     [TestMethod]

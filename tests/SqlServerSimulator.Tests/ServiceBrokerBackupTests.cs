@@ -106,6 +106,36 @@ public sealed class ServiceBrokerBackupTests
         AreEqual("q|True", Rows(simulation, "use b2; select name, is_retention_enabled from sys.service_queues where is_ms_shipped = 0"));
     }
 
+    /// <summary>
+    /// A message type validating against an XML schema collection comes back
+    /// bound to the restored collection, which its target validates against:
+    /// a body the schema rejects errors the dialog.
+    /// </summary>
+    [TestMethod]
+    public void Restore_AMessageTypesSchemaCollection_StillValidates()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create database b1",
+            """
+            use b1;
+            create xml schema collection sc as N'<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="r" type="xs:int"/></xs:schema>';
+            create message type m validation = valid_xml with schema collection sc;
+            create contract c (m sent by initiator);
+            create queue q; create service s on queue q (c);
+            """,
+            "backup database b1 to disk = N'b1.bak' with init",
+            "use master; restore database b1 from disk = N'b1.bak' with replace, enable_broker");
+        AreEqual("sc", simulation.ExecuteScalar("use b1; select x.name from sys.service_message_types m join sys.xml_schema_collections x on x.xml_collection_id = m.xml_collection_id where m.name = 'm'"));
+        AreEqual("ER", simulation.ExecuteScalar("""
+            use b1;
+            declare @h uniqueidentifier;
+            begin dialog @h from service s to service 's' on contract c with encryption = off;
+            send on conversation @h message type m (N'<r>abc</r>');
+            select state from sys.conversation_endpoints where is_initiator = 1
+            """));
+    }
+
     [TestMethod]
     public void Restore_AsCopy_SharesTheBrokerId_AndCanNotEnableBesideTheOriginal()
     {
