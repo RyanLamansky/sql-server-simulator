@@ -3114,7 +3114,7 @@ internal abstract class BooleanExpression : ExpressionNode
 
         protected readonly Expression left, right;
         private readonly StringCoercionMemo leftPromotion = new(), rightPromotion = new();
-        private readonly ComparisonTypeMemo comparisonType = new();
+        private readonly TypePairMemo comparisonType = new();
 
         private protected CompareExpression(Expression left, Expression right)
         {
@@ -3218,7 +3218,7 @@ internal abstract class BooleanExpression : ExpressionNode
         StringCoercionMemo? rightMemo = null,
         bool leftIsConstant = false,
         bool rightIsConstant = false,
-        ComparisonTypeMemo? typeMemo = null)
+        TypePairMemo? typeMemo = null)
     {
         // Either operand sql_variant: real converts a base-typed side UP to
         // sql_variant (probe-confirmed as CONVERT_IMPLICIT(sql_variant, …) in

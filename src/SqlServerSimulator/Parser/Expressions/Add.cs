@@ -11,12 +11,15 @@ internal sealed class Add : TwoSidedExpression
     /// </summary>
     private readonly bool concatNullYieldsNull;
 
+    /// <summary>The type the first pair of string operand types concatenated in (<see cref="StringPairType"/>).</summary>
+    private readonly TypePairMemo stringPairType = new();
+
     internal Add(Expression left, Expression right, bool concatNullYieldsNull) : base(left, right) =>
         this.concatNullYieldsNull = concatNullYieldsNull;
 
     protected override SqlValue Run(SqlValue left, SqlValue right) =>
         IsStringConcatPair(left, right)
-            ? StringConcatenation(left, right, this.concatNullYieldsNull)
+            ? StringConcatenation(left, right, this.concatNullYieldsNull, this.stringPairType)
             : left.Type.PairClass is TypePairClass.Binary or TypePairClass.Timestamp && right.Type.PairClass is TypePairClass.Binary or TypePairClass.Timestamp
                 ? BinaryConcatenation(left, right)
                 : AdditiveArithmetic(left, right, '+', static (a, b) => checked(a + b));
@@ -84,7 +87,7 @@ internal sealed class Add : TwoSidedExpression
     /// <c>'a    b    '</c> as a side-effect of the per-value rep — no special
     /// handling in this method.
     /// </summary>
-    private static SqlValue StringConcatenation(SqlValue left, SqlValue right, bool concatNullYieldsNull)
+    private static SqlValue StringConcatenation(SqlValue left, SqlValue right, bool concatNullYieldsNull, TypePairMemo pairTypes)
     {
         if (left.Type == SqlType.Text || left.Type == SqlType.NText || right.Type == SqlType.Text || right.Type == SqlType.NText)
             throw SimulatedSqlException.IncompatibleDataTypesInOperator(left.Type, right.Type, "add");
@@ -92,7 +95,7 @@ internal sealed class Add : TwoSidedExpression
         // The string + typed-NULL fall-through settles no collation, the
         // NULL-side type being non-string per IsStringConcatPair.
         var resultType = left.Type.Category == SqlTypeCategory.String && right.Type.Category == SqlTypeCategory.String
-            ? StringPairType(left.Type, right.Type)
+            ? pairTypes.Find(left.Type, right.Type) ?? KeptStringPairType(left.Type, right.Type, pairTypes)
             : ResolveResultType(left.Type, right.Type);
 
         // Only one NULL reads as empty: two NULLs still concatenate to NULL.
@@ -125,6 +128,13 @@ internal sealed class Add : TwoSidedExpression
     /// </summary>
     internal static SqlType StringPairType(SqlType left, SqlType right) =>
         UnresolvedCollation.Settle(SqlType.PromoteForArithmetic(left, right, '+'), left, right, "add");
+
+    private static SqlType KeptStringPairType(SqlType left, SqlType right, TypePairMemo pairTypes)
+    {
+        var settled = StringPairType(left, right);
+        pairTypes.Keep(left, right, settled);
+        return settled;
+    }
 
     /// <summary>
     /// Settles on the result <see cref="SqlType"/> for a string-concat <c>+</c>.

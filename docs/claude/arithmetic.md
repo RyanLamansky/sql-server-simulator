@@ -120,8 +120,9 @@ A failed conversion is never memoized, so Msg 241 still surfaces from the row th
 Like the [LIKE pattern memo](collations.md#the-pattern-compilation-is-memoized-per-node) the entry is immutable and published through `Volatile`, since a cached plan shares the node across sessions.
 `InExpression` doesn't carry one — a list of literals would thrash a single entry.
 
-The pair's legality check and its comparison type are kept the same way (`ComparisonTypeMemo`, one per `CompareExpression`), for the first pair of operand types that passed — keyed by both types' identity, which a column and a literal or variable hold for a whole scan — so later rows skip `SqlType.PairError` and the promotion.
+The pair's legality check and its comparison type are kept the same way (`TypePairMemo`, one per `CompareExpression`), for the first pair of operand types that passed — keyed by both types' identity, which a column and a literal or variable hold for a whole scan — so later rows skip `SqlType.PairError` and the promotion.
 `COUNT(*)` over 200,000 rows filtered by a `bit`, a `smallint` and a `varchar` column each beside a literal went from 52 to 46 ms (Release, measured 2026-10-26).
+A string `+` keeps the type its operand types concatenate in the same way (`Add.StringPairType`, its collation settled with it), so `',' + name` over a column stops promoting and settling collations per row: `SUM(LEN(fn + ' ' + ln))` over 200,000 rows of a `varchar` and an `nvarchar` column went from 99 to 72 ms (Release, measured 2026-10-26).
 
 ## `bit` operand pairs
 
