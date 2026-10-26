@@ -55,9 +55,13 @@ internal sealed class ExtendedEventsServer
 
     public readonly DateTime StartTime;
 
+    /// <summary>The <c>.xel</c> file the internal sessions' event-file target has written since the server started.</summary>
+    public readonly string InternalEventFilePath;
+
     public ExtendedEventsServer(EventSessionDefinition[] defaults, DateTime startTime)
     {
         this.StartTime = startTime;
+        this.InternalEventFilePath = EventFileTarget.LogDirectory + "HkEngineEventFile_0_" + startTime.ToFileTimeUtc().ToString(CultureInfo.InvariantCulture) + ".xel";
         this.InternalSessions = InternalEventSession.All;
         foreach (var definition in defaults)
         {

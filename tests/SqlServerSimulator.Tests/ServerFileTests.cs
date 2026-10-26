@@ -158,6 +158,18 @@ public sealed class ServerFileTests
         AreEqual(0, opened);
     }
 
+    [TestMethod]
+    public void LogDirectory_HoldsTheDefaultTraceAndTheEventFiles()
+        => AreEqual("1|1|1|1", new Simulation().ExecuteScalar("""
+            declare @sessions int = (select count(*) from sys.dm_xe_sessions);
+            create table #t (s nvarchar(260), d int, f int);
+            insert #t exec xp_dirtree N'/var/opt/mssql/log', 1, 1;
+            select concat((select file_exists from sys.dm_os_file_exists((select path from sys.traces where is_default = 1))), '|',
+                (select count(*) from #t where s = N'log_1.trc' and f = 1), '|',
+                (select count(*) from #t where s like N'system[_]health[_]0[_]%.xel' and f = 1), '|',
+                (select count(*) from #t where s like N'HkEngineEventFile[_]0[_]%.xel' and f = 1))
+            """));
+
     private static string Dirtree(string arguments) => $"""
         create table #t (s nvarchar(260), d int);
         insert #t exec xp_dirtree {arguments};

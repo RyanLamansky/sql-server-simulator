@@ -432,7 +432,7 @@ internal static partial class BuiltInResources
             foreach (var (targetName, package) in internalSession!.Targets)
             {
                 var data = targetName == "event_file"
-                    ? $"<EventFileTarget truncated=\"0\"><Buffers logged=\"0\" dropped=\"0\"/><File name=\"{EventFileTarget.LogDirectory}HkEngineEventFile_0_{server.StartTime.ToFileTimeUtc().ToString(System.Globalization.CultureInfo.InvariantCulture)}.xel\"/></EventFileTarget>"
+                    ? $"<EventFileTarget truncated=\"0\"><Buffers logged=\"0\" dropped=\"0\"/><File name=\"{server.InternalEventFilePath}\"/></EventFileTarget>"
                     : null;
                 yield return
                 [

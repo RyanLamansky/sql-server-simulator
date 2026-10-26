@@ -77,9 +77,9 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Whether <paramref name="canonical"/> is a file: a database file, the
-    /// error log, a device written to the in-memory store, or — with
-    /// <see cref="OpenBackupFile"/> set — a path the host opens for reading.
+    /// Whether <paramref name="canonical"/> is a file: one of
+    /// <see cref="ServerFiles"/>, or — with <see cref="OpenBackupFile"/> set —
+    /// a path the host opens for reading.
     /// </summary>
     internal bool IsServerFile(string canonical)
     {
@@ -103,7 +103,10 @@ partial class Simulation
 
     /// <summary>
     /// Every file the simulation can name by canonical path: each database's
-    /// files, the error log and its archives, and the in-memory backup devices.
+    /// files, the error log and its archives, the in-memory backup devices,
+    /// the default trace's file, and the files traces, audits and Extended
+    /// Events sessions have written — the last once anything has made the
+    /// Extended Events server, before which no statement has named one.
     /// </summary>
     private IEnumerable<string> ServerFiles()
     {
@@ -119,6 +122,7 @@ partial class Simulation
             yield return number == 0 ? ErrorLog.FileName : ErrorLog.FileName + "." + number.ToString(System.Globalization.CultureInfo.InvariantCulture);
         foreach (var (key, _) in this.BackupDevices)
             yield return key;
+        yield return this.TracesIfMade?.DefaultLog.CurrentPath ?? BuiltInResources.DefaultTracePath;
         if (this.TracesIfMade is { } traces)
         {
             foreach (var (path, _) in traces.Files)
@@ -130,6 +134,15 @@ partial class Simulation
         if (this.AuditsIfMade is { } audits)
         {
             foreach (var (path, _) in audits.Files)
+            {
+                if (CanonicalServerPath(path) is { } canonical)
+                    yield return canonical;
+            }
+        }
+        if (this.ExtendedEventsIfMade is { } extendedEvents)
+        {
+            yield return extendedEvents.InternalEventFilePath;
+            foreach (var (path, _) in extendedEvents.Files)
             {
                 if (CanonicalServerPath(path) is { } canonical)
                     yield return canonical;
