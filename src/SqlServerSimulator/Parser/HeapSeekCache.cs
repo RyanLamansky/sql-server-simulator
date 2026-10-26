@@ -583,13 +583,27 @@ internal sealed class HeapSeekCache
 
         // Every address in ascending key order, as the unbounded ordered walk
         // lists them, kept until a write changes a bucket (AddRid / RemoveRid
-        // drop it). A paged ordered read — the same ORDER BY over an unchanged
-        // table, page after page — then indexes straight to its OFFSET instead
-        // of walking the ordered view to build the list again.
+        // drop it) — save a removal of its first or last address, which only
+        // narrows the run between keyOrderStart and keyOrderEnd, so a loop
+        // taking a table's first row and deleting it reads one row per step
+        // rather than walking every key to build the list again. A paged
+        // ordered read — the same ORDER BY over an unchanged table, page after
+        // page — likewise indexes straight to its OFFSET.
         private (int Page, int Slot)[]? keyOrder;
+        private int keyOrderStart, keyOrderEnd;
 
-        public (int Page, int Slot)[] KeyOrder() =>
-            this.keyOrder ??= [.. this.OrderedCandidates(null, false, null, false)];
+        public ArraySegment<(int Page, int Slot)> KeyOrder()
+        {
+            if (this.keyOrder is null)
+            {
+                this.keyOrder = [.. this.OrderedCandidates(null, false, null, false)];
+                (this.keyOrderStart, this.keyOrderEnd) = (0, this.keyOrder.Length);
+            }
+            return new(this.keyOrder, this.keyOrderStart, this.keyOrderEnd - this.keyOrderStart);
+        }
+
+        // The keyed order's addresses as an array, which a slice of it reads.
+        private (int Page, int Slot)[]? keyedAddresses;
 
         // The unbounded ordered walk again with each address's key at the same
         // index, which a scan following the clustered key reads: building it
@@ -814,6 +828,7 @@ internal sealed class HeapSeekCache
         {
             this.keyOrder = null;
             this.keyedOrder = null;
+            this.keyedAddresses = null;
             this.walkedKeys = 0;
             var added = false;
             if (!this.Buckets.TryGetValue(key, out var bucket))
@@ -873,8 +888,15 @@ internal sealed class HeapSeekCache
         // old list is only the false positive every reader filters out.
         private void RemoveRid(SqlValueKey key, (int Page, int Slot) rid)
         {
-            this.keyOrder = null;
+            var order = this.keyOrder;
+            if (order is not null && this.keyOrderEnd > this.keyOrderStart && order[this.keyOrderStart] == rid)
+                this.keyOrderStart++;
+            else if (order is not null && this.keyOrderEnd > this.keyOrderStart && order[this.keyOrderEnd - 1] == rid)
+                this.keyOrderEnd--;
+            else
+                this.keyOrder = null;
             this.keyedOrder = null;
+            this.keyedAddresses = null;
             this.walkedKeys = 0;
             if (this.Buckets.TryGetValue(key, out var bucket))
             {
@@ -1073,7 +1095,7 @@ internal sealed class HeapSeekCache
                 return new([.. this.OrderedCandidates(lower, lowerInclusive, upper, upperInclusive)]);
             IndexSeekDiagnostics.Sink?.Add("CacheSlice");
             var (order, keyList) = this.KeyedOrder();
-            var addresses = this.keyOrder ??= [.. order];
+            var addresses = this.keyedAddresses ??= [.. order];
             var keys = CollectionsMarshal.AsSpan(keyList);
             var start = lower is { } lk ? FirstPast(keys, lk, strictly: !lowerInclusive) : 0;
             var end = upper is { } uk ? FirstPast(keys, uk, strictly: upperInclusive) : keys.Length;

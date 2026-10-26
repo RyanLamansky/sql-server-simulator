@@ -653,4 +653,19 @@ public sealed class TableVariableTests
             while @i < 2000 begin set @i += 1; select @v = v from @t where id = @i * 37; set @s += @v; end;
             select @s
             """));
+
+    /// <summary>
+    /// A loop draining a table variable as a queue — test for a row, read the
+    /// first by key, delete it — reads each from the first live row, where
+    /// each test and read walked every row the earlier deletes removed.
+    /// </summary>
+    [TestMethod]
+    [Timeout(20000)]
+    public void QueueLoop_RunsInLinearTime() =>
+        AreEqual(959307, new Simulation().ExecuteScalar("""
+            declare @t table (id int primary key, v int); insert @t select value, value % 97 from generate_series(1, 20000);
+            declare @id int, @v int, @s int = 0;
+            while exists (select * from @t) begin select top (1) @id = id, @v = v from @t order by id; set @s += @v; delete @t where id = @id; end;
+            select @s
+            """));
 }

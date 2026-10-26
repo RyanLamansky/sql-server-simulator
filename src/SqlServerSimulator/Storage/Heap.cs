@@ -674,6 +674,7 @@ internal sealed class Heap(bool sessionPrivate = false)
         // The new row went into the slot at SlotCount-1 of the chosen page —
         // TryInsert appends a new directory entry as the highest-index slot.
         var slotIndex = this.Pages[pageIndex].SlotCount - 1;
+        this.NoteSlotLive(pageIndex);
         this.RowCount++;
         this.MutationGeneration++;
         if (journalEvent)
@@ -826,6 +827,8 @@ internal sealed class Heap(bool sessionPrivate = false)
                 break;
             this.RowCount -= this.Pages[last].SlotCount;
             this.Pages.RemoveLast();
+            if (this.firstLivePage > this.Pages.Count)
+                Volatile.Write(ref this.firstLivePage, this.Pages.Count);
             _ = this.reclaimablePages.TryRemove(last, out _);
             if (this.Pages.Count > 0)
                 this.Pages[^1].NextPageIndex = -1;
@@ -907,8 +910,14 @@ internal sealed class Heap(bool sessionPrivate = false)
     /// </remarks>
     public IEnumerable<(int PageIndex, int SlotIndex, byte[] Bytes)> EnumerateRowsWithAddress()
     {
-        var sequence = Volatile.Read(ref this.latchSequence);
-        for (var p = 0; p < this.Pages.Count; p++)
+        // A writer mid-mutation may have filled a slot ahead of the marker
+        // and not yet moved it back, so the marker is read once none is.
+        var sequence = this.BeginRead();
+        var first = Volatile.Read(ref this.firstLivePage);
+#if DEBUG
+        this.AssertNoLiveSlotBefore(first, sequence);
+#endif
+        for (var p = first; p < this.Pages.Count; p++)
         {
             var page = this.Pages[p];
             var slotCount = page.SlotCount;
@@ -919,6 +928,43 @@ internal sealed class Heap(bool sessionPrivate = false)
             }
         }
     }
+
+    /// <summary>
+    /// The first page <see cref="EnumerateRowsWithAddress"/> reads: every page
+    /// before it holds tombstones only, as deletes at a heap's front leave
+    /// them, so a loop taking a table's first row and deleting it reads on
+    /// from the next live row rather than through every slot the earlier
+    /// deletes emptied. A delete emptying its page moves it forward under the
+    /// latch (<see cref="DeleteAtCore"/>); anything giving a slot of an earlier
+    /// page a row again — an insert, an undone delete — moves it back
+    /// (<see cref="NoteSlotLive"/>), and a wholesale replacement of the pages
+    /// to the first (<see cref="RecomputeRowCount"/>). A snapshot reader walks
+    /// those pages still, for their tombstones (<see cref="EnumerateSlots"/>).
+    /// </summary>
+    private int firstLivePage;
+
+    /// <summary>Notes that a slot of page <paramref name="pageIndex"/> holds a row again, which a live-row scan must reach (see <see cref="firstLivePage"/>).</summary>
+    internal void NoteSlotLive(int pageIndex)
+    {
+        if (pageIndex < this.firstLivePage)
+            Volatile.Write(ref this.firstLivePage, pageIndex);
+    }
+
+#if DEBUG
+    /// <summary>
+    /// Asserts none of the eight pages before <paramref name="first"/> holds
+    /// a slot a scan would read — unless a write landed since the scan took
+    /// <paramref name="sequence"/>, which the scan may meet or miss as it
+    /// meets or misses any write landing as it goes. Eight covers a small
+    /// heap whole while keeping a loop deleting a large heap's first row
+    /// linear.
+    /// </summary>
+    private void AssertNoLiveSlotBefore(int first, int sequence)
+    {
+        for (var p = Math.Max(0, first - 8); p < first && p < this.Pages.Count; p++)
+            Debug.Assert(!this.Pages[p].HasUntombstonedSlot || Volatile.Read(ref this.latchSequence) != sequence, $"Page {p} holds a row ahead of the first live page {first}.");
+    }
+#endif
 
     /// <summary>
     /// The slots a snapshot reader walks: every live row as
@@ -1150,6 +1196,13 @@ internal sealed class Heap(bool sessionPrivate = false)
         page.DeleteSlot(slotIndex);
         if (oldImage is not null)
             this.RecordSeekJournalEvent(SeekJournalKind.Delete, pageIndex, slotIndex, oldImage, newImage: null);
+        if (pageIndex == this.firstLivePage)
+        {
+            var first = pageIndex;
+            while (first < this.Pages.Count && !this.Pages[first].HasUntombstonedSlot)
+                first++;
+            Volatile.Write(ref this.firstLivePage, first);
+        }
     }
 
     /// <summary>
@@ -1379,6 +1432,7 @@ internal sealed class Heap(bool sessionPrivate = false)
         foreach (var page in this.Pages)
             count += page.SlotCount;
         this.RowCount = count;
+        Volatile.Write(ref this.firstLivePage, 0);
         return count;
     }
 

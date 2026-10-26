@@ -100,6 +100,34 @@ public sealed class DeleteTests
         CollectionAssert.AreEqual(new[] { 4, 5 }, ReadInts(simulation.CreateCommand("select id from t order by id")));
     }
 
+    /// <summary>
+    /// A scan reads every live row however the heap's leading pages were
+    /// emptied and filled again: deletes at the front, their rollback, and
+    /// inserts reusing the emptied pages ahead of the live ones.
+    /// </summary>
+    [TestMethod]
+    public void LeadingPagesEmptiedAndRefilled_ScanReadsEveryRow()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table h (id int, pad char(400)); insert h select value, 'x' from generate_series(1, 200)");
+        AreEqual(20100, simulation.ExecuteScalar("begin tran; delete top (100) from h; rollback; select sum(id) from h"));
+        AreEqual(15050, simulation.ExecuteScalar("delete top (100) from h; select sum(id) from h"));
+        AreEqual(120100, simulation.ExecuteScalar("insert h select value, 'y' from generate_series(1001, 1100); select sum(id) from h"));
+    }
+
+    /// <summary>
+    /// Each <c>DELETE TOP (1)</c> of a heap reads on from its first live row,
+    /// where each read every slot the earlier deletes emptied.
+    /// </summary>
+    [TestMethod]
+    [Timeout(20000)]
+    public void DeleteTopLoop_RunsInLinearTime() =>
+        AreEqual(0, new Simulation().ExecuteScalar("""
+            create table h (id int, v varchar(20)); insert h select value, concat('v', value) from generate_series(1, 40000);
+            declare @i int = 0; while @i < 40000 begin delete top (1) from h; set @i += 1; end;
+            select count(*) from h
+            """));
+
     [TestMethod]
     public void Delete_OutputLiteralOne_YieldsOneRowPerAffected()
     {

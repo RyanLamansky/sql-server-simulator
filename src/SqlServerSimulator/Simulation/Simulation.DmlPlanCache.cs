@@ -441,7 +441,6 @@ partial class Simulation
     /// </summary>
     private static bool BlocksDmlPlan(BatchContext batch, Storage.HeapTable table, bool clientOutput) =>
         !ReferenceEquals(batch.DatabaseFor(table), batch.CurrentDatabase)
-        || table.IsTableVariable
         || table.IsTableValuedParameter
         || RequiresCorrectSetOptions(table)
         || (clientOutput && TableHasAnyTrigger(batch, table));

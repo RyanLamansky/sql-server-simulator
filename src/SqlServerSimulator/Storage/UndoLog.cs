@@ -682,6 +682,7 @@ internal sealed class UndoLog(LobReclamation? reclamation)
                     // Un-tombstone: the row (and its chains) become live again,
                     // so nothing is freed here.
                     page.UndeleteSlot(this.SlotIndex);
+                    this.Heap.NoteSlotLive(this.PageIndex);
                     break;
             }
         }
@@ -786,6 +787,7 @@ internal sealed class UndoLog(LobReclamation? reclamation)
         {
             using var latch = this.Heap.EnterLatch();
             this.Heap.Pages[this.PageIndex].UndeleteSlot(this.SlotIndex);
+            this.Heap.NoteSlotLive(this.PageIndex);
             this.Heap.ReinstateForwardTargetForUndo(this.Target);
         }
 

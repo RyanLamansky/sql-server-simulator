@@ -170,7 +170,7 @@ Regression coverage: `CurrentTimeFunctionTests`.
 
 **A body's statements replay from plans.**
 A procedure's, DML trigger's, scalar or multi-statement function's and dynamic batch's `SELECT` and DML statements run from the statement plans their first call recorded, keyed by the module ([`plan-cache.md`](plan-cache.md#module-bodies)); the body still dispatches statement by statement, so the freeze, the error attribution, `@@PROCID`, streaming and skip mode are the parsed body's.
-A statement reading a `#temp` table, a table variable or a TVP parses on every call, and so does every statement of a call that compiles afresh (`WITH RECOMPILE`); a trigger's statements over `inserted` / `deleted` replay too, the pair being kept across firings ([`triggers.md`](triggers.md#statement-plans-over-the-pseudo-tables)).
+A statement over a TVP parses on every call, one over a `#temp` table the call creates or a table variable it declares parses at each call and replays within it, one over a caller's `#temp` table replays across the calls that see it, and every statement of a call that compiles afresh (`WITH RECOMPILE`) parses; a trigger's statements over `inserted` / `deleted` replay too, the pair being kept across firings ([`triggers.md`](triggers.md#statement-plans-over-the-pseudo-tables)).
 
 **What a call costs besides its statements.**
 A scalar function's call builds a child batch — the `BatchContext`, its `ParserContext` and `StatementContext`, the parameters' `VariableSlot`s — and dispatches the body through the loop, which allocates its iterators per statement; that is most of a `RETURN @x * 2` call, whose parse is a small share.

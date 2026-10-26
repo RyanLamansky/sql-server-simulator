@@ -22,6 +22,11 @@ Both reads stay per row rather than being hoisted, so a heap mutated mid-enumera
 Measured on a 228k-row `SELECT COUNT(*)`: **71 ms → 11 ms**, which is the floor under every scan-bound query in the battery.
 Each slot is read optimistically against the heap's latch ([below](#concurrent-writers-the-heap-latch)), and the common case of that read — no writer mid-mutation, no forwarded row anywhere in the heap — is inlined into the walk, with one sequence read per row closing that row's validation and opening the next's.
 
+**A live-row scan starts at the first page holding anything but tombstones** (`Heap.firstLivePage`).
+A page emptied at the heap's front stays in the page list, whose addresses must hold, so a loop taking a table's first row and deleting it — `DELETE TOP (1)` over a heap, or `WHILE EXISTS` over a table it drains — read every slot the earlier deletes emptied at each step.
+64,000 `DELETE TOP (1)` over a heap went from 6.3 s to 1.0 s and 16,000 from 0.86 s to 0.53 s (Release, measured 2026-10-26), against real's 0.76 s and 0.16 s (measured 2026-10-25).
+A snapshot reader still walks every page, since its snapshot may predate the deletes (`Heap.EnumerateSlots`).
+
 **The reuse candidates are walked without snapshotting them.**
 `Heap.TryReuseReclaimablePage` runs on the insert path — once for every row the tail page can't hold, which on a bulk load is once per page — and the candidate set is a `ConcurrentDictionary`.
 Reading its `Keys` property takes *every* one of the dictionary's locks and copies the keys into a fresh collection; the walk enumerates the dictionary directly instead, which is the lock-free weakly-consistent enumeration the set was chosen for, and short-circuits on `IsEmptyLockFree` for the overwhelmingly common heap nothing has deleted from (`IsEmpty` itself takes every lock when the answer is yes).

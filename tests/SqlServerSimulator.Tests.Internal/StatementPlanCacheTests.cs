@@ -111,6 +111,16 @@ public sealed class StatementPlanCacheTests
             """) is var (selects, writes) ? (selects / 3, writes / 3) : default);
 
     [TestMethod]
+    public void TableVariableTarget_ReplaysInItsBatchsLoop()
+        => AreEqual((4L, 4L), ReplaysOverThreeRuns(
+            "",
+            """
+            declare @t table (id int primary key); insert @t select value from generate_series(1, 5);
+            declare @id int;
+            while exists (select * from @t) begin select top 1 @id = id from @t order by id; delete @t where id = @id; end
+            """) is var (selects, writes) ? (selects / 3, writes / 3) : default);
+
+    [TestMethod]
     public void TableVariable_DeclaredByEachRun_ParsesEveryRun()
         => AreEqual((0L, 0L), ReplaysOverThreeRuns(
             "",
