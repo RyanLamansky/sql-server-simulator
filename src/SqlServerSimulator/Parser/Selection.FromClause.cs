@@ -553,18 +553,27 @@ internal sealed partial class Selection
     private static bool NextSourceIsJoinGroup(ParserContext context)
     {
         var checkpoint = context.SaveCheckpoint();
-        var opensGroup = context.GetNextOptional() is Operator { Character: '(' } && context.GetNextOptional() switch
+        var opensGroup = context.GetNextOptional() switch
         {
-            null or ReservedKeyword { Keyword: Keyword.Select or Keyword.Values or Keyword.With or Keyword.Insert or Keyword.Update or Keyword.Delete or Keyword.Merge } => false,
-            Operator { Character: '(' } => !LeadsParenthesizedQuery(context, closeCounts: true),
-            _ => true,
+            Operator { Character: '(' } => context.GetNextOptional() switch
+            {
+                null or ReservedKeyword { Keyword: Keyword.Select or Keyword.Values or Keyword.With or Keyword.Insert or Keyword.Update or Keyword.Delete or Keyword.Merge } => false,
+                Operator { Character: '(' } => !LeadsParenthesizedQuery(context, closeCounts: true),
+                _ => true,
+            },
+            // ODBC's outer-join escape, `{oj <join chain>}`, groups its chain
+            // as parentheses do, and any other word there is refused by name
+            // (probed 2026-10-26 against SQL Server 2025).
+            Operator { Character: '{' } => context.GetNextOptional() is Name,
+            _ => false,
         };
         context.RestoreCheckpoint(checkpoint);
         return opensGroup;
     }
 
     /// <summary>
-    /// Parses a parenthesized join group — <c>( &lt;join chain&gt; )</c> — by
+    /// Parses a parenthesized join group — <c>( &lt;join chain&gt; )</c>, or
+    /// ODBC's <c>{oj &lt;join chain&gt;}</c> — by
     /// recursively parsing the interior chain into the same
     /// <paramref name="sources"/> / <paramref name="joins"/> lists as the
     /// enclosing FROM, so the group's members occupy their own flat slots and
@@ -583,8 +592,15 @@ internal sealed partial class Selection
     {
         var joinsBefore = joins.Count;
         context.MoveNextRequired();
+        var closer = ')';
+        if (context.Token is Operator { Character: '{' })
+        {
+            if (context.GetNextRequired() is Name { Value: var word } && !word.Equals("oj", StringComparison.OrdinalIgnoreCase))
+                throw SimulatedSqlException.NotARecognizedOdbcOuterJoinOption(word);
+            closer = '}';
+        }
         ParseExplicitJoinChain(context, scope, sources, joins, siblingCandidates);
-        if (joins.Count == joinsBefore || context.Token is not Operator { Character: ')' })
+        if (joins.Count == joinsBefore || context.Token is not Operator { Character: var closing } || closing != closer)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
     }

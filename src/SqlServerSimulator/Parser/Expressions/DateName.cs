@@ -41,6 +41,18 @@ internal sealed class DateName : Expression
         this.source = Parse(context.MoveNextRequiredReturnSelf());
     }
 
+    /// <summary>
+    /// Constructs the single-argument form ODBC's <c>{fn DAYNAME(x)}</c> /
+    /// <c>{fn MONTHNAME(x)}</c> rewrites to — kind supplied by the caller,
+    /// argument parsed from the open-paren-advanced position.
+    /// </summary>
+    public DateName(ParserContext context, DatePartKind fixedKind, string fixedKeywordText)
+    {
+        this.kind = fixedKind;
+        this.keywordText = fixedKeywordText;
+        this.source = Parse(context);
+    }
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var value = DatePartKinds.CoerceDateArgumentImplicit(this.source.Run(runtime));

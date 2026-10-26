@@ -995,7 +995,7 @@ Data past 7,959 bytes (7,939 with an authenticator) makes a cipher text past `va
 
 - **A version-1 cipher text** — the triple-DES format SQL Server 2016 and earlier wrote, which real still decrypts — raises `NotSupportedException` from `DECRYPTBYPASSPHRASE`, since no reference instance can write one to check against; any blob opening `0x01000000` takes that path, where real answers NULL for one it can't read.
 
-## ODBC escape sequences: `{d}` / `{t}` / `{ts}` / `{guid}` / `{fn}`
+## ODBC escape sequences: `{d}` / `{t}` / `{ts}` / `{guid}` / `{fn}` / `{oj}`
 
 The tokenizer emits `{` and `}` as single-char operators (no other T-SQL meaning); `Expression.ParseOdbcEscape` consumes the escape in expression position.
 
@@ -1003,12 +1003,14 @@ The tokenizer emits `{` and `}` as single-char operators (no other T-SQL meaning
 - **`{t 'hh:mm:ss'}`** → a `datetime` on the **current date** at the given time — matching SQL Server 2025's time-escape semantics (probe-confirmed: `{t '12:00:00'}` returns today 12:00, not 1900-01-01).
   A plain datetime coercion of a time-only string lands on 1900-01-01, so the parse re-homes the time onto `DateTime.UtcNow.Date`.
 - **`{guid '…'}`** → a `uniqueidentifier` literal.
-- **`{fn NAME(args)}`** → the mapped built-in scalar function, parsed as a normal call.
-  ODBC-distinct names are renamed to their T-SQL equivalents: `UCASE`→`UPPER`, `LCASE`→`LOWER`, `LENGTH`→`LEN`, `LOCATE`→`CHARINDEX`, `REPEAT`→`REPLICATE`, `IFNULL`→`ISNULL`, `INSERT`→`STUFF`, `NOW`→`GETDATE`, `ATAN2`→`ATN2`, `DAYOFMONTH`→`DAY` (`MapOdbcFunctionName`).
+- **`{fn NAME(args)}`** → the mapped built-in scalar function, parsed as a normal call, its name possibly a word T-SQL reserves (`LEFT`, `RIGHT`, `INSERT`, `USER`, `TRUNCATE`, `CURRENT_TIMESTAMP`).
+  ODBC-distinct names are renamed to their T-SQL equivalents: `UCASE`→`UPPER`, `LCASE`→`LOWER`, `LENGTH`→`LEN`, `LOCATE`→`CHARINDEX`, `REPEAT`→`REPLICATE`, `IFNULL`→`ISNULL`, `INSERT`→`STUFF`, `NOW`→`GETDATE`, `ATAN2`→`ATN2`, `DAYOFMONTH`→`DAY`, `USER`→`USER_NAME`, `DATABASE`→`DB_NAME` (`MapOdbcFunctionName`).
   A name already matching a T-SQL built-in (`CONCAT`, `LEFT`, `CEILING`, `ABS`, …) passes through unchanged.
+  The functions no T-SQL built-in takes the same arguments as parse as the call real rewrites them to (`ParseOdbcOnlyFunction`): `MOD` as `%`, `TRUNCATE` as `ROUND(x, y, 1)`, `DAYOFWEEK` / `DAYOFYEAR` / `HOUR` / `MINUTE` / `SECOND` / `WEEK` / `QUARTER` as `DATEPART` of that part (so `DAYOFWEEK` and `WEEK` follow `DATEFIRST`), `DAYNAME` / `MONTHNAME` as `DATENAME`, `OCTET_LENGTH` / `BIT_LENGTH` as `DATALENGTH` in bytes and in bits, and the clock — `CURDATE` / `CURRENT_DATE`, `CURTIME` / `CURRENT_TIME([p])`, `CURRENT_TIMESTAMP([p])` — as `varchar` text of `GETDATE()`, which `{fn CURRENT_TIMESTAMP()}` is too where the bare keyword is `datetime` (`OdbcClockText`, probed 2026-10-26 against SQL Server 2025).
+- **`{oj <join chain>}`** in a FROM clause groups its chain as parentheses do, and any other word there is Msg 155 (`NotARecognizedOdbcOuterJoinOption`).
 
-**Known gap**: the ODBC `{fn}` functions with no same-arity T-SQL rename — `MOD` (→ `%`), `TRUNCATE` (→ `ROUND(x, y, 1)`), `CURDATE` / `CURTIME`, `DAYOFWEEK` / `DAYOFYEAR` / `HOUR` / `MINUTE` / `SECOND` / `WEEK` / `QUARTER` (→ `DATEPART(part, x)`), `USER` / `DATABASE`, the ODBC `CONVERT(val, SQL_type)` — are left unmapped (they fall to the normal not-a-built-in path).
-The `{oj … LEFT OUTER JOIN …}` outer-join escape (a FROM-clause construct, not expression position) is likewise not modeled.
+**Not modeled yet**: `{fn CONVERT(val, SQL_type)}`, `{fn TIMESTAMPADD(SQL_TSI_unit, n, x)}` and `{fn TIMESTAMPDIFF(SQL_TSI_unit, a, b)}`, which fall to the normal not-a-built-in path.
+Real casts `CONVERT`'s value to `char(8000)` / `nchar(4000)` for `SQL_CHAR` / `SQL_WCHAR`, `varchar(8000)` / `nvarchar(4000)` for the `VARCHAR` and `LONGVARCHAR` names, `binary(8000)` / `varbinary(8000)` for the binary ones, `datetime` for `SQL_DATE`, `SQL_TIME`, `SQL_TIMESTAMP` and their `SQL_TYPE_` forms, `decimal(38, 4)` for `SQL_DECIMAL` / `SQL_NUMERIC`, `float` for `SQL_DOUBLE` / `SQL_FLOAT`, and the obvious type for the rest, an unknown name being Msg 155 (`'…' is not a recognized ODBC datatype option.`); the two timestamp functions are `DATEADD` / `DATEDIFF` of the unit, `SQL_TSI_FRAC_SECOND` reading as milliseconds (probed 2026-10-26 against SQL Server 2025).
 
 ## The native `REGEXP_*` family (SQL Server 2025)
 

@@ -2015,14 +2015,20 @@ internal abstract class Expression : ExpressionNode
 
         if (collation.Equals(escape, "fn"))
         {
-            if (context.GetNextRequired() is not Name functionNameToken)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            var reference = Counted(context, new Reference(MapOdbcFunctionName(functionNameToken.Value, collation)));
+            // The escape names its function by a word T-SQL may reserve too —
+            // LEFT, RIGHT, INSERT, USER, TRUNCATE, CURRENT_TIMESTAMP.
+            var functionName = context.GetNextRequired() switch
+            {
+                Name name => name.Value,
+                ReservedKeyword keyword => keyword.Source.ToString(),
+                _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+            };
             if (context.GetNextRequired() is not Operator { Character: '(' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
-            var call = ParseCallArguments(reference, context);
-            return context.GetNextRequired() is not Operator { Character: '}' }
+            var call = ParseOdbcOnlyFunction(functionName, context)
+                ?? ParseCallArguments(Counted(context, new Reference(MapOdbcFunctionName(functionName, collation))), context);
+            return context.Token is not Operator { Character: ')' } || context.GetNextRequired() is not Operator { Character: '}' }
                 ? throw SimulatedSqlException.SyntaxErrorNear(context)
                 : call;
         }
@@ -2049,9 +2055,9 @@ internal abstract class Expression : ExpressionNode
     /// Maps an ODBC <c>{fn NAME}</c> scalar-function name to its T-SQL
     /// equivalent. Only the ODBC-distinct spellings are renamed; a name that is
     /// already a T-SQL built-in (CONCAT, LEFT, CEILING, …) passes through
-    /// unchanged and resolves normally. ODBC functions with no same-arity T-SQL
-    /// rename (DAYOFWEEK / HOUR / MOD / TRUNCATE / CURDATE / …) are left
-    /// unmapped and fall to the normal not-a-built-in path.
+    /// unchanged and resolves normally. An ODBC function with no same-shaped
+    /// T-SQL rename parses through <see cref="ParseOdbcOnlyFunction"/> first,
+    /// and one neither handles falls to the normal not-a-built-in path.
     /// </summary>
     private static string MapOdbcFunctionName(string name, Collation collation) =>
         collation.Equals(name, "UCASE") ? "UPPER"
@@ -2064,7 +2070,70 @@ internal abstract class Expression : ExpressionNode
         : collation.Equals(name, "NOW") ? "GETDATE"
         : collation.Equals(name, "ATAN2") ? "ATN2"
         : collation.Equals(name, "DAYOFMONTH") ? "DAY"
+        : collation.Equals(name, "USER") ? "USER_NAME"
+        : collation.Equals(name, "DATABASE") ? "DB_NAME"
         : name;
+
+    /// <summary>
+    /// Parses an ODBC <c>{fn NAME(args)}</c> function no T-SQL built-in takes
+    /// the same arguments as, from the token after its <c>(</c>, as the call
+    /// real rewrites it to (probed 2026-10-26 against SQL Server 2025): the
+    /// date-part shorthands as <c>DATEPART</c> / <c>DATENAME</c> of their
+    /// part, <c>DAYOFWEEK</c> and <c>WEEK</c> following <c>DATEFIRST</c> as
+    /// those do, <c>MOD</c> as <c>%</c>, <c>TRUNCATE</c> as
+    /// <c>ROUND(x, y, 1)</c>, <c>OCTET_LENGTH</c> and <c>BIT_LENGTH</c> as
+    /// <c>DATALENGTH</c> in bytes and in bits, and the clock as text
+    /// (<see cref="OdbcClockText"/>). Null for any other name.
+    /// </summary>
+    private static Expression? ParseOdbcOnlyFunction(string name, ParserContext context)
+    {
+        Span<char> uppercaseName = stackalloc char[name.Length];
+        _ = name.ToUpperInvariant(uppercaseName);
+        switch (uppercaseName)
+        {
+            case "BIT_LENGTH":
+                return new Multiply(new DataLength(context), new Value(SqlValue.FromInt32(8)));
+            case "CURDATE":
+                return context.Token is Operator { Character: ')' } ? new OdbcClockText(context, OdbcClock.Date, takesPrecision: false) : throw SimulatedSqlException.FunctionRequiresNArguments("CURDATE", 0);
+            case "CURRENT_DATE":
+                return new OdbcClockText(context, OdbcClock.Date, takesPrecision: false);
+            case "CURRENT_TIME":
+                return new OdbcClockText(context, OdbcClock.Time, takesPrecision: true);
+            case "CURRENT_TIMESTAMP":
+                return new OdbcClockText(context, OdbcClock.Timestamp, takesPrecision: true);
+            case "CURTIME":
+                return context.Token is Operator { Character: ')' } ? new OdbcClockText(context, OdbcClock.Time, takesPrecision: false) : throw SimulatedSqlException.FunctionRequiresNArguments("CURTIME", 0);
+            case "DAYNAME":
+                return new DateName(context, DatePartKind.Weekday, "weekday");
+            case "DAYOFWEEK":
+                return new DatePart(context, DatePartKind.Weekday, "weekday");
+            case "DAYOFYEAR":
+                return new DatePart(context, DatePartKind.DayOfYear, "dayofyear");
+            case "HOUR":
+                return new DatePart(context, DatePartKind.Hour, "hour");
+            case "MINUTE":
+                return new DatePart(context, DatePartKind.Minute, "minute");
+            case "MOD":
+                var dividend = Parse(context);
+                return context.Token is not Operator { Character: ',' }
+                    ? throw SimulatedSqlException.SyntaxErrorNear(context)
+                    : new Modulus(dividend, Parse(context.MoveNextRequiredReturnSelf()));
+            case "MONTHNAME":
+                return new DateName(context, DatePartKind.Month, "month");
+            case "OCTET_LENGTH":
+                return new DataLength(context);
+            case "QUARTER":
+                return new DatePart(context, DatePartKind.Quarter, "quarter");
+            case "SECOND":
+                return new DatePart(context, DatePartKind.Second, "second");
+            case "TRUNCATE":
+                return new Round(context, truncating: true);
+            case "WEEK":
+                return new DatePart(context, DatePartKind.Week, "week");
+            default:
+                return null;
+        }
+    }
 
     /// <summary>
     /// Notes a side-effecting built-in inside a function body being bound at

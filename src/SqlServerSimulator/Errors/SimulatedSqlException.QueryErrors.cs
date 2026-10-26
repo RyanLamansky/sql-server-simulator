@@ -492,6 +492,14 @@ partial class SimulatedSqlException
         new($"'{keyword}' is not a recognized {functionLowerName} option.", 155, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 155 for a FROM clause's <c>{word …}</c> escape
+    /// whose word isn't ODBC's <c>oj</c> (probed 2026-10-26 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NotARecognizedOdbcOuterJoinOption(string word) =>
+        new($"'{word}' is not a recognized ODBC outer join option.", 155, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 147 — an aggregate in a WHERE clause that reads
     /// the query's own columns (or none, as <c>COUNT(*)</c>), in a SELECT, an
     /// UPDATE or a DELETE alike; one reading only an enclosing query's columns

@@ -24,12 +24,24 @@ internal sealed class Round : Expression
     private readonly Expression? function;
 
     public Round(ParserContext context)
+        : this(context, truncating: false)
+    {
+    }
+
+    /// <summary>
+    /// Parses <c>ROUND</c>'s arguments, or with <paramref name="truncating"/>
+    /// ODBC's two-argument <c>{fn TRUNCATE(x, y)}</c>, which is
+    /// <c>ROUND(x, y, 1)</c>.
+    /// </summary>
+    public Round(ParserContext context, bool truncating)
     {
         this.value = MathScalars.FloatForBareNull(Parse(context));
         if (context.Token is not Tokens.Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.length = Parse(context.MoveNextRequiredReturnSelf());
-        if (context.Token is Tokens.Operator { Character: ',' })
+        if (truncating)
+            this.function = new Value(SqlValue.FromInt32(1));
+        else if (context.Token is Tokens.Operator { Character: ',' })
             this.function = Parse(context.MoveNextRequiredReturnSelf());
     }
 

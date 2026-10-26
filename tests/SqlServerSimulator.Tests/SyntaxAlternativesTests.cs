@@ -343,6 +343,83 @@ public sealed class SyntaxAlternativesTests
     public void OdbcFnNativeName_PassesThrough()
         => AreEqual(5, new Simulation().ExecuteScalar("select {fn ABS(-5)}"));
 
+    /// <summary>
+    /// The escape's functions answer as real rewrites them, a name T-SQL
+    /// reserves included (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("{fn LEFT('abcdef', 2)}", "ab")]
+    [DataRow("{fn RIGHT('abcdef', 2)}", "ef")]
+    [DataRow("{fn INSERT('abcdef', 2, 3, 'XY')}", "aXYef")]
+    [DataRow("{fn MOD(-7, 3)}", "-1")]
+    [DataRow("{fn TRUNCATE(-1.567, 1)}", "-1.500")]
+    [DataRow("{fn TRUNCATE(156.7, -1)}", "150.0")]
+    [DataRow("{fn DAYOFWEEK('2020-01-01')}", "4")]
+    [DataRow("{fn DAYOFYEAR('2020-03-01')}", "61")]
+    [DataRow("{fn HOUR('2020-01-01 13:45:30')}", "13")]
+    [DataRow("{fn MINUTE('2020-01-01 13:45:30')}", "45")]
+    [DataRow("{fn SECOND('2020-01-01 13:45:30')}", "30")]
+    [DataRow("{fn WEEK('2020-03-01')}", "10")]
+    [DataRow("{fn QUARTER('2020-05-01')}", "2")]
+    [DataRow("{fn DAYNAME('2020-01-01')}", "Wednesday")]
+    [DataRow("{fn MONTHNAME('2020-01-01')}", "January")]
+    [DataRow("{fn BIT_LENGTH(N'ab')}", "32")]
+    [DataRow("{fn OCTET_LENGTH('ab')}", "2")]
+    [DataRow("{fn USER()}", "dbo")]
+    [DataRow("{fn DATABASE()}", "simulated")]
+    [DataRow("sql_variant_property({fn MOD(7, 3)}, 'BaseType')", "int")]
+    public void OdbcFn_AnswersAsRealRewritesIt(string call, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select cast({call} as varchar(30))"));
+
+    /// <summary>
+    /// The clock escapes are text of <c>GETDATE()</c>'s value: the date as
+    /// <c>varchar(10)</c>, the time and the timestamp as <c>varchar(30)</c>
+    /// with their millisecond digits cut or zero-padded to the precision
+    /// (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("case when {fn CURDATE()} = convert(varchar(10), getdate(), 23) then 1 else 0 end", "1")]
+    [DataRow("case when {fn CURRENT_DATE()} = {fn CURDATE()} then 1 else 0 end", "1")]
+    [DataRow("case when {fn CURTIME()} = convert(varchar(12), cast(getdate() as time(3))) then 1 else 0 end", "1")]
+    [DataRow("case when {fn CURRENT_TIMESTAMP()} = convert(varchar(30), getdate(), 121) then 1 else 0 end", "1")]
+    [DataRow("len({fn CURRENT_TIME(8)})", "17")]
+    [DataRow("len({fn CURRENT_TIME(0)})", "8")]
+    [DataRow("len({fn CURRENT_TIME(-1)})", "8")]
+    [DataRow("len({fn CURRENT_TIME(25)})", "19")]
+    [DataRow("len({fn CURRENT_TIME(null)})", "12")]
+    [DataRow("len({fn CURRENT_TIMESTAMP(2.7)})", "22")]
+    [DataRow("sql_variant_property({fn CURRENT_TIMESTAMP()}, 'MaxLength')", "30")]
+    [DataRow("sql_variant_property({fn CURDATE()}, 'MaxLength')", "10")]
+    public void OdbcClockFn_IsTextOfGetDate(string expression, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select cast({expression} as varchar(30))"));
+
+    [TestMethod]
+    [DataRow("select {fn CURTIME(1)}", 174)]
+    [DataRow("select {fn CURRENT_DATE(1)}", 102)]
+    public void OdbcClockFn_RefusesAnArgumentItTakesNone(string sql, int number)
+        => new Simulation().AssertSqlError(sql, number);
+
+    /// <summary>
+    /// ODBC's outer-join escape groups its join chain as parentheses do, and
+    /// any other word in its place is Msg 155 (probed 2026-10-26 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void OdbcOuterJoinEscape_GroupsItsJoinChain()
+        => AreEqual("1:5:7,2::", new Simulation().ExecuteScalar("""
+            create table a (id int primary key); create table b (id int primary key, aid int); create table c (id int primary key, bid int);
+            insert a values (1), (2); insert b values (5, 1); insert c values (7, 5);
+            select string_agg(concat(a.id, ':', b.id, ':', c.id), ',') within group (order by a.id)
+            from {oj a left outer join b on b.aid = a.id} left join c on c.bid = b.id
+            """));
+
+    [TestMethod]
+    public void OdbcOuterJoinEscape_OtherWord_RaisesMsg155()
+        => new Simulation().AssertSqlError("""
+            create table a (id int primary key); create table b (id int primary key);
+            select a.id from {xx a left join b on 1 = 1}
+            """, 155, "'xx' is not a recognized ODBC outer join option.");
+
     // ----- A boolean predicate in the select list (a value context) -----
     // Real SQL Server reports Msg 156 near the predicate keyword, not the
     // generic Msg 102 (probe-confirmed 2026-07-21).
