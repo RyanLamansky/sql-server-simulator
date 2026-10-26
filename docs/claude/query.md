@@ -874,7 +874,7 @@ The one wrinkle: a bare name is built as a `Reference` before the parser knows w
 `Expression.ParseCallArguments` — the single funnel for every `<reference>(` shape — decrements on entry to cancel that, leaving a net count of genuine column references.
 
 The count alone can't tell an outer column from a local one, so an item that counted columns has them resolved against the query's own sources once it has parsed (`Selection.NamesOnlyOuterColumns`), through `ExpressionNode.Walk`, which reaches every node kind.
-Also, `STRING_AGG`'s `WITHIN GROUP (ORDER BY …)` and the JSON aggregates' key expression are parsed *after* the aggregate registers, so an aggregate or subquery hidden there escapes the Msg 130 bracket.
+The bracket takes each other expression an aggregate reads where it parses — `STRING_AGG`'s separator, ahead of its Msg 8733, and its `WITHIN GROUP` keys, a JSON aggregate's key and `ORDER BY` — save the `WITHIN GROUP` `JSON_ARRAYAGG` ignores, and a windowed `JSON_OBJECTAGG`'s key, which the `OVER` carve-out covers as it covers the value (probed 2026-10-26 against SQL Server 2025).
 
 ## GROUP BY containment
 

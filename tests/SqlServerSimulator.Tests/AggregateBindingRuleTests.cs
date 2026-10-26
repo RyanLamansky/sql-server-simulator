@@ -37,8 +37,30 @@ public sealed class AggregateBindingRuleTests
     [DataRow("select max(case when exists(select 1 from u) then a end) from t")]
     [DataRow("select max(case when a in (select x from u) then b end) from t")]
     [DataRow("select max((select count(*) from u where x = t.a)) from t")]
+    [DataRow("select string_agg(cast(a as varchar(10)), (select ',')) from t")]
+    [DataRow("select string_agg(cast(a as varchar(10)), ',') within group (order by (select 1)) from t")]
+    [DataRow("select string_agg(cast(a as varchar(10)), ',') within group (order by b, (select max(x) from u where x = t.a) desc) from t")]
+    [DataRow("select string_agg(cast(a as varchar(10)), ',') within group (order by case when exists (select 1 from u) then a end) from t")]
+    [DataRow("select string_agg(cast(a as varchar(10)), ',') within group (order by sum(b)) from t")]
+    [DataRow("select json_objectagg((select 'k') : a) from t")]
+    [DataRow("select json_objectagg(cast(a as varchar(10)) : (select 1)) from t")]
+    [DataRow("select json_objectagg(cast(a as varchar(10)) : sum(b)) from t")]
+    [DataRow("select json_arrayagg(a order by (select 1)) from t")]
+    [DataRow("select json_arrayagg(a order by sum(b)) from t")]
+    [DataRow("select json_arrayagg((select 1)) from t")]
     public void AggregateOverAggregateOrSubquery_RaisesMsg130(string sql) =>
         Seeded().AssertSqlError(sql, 130, Msg130);
+
+    /// <summary>
+    /// A windowed JSON aggregate may read an aggregate in its key as in its
+    /// value, and the <c>WITHIN GROUP</c> <c>JSON_ARRAYAGG</c> ignores may hold
+    /// a subquery (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select max(j) from (select a, json_objectagg(cast(sum(b) as varchar(10)) : a) over () j from t group by a) q", """{"10":1,"20":2}""")]
+    [DataRow("select json_arrayagg(a) within group (order by (select 1)) from t", "[1,2]")]
+    public void AggregateOverAggregateOrSubquery_WhereRealAllowsIt_Answers(string sql, string expected) =>
+        AreEqual(expected, Seeded().ExecuteScalar(sql));
 
     [TestMethod]
     public void AggregateOverAggregate_InHaving_RaisesMsg130() =>

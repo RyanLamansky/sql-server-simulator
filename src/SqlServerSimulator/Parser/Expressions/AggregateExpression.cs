@@ -313,17 +313,34 @@ internal sealed class AggregateExpression : Expression
     /// </summary>
     private static void ValidateOperand(ParserContext context, AggregateKind kind, Expression operand, int aggregatesBefore, int subqueriesBefore)
     {
-        if ((context.AggregatesParsed > aggregatesBefore || context.SubqueriesParsed > subqueriesBefore)
-            && !OverFollowsCall(context))
-        {
-            if (context.Batch.BindErrors is { } report && report.Covers(context.Token))
-                report.RecordUnlessPreceded(SimulatedSqlException.AggregateOnAggregateOrSubquery(), context.Token!.StartIndex);
-            else
-                throw SimulatedSqlException.AggregateOnAggregateOrSubquery();
-        }
+        RefuseAggregateOrSubquery(context, aggregatesBefore, subqueriesBefore, exceptUnderOver: true);
         // A spatial aggregate is a CLR method taking its type, so an untyped NULL converts to it and the aggregate reads NULL.
         if (kind != AggregateKind.SpatialAggregate && IsUntypedNullLiteral(operand))
             throw UntypedNullOperand(kind);
+    }
+
+    /// <summary>
+    /// <b>Msg 130</b> for an expression an aggregate reads — its operand,
+    /// <c>STRING_AGG</c>'s separator or a key of its <c>WITHIN GROUP</c>, a
+    /// JSON aggregate's key or <c>ORDER BY</c> —
+    /// that parsed an aggregate or a subquery since the counts given, save,
+    /// with <paramref name="exceptUnderOver"/>, an operand whose aggregate
+    /// carries an <c>OVER</c> clause (probed 2026-10-26 against SQL Server
+    /// 2025: <c>STRING_AGG(s, (SELECT ','))</c> and
+    /// <c>WITHIN GROUP (ORDER BY (SELECT 1))</c> are Msg 130, ahead of the
+    /// separator's own rule).
+    /// </summary>
+    internal static void RefuseAggregateOrSubquery(ParserContext context, int aggregatesBefore, int subqueriesBefore, bool exceptUnderOver = false)
+    {
+        if ((context.AggregatesParsed == aggregatesBefore && context.SubqueriesParsed == subqueriesBefore)
+            || (exceptUnderOver && OverFollowsCall(context)))
+        {
+            return;
+        }
+        if (context.Batch.BindErrors is { } report && report.Covers(context.Token))
+            report.RecordUnlessPreceded(SimulatedSqlException.AggregateOnAggregateOrSubquery(), context.Token!.StartIndex);
+        else
+            throw SimulatedSqlException.AggregateOnAggregateOrSubquery();
     }
 
     /// <summary>
@@ -929,7 +946,9 @@ internal sealed class AggregateExpression : Expression
         if (context.Token is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
+        (aggregatesBefore, subqueriesBefore) = (context.AggregatesParsed, context.SubqueriesParsed);
         var separator = Expression.Parse(context);
+        RefuseAggregateOrSubquery(context, aggregatesBefore, subqueriesBefore);
         return Register(context, new AggregateExpression(AggregateKind.StringAgg, operand, distinct: false, separator: separator));
     }
 
@@ -944,7 +963,9 @@ internal sealed class AggregateExpression : Expression
     /// </summary>
     private static AggregateExpression ParseJsonArrayAgg(ParserContext context)
     {
+        var (aggregatesBefore, subqueriesBefore) = (context.AggregatesParsed, context.SubqueriesParsed);
         var operand = Expression.Parse(context);
+        RefuseAggregateOrSubquery(context, aggregatesBefore, subqueriesBefore, exceptUnderOver: true);
         List<OrderBySpec>? orderBy = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Order })
             orderBy = ParseInParensOrderBy(context);
@@ -972,6 +993,7 @@ internal sealed class AggregateExpression : Expression
         // seen by this parser rather than swallowed as a type-cast prefix
         // (mirrors JsonObject's key handling).
         Expression key;
+        var (aggregatesBefore, subqueriesBefore) = (context.AggregatesParsed, context.SubqueriesParsed);
         using (ParserScope.Enter(ref context.StopExpressionAtBareColon, true))
         {
             key = Expression.Parse(context);
@@ -981,6 +1003,8 @@ internal sealed class AggregateExpression : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
         var value = Expression.Parse(context);
+        // Key and value alike, judged where an OVER clause can be seen.
+        RefuseAggregateOrSubquery(context, aggregatesBefore, subqueriesBefore, exceptUnderOver: true);
         var jsonNulls = JsonNullClauseParser.Parse(context, JsonNullClause.NullOnNull);
         var returningJson = JsonNullClauseParser.ParseReturning(context);
         // JSON_OBJECTAGG has no ordered-set form; ORDER BY here is Msg 156 near
@@ -1011,7 +1035,9 @@ internal sealed class AggregateExpression : Expression
         do
         {
             context.MoveNextRequired();
+            var (aggregatesBefore, subqueriesBefore) = (context.AggregatesParsed, context.SubqueriesParsed);
             var expr = Expression.Parse(context);
+            RefuseAggregateOrSubquery(context, aggregatesBefore, subqueriesBefore);
             var descending = false;
             switch (context.Token)
             {

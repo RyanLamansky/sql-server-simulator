@@ -927,11 +927,15 @@ internal abstract class Expression : ExpressionNode
         do
         {
             context.MoveNextRequired();
+            var (aggregatesBefore, subqueriesBefore) = (context.AggregatesParsed, context.SubqueriesParsed);
             var expr = Expression.Parse(context);
             // The key orders the aggregated values, so real evaluates it and
             // it keeps its own term.
             if (!ignored)
+            {
+                AggregateExpression.RefuseAggregateOrSubquery(context, aggregatesBefore, subqueriesBefore);
                 _ = ConstantFolding.RejectConstantWindowOrderByTerm(expr, context);
+            }
 
             var descending = false;
             switch (context.Token)
