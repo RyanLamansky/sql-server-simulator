@@ -244,6 +244,31 @@ public sealed class PivotTests
         Contains("conflicts with the type of other columns", ex.Message);
     }
 
+    /// <summary>
+    /// A column the UNPIVOT list names twice, in any spelling its name answers
+    /// to, is Msg 277 naming the first, after the list's other refusals
+    /// (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("a, a")]
+    [DataRow("a, b, a")]
+    [DataRow("a, A")]
+    [DataRow("[a], a")]
+    public void Unpivot_RepeatedColumn_Msg277(string list)
+        => new Simulation().AssertSqlError(
+            $"create table w (id int, a int, b int); select * from w unpivot (val for col in ({list})) u",
+            277,
+            "The column \"a\" is specified multiple times in the column list of the UNPIVOT operator.");
+
+    [TestMethod]
+    public void Unpivot_RepeatedColumn_ReportsAfterAMissingOne()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table w (id int, a int, b int)");
+        var ex = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("select * from w unpivot (val for col in (a, nosuch, a)) u"));
+        AreEqual("207 277", string.Join(" ", ex.Errors.Select(error => error.Number)));
+    }
+
     [TestMethod]
     public void Unpivot_MissingAlias_Rejected()
         => _ = new Simulation().AssertSqlError(

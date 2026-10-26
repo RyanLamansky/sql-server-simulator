@@ -51,6 +51,8 @@ The rows added to the error table and the passthrough nullability below were pro
 
 A grouping column keeps its source's nullability, and every pivoted column is nullable, `COUNT` included.
 
+**Not modeled yet** (probed 2026-10-26 against SQL Server 2025): a `FOR` column of a type real can't compare is Msg 402 here where real reports Msg 488 for it as for a grouping column, `GROUPING(x)` as the aggregate is Msg 102 here and Msg 195 on real, and an `APPROX_COUNT_DISTINCT` pivoting a NULL sends no Msg 8153 here.
+
 ## UNPIVOT
 
 ```sql
@@ -66,6 +68,7 @@ An unfold, not an aggregation — built as a `Selection` with a custom row-produ
   SQL Server doesn't promote here: `int` + `bigint` conflicts → Msg 8167 (`The type of column "X" conflicts with the type of other columns specified in the UNPIVOT list.`).
   An untyped NULL column (`SELECT NULL AS x`, an all-NULL `VALUES` column) conflicts with every typed one the same way, while two of them agree (probed 2026-09-26).
   Missing alias → Msg 102; unknown `IN` column → Msg 207; a value or name column named after a passthrough column → Msg 265, then Msg 8156.
+  A column the list names twice, in any spelling its name answers to, is Msg 277 naming the first, after the list's missing columns (probed 2026-10-26); a type conflict ahead of the repeat is reported alone here, where real reports Msg 277 after it.
 - A passthrough column keeps its source's nullability, and the value column is NOT NULL when every column it folds is.
 
 The type match is exact on real too: `varchar(10)` beside `varchar(5)`, `char(3)` beside `varchar(3)`, `decimal(9, 2)` beside `decimal(10, 2)` and two collations of one `varchar(10)` are all Msg 8167 (probed 2026-10-01 against SQL Server 2025), so the exact `SqlType` equality the check uses is real's rule rather than an approximation of a widening one.

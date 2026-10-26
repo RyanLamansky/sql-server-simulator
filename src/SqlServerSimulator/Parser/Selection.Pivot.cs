@@ -242,10 +242,12 @@ internal sealed partial class Selection
         var valueIsUntypedNull = false;
         var report = context.Batch.BindErrors;
         var namesMissing = false;
+        var bound = new int[unpivotColumns.Count];
         for (var i = 0; i < unpivotColumns.Count; i++)
         {
             var col = unpivotColumns[i];
             var (s, c) = FindSourceColumn([source], new MultiPartName(col));
+            bound[i] = s == -1 ? -1 : c;
             if (s == -1)
             {
                 if (report?.Covers(unpivotTokens[i]) != true)
@@ -266,6 +268,20 @@ internal sealed partial class Selection
             {
                 throw SimulatedSqlException.UnpivotColumnTypeConflict(col);
             }
+        }
+        // A column the list names twice is Msg 277, after the list's other
+        // refusals (probed 2026-10-26 against SQL Server 2025).
+        for (var i = 1; i < bound.Length; i++)
+        {
+            var first = bound[i] < 0 ? -1 : Array.IndexOf(bound, bound[i], 0, i);
+            if (first < 0)
+                continue;
+            var repeated = SimulatedSqlException.UnpivotColumnRepeated(unpivotColumns[first]);
+            if (report?.Covers(unpivotTokens[i]) != true)
+                throw repeated;
+            report.Record(repeated, unpivotTokens[i].StartIndex);
+            namesMissing = true;
+            break;
         }
         if (namesMissing)
             return FromSource.DeferredPlaceholder(alias);

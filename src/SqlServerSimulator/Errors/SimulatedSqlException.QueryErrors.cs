@@ -190,6 +190,14 @@ partial class SimulatedSqlException
         new($"The type of column \"{column}\" conflicts with the type of other columns specified in the UNPIVOT list.", 8167, 16, 1);
 
     /// <summary>
+    /// Msg 277: an <c>UNPIVOT</c> list naming one column twice, in any spelling
+    /// the column's name answers to; the message names the first (probed
+    /// 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException UnpivotColumnRepeated(string column) =>
+        new($"The column \"{column}\" is specified multiple times in the column list of the UNPIVOT operator.", 277, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 512 — fired when a scalar subquery (or one
     /// behind a comparison operator) returns more than one row. Verbatim
     /// text from the probed real SQL Server, including the literal extra
