@@ -121,6 +121,7 @@ A `CATCH` reads a compile-time report's first entry through `ERROR_NUMBER()` and
 - **A type check in a node reading no column** — `SELECT CAST('2020-01-01' AS date) + 1 + x1` — ends the re-read, so the term's later names go unreported, where real reports the Msg 207 after it (probed 2026-10-19 against SQL Server 2025); so does one raised outside the typing seams above.
   One over a column carries on in every node probed — a function's argument, a `CASE`, `IIF`, `COALESCE`, a unary minus, a scalar subquery, an aggregate.
 - **A name only a run reaches** — one skip mode doesn't bind — reports alone.
+- **A later statement's names after a failed type check** — once one statement of a batch fails a type check as the batch compiles (Msg 402 over two columns), real drops a later statement's Msg 207 for a name compared in its `WHERE` (`WHERE nosuch = 1`) while still reporting one in a select list, where the simulator reports both (probed 2026-10-26 against SQL Server 2025).
 - **An `INSERT` through a view whose source fails on a name the parse raises rather than records** (an ambiguous Msg 209), or on a type check reading no column, loses the Msg 4406 real reports after it (probed 2026-10-19 against SQL Server 2025).
 - **A `MERGE` insert action's Msg 213 beside the statement's names** reports as an `INSERT`'s does, after every name, where real's place for it varies by the name (probed 2026-10-19 against SQL Server 2025).
   A `WHEN` condition's miss reports ahead of the 213 and an action's after it; the insert's own `VALUES` miss is dropped (Msg 207) or reports alone without the 213 (Msg 4104 for a source alias that isn't the source's); and a 213 joined by a Msg 5324 drops the actions' names, which the simulator models.
@@ -172,13 +173,14 @@ A built-in matches only as real spells it: `@@LOCK_TIMEOUT` and its siblings nee
 A recovering parser reports the lexer's error after its own (`select 1 in ('x` is Msg 156 then Msg 105).
 The parser reads it as `Parser.Tokens.UnterminatedToken`, which is a statement boundary and nothing else, so a parse site that can end there does and one that can't raises on it.
 
-## Bind errors in a deferred statement are catchable here and aren't on real
+## A bind error escapes a TRY in its own scope
 
 Real compiles a whole batch before running any of it, so an error the binder raises kills the batch outright — a `TRY` / `CATCH` wrapping the failing statement never reaches the CATCH.
 Probe-confirmed for the collation-conflict pair (**Msg 468** / **457**) and for the legacy-LOB argument gate (**Msg 8116**), each raised over an empty rowset inside a `BEGIN TRY`: the batch dies with the error and the CATCH block's `PRINT` never runs.
 The simulator compiles the batch first too ([`control-flow.md`](control-flow.md#batch-compilation)), so those match.
 
 A statement naming an object that doesn't exist when the batch compiles binds only when it runs, on real and here alike, and its errors from that late bind are still uncatchable in their own scope and end the batch ([`control-flow.md`](control-flow.md#statement-terminating-vs-batch-aborting-errors-unified-continue-on-error)).
+Which errors a late bind raises that way is `Simulation.IsDeferredCompileError`'s probed list, which a procedure call's argument refusals share numbers with (Msg 206, 257) without being among them: those are the `EXEC`'s own run-time error, which a `TRY` around the call catches and which, uncaught, ends only the statement (`SimulatedSqlException.RaisedBindingArguments`, probed 2026-10-26 against SQL Server 2025).
 Coverage locking the compiled case: `PredicateCompileTimeBindTests.BindError_IsNotCatchable`.
 
 ## Capture design

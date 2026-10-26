@@ -584,7 +584,7 @@ partial class Simulation
             context.MoveNextRequired();
             where = Selection.ParseAndBindPredicate(context, tupleTypeResolver, sources, joins);
         }
-        BindJoinPredicatesWhileReporting(context.Batch, joins, tupleTypeResolver);
+        BindJoinPredicates(context.Batch, sources, joins);
         Selection.ValidateForcedSeeks(context, sources, joins, where);
         return where;
     }

@@ -1748,9 +1748,14 @@ partial class Simulation
     /// Refuses a VALUES cell its column can't take without an explicit
     /// conversion (Msg 206 / 257, see <see cref="AssignmentRules"/>) — settled
     /// from the types, so a statement that inserts nothing still raises it.
+    /// A row the arity checks refuse pairs no value with a column, so a
+    /// statement holding one binds its cells' names but checks no value, where
+    /// Msg 109, 110, 213 or 10709 follows the names in real's report (probed
+    /// 2026-10-26 against SQL Server 2025).
     /// </summary>
     private static void RejectUnassignableValues(List<Expression[]> tuples, HeapColumn[] destinationColumns, BatchContext batch)
     {
+        var paired = !tuples.Exists(tuple => tuple.Length != destinationColumns.Length);
         foreach (var tuple in tuples)
         {
             for (var i = 0; i < tuple.Length && i < destinationColumns.Length; i++)
@@ -1759,7 +1764,7 @@ partial class Simulation
                     continue;
                 var recorded = batch.BindErrors?.Count ?? 0;
                 var type = tuple[i].GetSqlType(batch, static name => throw SimulatedSqlException.UnboundColumnReference(name));
-                if (batch.BindErrors?.Count > recorded)
+                if (!paired || batch.BindErrors?.Count > recorded)
                     continue;
                 try
                 {

@@ -798,7 +798,7 @@ partial class Simulation
             _ = Selection.ParseSourcesAndJoins(context, QueryScope.Statement, sourceList, joinList);
         var sources = sourceList.ToArray();
         var joins = joinList.ToArray();
-        BindJoinPredicatesWhileReporting(context.Batch, joins, Selection.ColumnTypeResolverFor(sources));
+        BindJoinPredicates(context.Batch, sources, joins);
         var columnNames = new List<string>();
         var schema = new List<SqlType>();
         foreach (var source in sources)

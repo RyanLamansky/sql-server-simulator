@@ -151,7 +151,9 @@ public sealed partial class BinderErrorReportTests
     /// A CTE that fails ends the statement's report; so do an UPDATE's FROM /
     /// WHERE (before its SET targets) and its SET targets (before its values),
     /// and a MERGE's ON. An INSERT binds its source before its column list,
-    /// and its SELECT-list arity refusal preempts everything.
+    /// and its SELECT-list arity refusal preempts everything; a VALUES row
+    /// the arity refuses checks no value against its column (probed
+    /// 2026-10-26).
     /// </summary>
     [TestMethod]
     [DataRow("with c1 as (select x1 from t) select x2 from c1", "207:1:x1")]
@@ -175,6 +177,9 @@ public sealed partial class BinderErrorReportTests
     [DataRow("insert t (a, b) values (x1, 2, 3)", "207:1:x1 110:1:")]
     [DataRow("insert t values (x1, 2, 3, 4)", "207:1:x1 213:1:")]
     [DataRow("insert t (a) values (x1), (x2, 3)", "207:1:x1 207:1:x2 10709:1:")]
+    [DataRow("insert t (a, b) values (cast('2020-01-01' as date), 2, 3)", "110:1:")]
+    [DataRow("insert t values (cast('2020-01-01' as date), 2)", "213:1:")]
+    [DataRow("insert t (a) values (cast('2020-01-01' as date)), (1, 2)", "10709:1:")]
     [DataRow("merge t using u on x1 = u.a\nwhen matched then update set x2 = x3\nwhen not matched then insert (a, x4) values (x5, 1);", "207:1:x1")]
     [DataRow("merge t using u on t.a = u.a\nwhen matched then update set x1 = x2\nwhen not matched then insert (a, x4) values (x5, 1);", "207:3:x4 207:2:x1 207:2:x2 207:3:x5")]
     [DataRow("merge t using (select x1 from u where x2 = 1) s on t.a = s.a when matched then delete;", "207:1:x2 207:1:x1 207:1:a")]

@@ -3373,10 +3373,11 @@ public sealed partial class Simulation
     /// 1781 / 8111 with their Msg 1750, and a query over a table whose
     /// clustered index the batch disabled, Msg 8655 (probed 2026-10-19). An
     /// error not listed keeps a
-    /// run-time error's handling.
+    /// run-time error's handling, and so does a listed one a procedure call
+    /// raised binding its arguments (<see cref="SimulatedSqlException.RaisedBindingArguments"/>).
     /// </summary>
     internal static bool IsDeferredCompileError(SimulatedSqlException ex)
-        => IsBatchAbortingNameResolution(ex) || IsBulkRefusal(ex) || ex.RefusedRecompilingDeferred || ex.Number is 4902 or 2705
+        => !ex.RaisedBindingArguments && (IsBatchAbortingNameResolution(ex) || IsBulkRefusal(ex) || ex.RefusedRecompilingDeferred || ex.Number is 4902 or 2705
             || ex.Number is 107 or 108 or 120 or 121 or 130 or 145 or 147 or 157 or 164 or 174 or 205 or 206 or 213 or 243 or 264 or 271 or 272 or 273 or 321 or 330 or 331 or 332 or 333 or 425 or 426 or 447 or 448 or 529
                 or 1011 or 1012 or 1013 or 3032 or 4108 or 4115 or 4187 or 5318 or 5324 or 1779 or 1781 or 8102 or 8111 or 8117 or 8120 or 8121 or 8124 or 8155 or 8622 or 8655 or 10709
             // A table hint's index and granularity refusals (probed 2026-10-16
@@ -3385,7 +3386,11 @@ public sealed partial class Simulation
             // OPTION clause refusals (probed 2026-10-21 against SQL Server 2025).
             || ex.Number is 322 || ex is { Number: 2560, State: 151 }
             // A MATCH's binding refusals (probed 2026-10-11 against SQL Server 2025).
-            || ex.Number is 13900 or 13901 or 13902 or 13903 or 13905 or 13906 or 13920 or 13940 or 13948 or 13949 or 13950 or 13952 or 13953 or 13954 or 13957 or 13961 or 13962 or 13964 or 13965;
+            || ex.Number is 13900 or 13901 or 13902 or 13903 or 13905 or 13906 or 13920 or 13940 or 13948 or 13949 or 13950 or 13952 or 13953 or 13954 or 13957 or 13961 or 13962 or 13964 or 13965
+            // The binder's type checks beside Msg 206 and 8117 above, and its
+            // refusals of an operand it can't compare, sort or deduplicate
+            // (probed 2026-10-26 against SQL Server 2025).
+            || ex.Number is 257 or 305 or 402 or 421 or 468 or 8116);
 
     /// <summary>
     /// Whether a TRY frame catches <paramref name="ex"/> where it is raised:

@@ -1226,7 +1226,7 @@ partial class Simulation
             where = Selection.ParseAndBindPredicate(context, tupleTypeResolver, sources, joins);
         }
         Selection.ParseOptionalDmlOptionClause(context);
-        BindJoinPredicatesWhileReporting(context.Batch, joins, tupleTypeResolver);
+        BindJoinPredicates(context.Batch, sources, joins);
         Selection.ValidateForcedSeeks(context, sources, joins, where);
         LoadJoinedPredicateStatistics(context.Batch, sources, joins, where);
 
@@ -2261,17 +2261,17 @@ partial class Simulation
         name => ResolveUpdateTargetColumnType(database, targetName, table, name, enclosing);
 
     /// <summary>
-    /// Types a joined UPDATE's or DELETE's <c>ON</c> predicates while the
-    /// statement is read for its whole bind error report. They otherwise bind
-    /// as the join runs, which a statement read without running never
-    /// reaches, and real reports their names ahead of the <c>WHERE</c>'s.
+    /// Types a joined write's <c>ON</c> predicates as the statement compiles,
+    /// each over the sources its join reaches, as a query's are: a comparison
+    /// real can't make refuses the statement though no row reaches the join
+    /// (probed 2026-10-26 against SQL Server 2025), and a statement read for
+    /// its whole bind error report reports their names ahead of the
+    /// <c>WHERE</c>'s.
     /// </summary>
-    private static void BindJoinPredicatesWhileReporting(BatchContext batch, JoinSpec[] joins, Func<MultiPartName, SqlType> resolveColumnType)
+    private static void BindJoinPredicates(BatchContext batch, FromSource[] sources, JoinSpec[] joins)
     {
-        if (batch.BindErrors is null)
-            return;
         foreach (var join in joins)
-            join.OnPredicate?.Bind(batch, resolveColumnType);
+            join.OnPredicate?.Bind(batch, Selection.ColumnTypeResolverFor(join.ScopeEnd < 0 ? sources : sources[join.ScopeStart..join.ScopeEnd]));
     }
 
     /// <summary>

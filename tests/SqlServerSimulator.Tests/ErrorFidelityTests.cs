@@ -110,10 +110,21 @@ public sealed class ErrorFidelityTests
     [DataRow("select * from (select a + 1 from t2) d", 8155)]
     [DataRow("select a from t2 with (nosuchhint)", 321)]
     [DataRow("select a from t2 where a = cast(0x01 as xml)", 206)]
+    [DataRow("select a from t2 where dt = d", 402)]
+    [DataRow("select x1.a from t2 x1 join t2 x2 on x1.dt = x2.d", 402)]
+    [DataRow("update x1 set a = 1 from t2 x1 join t2 x2 on x1.dt = x2.d", 402)]
+    [DataRow("insert t2 (dn) select getdate()", 257)]
+    [DataRow("select a from t2 where ci = cs", 468)]
+    [DataRow("select len(x) from t2", 8116)]
+    [DataRow("select a from t2 order by x", 305)]
+    [DataRow("select distinct x from t2", 421)]
     public void DeferredCompileError_EndsTheBatchPastItsOwnTry(string statement, int number)
     {
         var simulation = new Simulation();
-        var ex = simulation.AssertSqlError($"create table t2 (a int); begin try {statement} end try begin catch print 'caught' end catch; create table u (a int)", number);
+        var ex = simulation.AssertSqlError($"""
+            create table t2 (a int, d time, dt datetime, dn decimal(10, 2), x xml, ci varchar(10) collate Latin1_General_CI_AS, cs varchar(10) collate Latin1_General_CS_AS);
+            begin try {statement} end try begin catch print 'caught' end catch; create table u (a int)
+            """, number);
         AreEqual(1, ex.Errors.Count);
         AreEqual(DBNull.Value, simulation.ExecuteScalar("select object_id('u')"));
     }

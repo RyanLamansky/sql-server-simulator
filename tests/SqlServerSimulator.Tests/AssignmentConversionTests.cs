@@ -85,6 +85,24 @@ public sealed class AssignmentConversionTests
         _ = sim.AssertSqlError(call, number);
     }
 
+    /// <summary>
+    /// A refused argument is the <c>EXEC</c>'s own run-time error, though Msg
+    /// 206 and 257 are otherwise numbers real raises only compiling: a
+    /// <c>TRY</c> around the call catches it, and uncaught the batch goes on
+    /// (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec p 1", 206)]
+    [DataRow("declare @dt datetime = getdate(); exec p null, @dt", 257)]
+    public void ProcedureArgument_IsTheCallsOwnError(string call, int number)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create procedure p @x xml, @d decimal(10, 2) = 1 as select 1");
+        AreEqual(number, sim.ExecuteScalar($"begin try {call} end try begin catch select error_number() end catch"));
+        _ = sim.AssertSqlError($"{call}; create table u (a int)", number);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.tables where name = 'u'"));
+    }
+
     [TestMethod]
     public void ProcedureArgument_NullKeyword_IsAssignable()
     {

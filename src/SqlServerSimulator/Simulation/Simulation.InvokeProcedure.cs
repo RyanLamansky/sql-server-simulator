@@ -119,6 +119,7 @@ partial class Simulation
         SimulatedSqlException BindingError(SimulatedSqlException error)
         {
             error.PreserveDiagnostics(0, attributionName);
+            error.RaisedBindingArguments = true;
             return error;
         }
 

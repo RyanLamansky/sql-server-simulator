@@ -526,7 +526,7 @@ partial class Simulation
             where = Selection.ParseAndBindPredicate(context, Selection.ColumnTypeResolverFor(sources), sources, joins);
         }
         Selection.ParseOptionalDmlOptionClause(context);
-        BindJoinPredicatesWhileReporting(context.Batch, joins, Selection.ColumnTypeResolverFor(sources));
+        BindJoinPredicates(context.Batch, sources, joins);
         Selection.ValidateForcedSeeks(context, sources, joins, where);
         LoadJoinedPredicateStatistics(context.Batch, sources, joins, where);
 

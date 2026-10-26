@@ -296,6 +296,16 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool EndedCalledBatch;
 
     /// <summary>
+    /// Set when the error was raised binding a procedure call's arguments as
+    /// the call runs. Its number may be one real otherwise raises only while
+    /// compiling a statement — an argument's Msg 206 or 257 — but here it is
+    /// the <c>EXEC</c>'s own run-time error: a <c>TRY</c> around the call
+    /// catches it and, uncaught, the batch goes on (probed 2026-10-26 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal bool RaisedBindingArguments;
+
+    /// <summary>
     /// Set when the error was raised computing a row's select-list value in a
     /// pipelined projection — where real computes it after an <c>INSERT</c>
     /// has drawn that row's identity value, so the failing row uses one up —
