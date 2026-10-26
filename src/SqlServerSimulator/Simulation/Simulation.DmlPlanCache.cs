@@ -145,6 +145,7 @@ partial class Simulation
             batch.DmlPlanRecording = null;
             batch.ReplayLockLog = null;
             batch.HasSessionScopedReference |= enteredSessionScoped;
+            EndStatementTempTables(batch);
             // A statement whose execution half failed still parsed completely,
             // so its plan is as good as a successful one's.
             this.EndStatementRecording(batch, recording, start, schemaVersion, database);
@@ -208,6 +209,7 @@ partial class Simulation
         var batch = context.Batch;
         batch.ReplayLockLog = null;
         batch.HasSessionScopedReference |= prefix.EnteredSessionScoped;
+        EndStatementTempTables(batch);
 #if DEBUG
         EndPrincipalWatch(prefix.Recording);
 #endif
@@ -240,16 +242,28 @@ partial class Simulation
 
     /// <summary>
     /// <paramref name="entry"/> when it was recorded under the current schema
-    /// version, in the database the batch is in and over the pseudo-tables its
-    /// firing holds (see <see cref="CurrentStatementPlan"/>); otherwise null.
+    /// version, in the database the batch is in, over the pseudo-tables its
+    /// firing holds and the temp tables the session holds (see
+    /// <see cref="CurrentStatementPlan"/>); otherwise null.
     /// </summary>
     private StatementPlanEntry? Current(ParserContext context, StatementPlanEntry? entry) =>
         entry is not null
             && entry.SchemaVersion == Volatile.Read(ref this.SchemaVersion)
             && ReferenceEquals(entry.Database, context.CurrentDatabase)
             && (entry.PseudoTables is null || ReferenceEquals(entry.PseudoTables, context.Batch.TriggerFrame?.PseudoTables))
+            && entry.TempTablesHold(context.Connection)
                 ? entry
                 : null;
+
+    /// <summary>
+    /// Ends the statement's <see cref="BatchContext.StatementTempTables"/>,
+    /// folding any it bound into the batch's session-scoped reference.
+    /// </summary>
+    private static void EndStatementTempTables(BatchContext batch)
+    {
+        batch.HasSessionScopedReference |= batch.StatementTempTables is { Count: > 0 };
+        batch.StatementTempTables = null;
+    }
 
     /// <summary>
     /// Arms the lock log, and in a Debug build the principal-read watch, for a
@@ -261,6 +275,7 @@ partial class Simulation
         var recording = new StatementPlanRecording(batch.Connection.PendingMessages.Count);
         batch.ReplayLockLog = [];
         batch.StatementPseudoTables = null;
+        batch.StatementTempTables = [];
         batch.StatementBindsFiringPseudoTables = false;
 #if DEBUG
         recording.PrincipalWatch = PlanCacheCaptureAudit.WatchPrincipalReads(batch.Connection.Security);
@@ -395,7 +410,7 @@ partial class Simulation
     {
 #if DEBUG
         if ((entry.Plan ?? (object?)entry.Query) is { } plan)
-            PlanCacheCaptureAudit.Verify([plan], batch.PlanCacheKey!.Value.CommandText);
+            PlanCacheCaptureAudit.Verify([plan], batch.PlanCacheKey!.Value.CommandText, entry.TempTables);
 #endif
         if (batch.StatementPlans is not { } set)
         {

@@ -151,10 +151,13 @@ internal sealed partial class BatchContext
             // Selection binds the specific HeapTable instance from THIS
             // connection's TempTables dict, so a cross-session plan-cache
             // replay would project the wrong table.
-            this.HasSessionScopedReference = true;
             this.ResolvedTempTable = true;
             this.CurrentStatement.ReadsTemporaryObject = true;
-            return this.Connection.TempTables.TryGetValue(name.Leaf, out table);
+            if (this.Connection.TempTables.TryGetValue(name.Leaf, out table) && this.StatementTempTables is { } bound)
+                bound.Add((name.Leaf, table));
+            else
+                this.HasSessionScopedReference = true;
+            return table is not null;
         }
 
         if (IsGlobalTempName(name.Leaf))

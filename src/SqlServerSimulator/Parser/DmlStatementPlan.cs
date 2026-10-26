@@ -65,6 +65,9 @@ internal sealed class StatementPlanRecording(int messagesAtStart)
 
     /// <summary>The kept <c>inserted</c> / <c>deleted</c> pair the parse bound, if any.</summary>
     public PseudoTableSlot? PseudoTables;
+
+    /// <summary>The <c>#temp</c> tables the parse bound, by name, if any (see <see cref="BatchContext.StatementTempTables"/>).</summary>
+    public (string Name, Storage.HeapTable Table)[]? TempTables;
 #if DEBUG
 
     /// <summary>The watch over the parse's principal reads, until the split point ends it.</summary>
@@ -105,6 +108,7 @@ internal sealed class StatementPlanRecording(int messagesAtStart)
         this.ReadsTableVariable = statement.ReadsTableVariable;
         this.ClientOutputShape = statement.ClientOutputShape;
         this.PseudoTables = batch.StatementPseudoTables;
+        this.TempTables = batch.StatementTempTables is { Count: > 0 } temps ? [.. temps] : null;
         return true;
     }
 }
@@ -149,6 +153,24 @@ internal sealed class StatementPlanEntry(StatementPlanRecording recording, long 
     /// </summary>
     public readonly PseudoTableSlot? PseudoTables = recording.PseudoTables;
 
+    /// <summary>
+    /// The local <c>#temp</c> tables the plan binds, by the names it reads
+    /// them under, which only a run finding the same tables under those names
+    /// replays (<see cref="TempTablesHold"/>); null when it binds none.
+    /// </summary>
+    public readonly (string Name, Storage.HeapTable Table)[]? TempTables = recording.TempTables;
+
+    /// <summary>Whether <paramref name="connection"/> finds under each name the plan binds a temp table by the table it bound.</summary>
+    public bool TempTablesHold(SimulatedDbConnection connection)
+    {
+        foreach (var (name, table) in this.TempTables ?? [])
+        {
+            if (!connection.TempTables.TryGetValue(name, out var found) || !ReferenceEquals(found, table))
+                return false;
+        }
+        return true;
+    }
+
     /// <summary>Whether the statement recorded no plan, its shape being one a replay can't reproduce.</summary>
     public bool IsDeclined => this.Plan is null && this.Query is null;
 
@@ -177,6 +199,9 @@ internal sealed class StatementPlanEntry(StatementPlanRecording recording, long 
         statement.ReadsTableVariable |= this.readsTableVariable;
         if (this.clientOutputShape is { } shape)
             statement.ClientOutputShape = shape;
+        // What the batch read is the session's, as the parse would have noted.
+        if (this.TempTables is not null)
+            (batch.ResolvedTempTable, batch.HasSessionScopedReference) = (true, true);
         return true;
     }
 }

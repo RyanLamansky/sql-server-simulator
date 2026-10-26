@@ -42,6 +42,9 @@ partial class Simulation
         var scope = new RunParseScope(walk);
         var recording = BeginStatementRecording(walk);
         recording.Statement = start;
+        // A temporary table turns the attempt away as any session-scoped
+        // reference does, rather than binding the plan to it.
+        walk.StatementTempTables = null;
         try
         {
             var selection = ParseSelectStatement(context, browse: false);
@@ -115,6 +118,7 @@ partial class Simulation
         var scope = new RunParseScope(walk);
         var recording = BeginStatementRecording(walk);
         recording.Statement = start;
+        walk.StatementTempTables = null;
         walk.DmlPlanRecording = recording;
         walk.WriteParseForRun = scope;
         SimulatedStatementOutcome outcome;

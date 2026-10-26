@@ -100,9 +100,12 @@ internal static class PlanCacheCaptureAudit
 
     /// <summary>
     /// Raises <see cref="InvalidOperationException"/> when any of
-    /// <paramref name="plans"/> reaches a per-session or per-execution object.
+    /// <paramref name="plans"/> reaches a per-session or per-execution object
+    /// — but a temp table among <paramref name="boundTemps"/>, which the
+    /// plan's entry names (<see cref="StatementPlanEntry.TempTables"/>), only
+    /// a run finding them replaying it.
     /// </summary>
-    public static void Verify(IEnumerable<object> plans, string commandText)
+    public static void Verify(IEnumerable<object> plans, string commandText, (string Name, HeapTable Table)[]? boundTemps = null)
     {
         var seen = new HashSet<object>(ReferenceEqualityComparer.Instance);
         var pending = new Stack<(object Value, string Path)>();
@@ -112,7 +115,7 @@ internal static class PlanCacheCaptureAudit
         {
             var (value, path) = item;
             var type = value.GetType();
-            if (Forbidden(value) is { } reason)
+            if (Forbidden(value) is { } reason && !(value is HeapTable table && Array.Exists(boundTemps ?? [], bound => ReferenceEquals(bound.Table, table))))
                 throw new InvalidOperationException($"A cached plan for `{commandText}` reaches {reason} via {path}.");
             if (!type.IsValueType && !seen.Add(value))
                 continue;

@@ -4890,6 +4890,7 @@ public sealed partial class Simulation
             replayLocks = batch.ReplayLockLog is { } taken ? [.. taken] : null;
             batch.ReplayLockLog = null;
             batch.HasSessionScopedReference |= enteredSessionScoped;
+            EndStatementTempTables(batch);
             if (recording is not null)
             {
                 this.EndStatementRecording(batch, recording, planStart, schemaVersion, database);

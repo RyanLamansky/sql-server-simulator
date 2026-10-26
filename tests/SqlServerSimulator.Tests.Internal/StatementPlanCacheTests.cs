@@ -95,8 +95,8 @@ public sealed class StatementPlanCacheTests
             "exec r"));
 
     [TestMethod]
-    public void CallersTempTable_ParsesEveryCall()
-        => AreEqual((0L, 2L), ReplaysOverThreeRuns(
+    public void CallersTempTable_ReplaysWhileTheSessionHoldsIt()
+        => AreEqual((2L, 2L), ReplaysOverThreeRuns(
             "create table #c (a int)\ngo\ncreate procedure c as select a from #c; update t set v = 0 where id = 2",
             "exec c"));
 

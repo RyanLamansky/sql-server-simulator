@@ -262,8 +262,32 @@ public sealed class DmlPlanCacheTests
         => AreEqual(0, ReplaysOverThreeRuns("with c as (select id, v from t where id = 1) update c set v = @v", parameters: ("@v", 3)));
 
     [TestMethod]
-    public void TempTableTarget_Reparses()
-        => AreEqual(0, ReplaysOverThreeRuns("update #w set v = @v", "create table #w (v int); insert #w values (1)", ("@v", 2)));
+    public void TempTableTarget_ReplaysWhileTheSessionHoldsTheTable()
+        => AreEqual(2, ReplaysOverThreeRuns("update #w set v = @v", "create table #w (v int); insert #w values (1)", ("@v", 2)));
+
+    [TestMethod]
+    public void TempTableTarget_CreatedAgainEachRun_Reparses()
+        => AreEqual(0, ReplaysOverThreeRuns("create table #w (v int); insert #w values (1); update #w set v = @v; drop table #w", parameters: ("@v", 2)));
+
+    [TestMethod]
+    public void TempTableTarget_AnotherSessionsTable_Reparses()
+    {
+        var (simulation, first) = Open();
+        using (first)
+        using (var second = simulation.CreateDbConnection())
+        {
+            second.Open();
+            Execute(first, "create table #w (v int); insert #w values (1)");
+            Execute(second, "create table #w (v int); insert #w values (1)");
+            var hits = simulation.DmlPlanHits;
+            for (var run = 0; run < 3; run++)
+            {
+                Execute(first, "update #w set v = 2");
+                Execute(second, "update #w set v = 2");
+            }
+            AreEqual(0, simulation.DmlPlanHits - hits);
+        }
+    }
 
     [TestMethod]
     public void InsideABlock_Replays()
