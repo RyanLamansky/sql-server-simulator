@@ -192,11 +192,4 @@ internal sealed class AuditServer(Simulation simulation)
         }
         this.simulation.RunningAudits = running.Count == 0 ? null : [.. running];
     }
-
-    /// <summary>Publishes again after a change that adds or removes a running audit from the list, such as a rollback.</summary>
-    public void Republish()
-    {
-        lock (this.Gate)
-            this.Publish();
-    }
 }

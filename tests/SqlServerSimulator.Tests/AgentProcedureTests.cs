@@ -58,6 +58,29 @@ public sealed class AgentProcedureTests
     public void AddJob_RefusesAsReal(string arguments, int number, string message)
         => new Simulation().AssertSqlError($"declare @rc int; exec @rc = msdb.dbo.sp_add_job @job_name = N'j', {arguments}", number, message);
 
+    /// <summary>
+    /// Refusals each raised from the procedure and line real names (probed
+    /// 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec msdb.dbo.sp_delete_job", 14279, "msdb.dbo.sp_delete_job", 47, "Supply either @job_name, @job_id or @originating_server.")]
+    [DataRow("exec msdb.dbo.sp_add_job @job_name = N'j', @category_name = N'[Uncategorized (Local)]', @category_id = 0", 14524, "sp_verify_category_identifiers", 23, "Supply either @category_id or @category_name.")]
+    [DataRow("exec msdb.dbo.sp_add_job @job_name = N'j'; exec msdb.dbo.sp_add_jobstep @job_name = N'j', @step_name = NULL, @command = N'select 1'", 50000, "dbo.sp_add_jobstep_internal", 255,
+        "Cannot insert the value NULL into column 'step_name', table 'msdb.dbo.sysjobsteps'; column does not allow nulls. INSERT fails.")]
+    [DataRow("""
+        exec msdb.dbo.sp_add_operator @name = N'op';
+        exec msdb.dbo.sp_add_alert @name = N'al', @severity = 25;
+        exec msdb.dbo.sp_add_notification @alert_name = N'al', @operator_name = N'op', @notification_method = 1;
+        exec msdb.dbo.sp_add_notification @alert_name = N'al', @operator_name = N'op', @notification_method = 1
+        """, 14261, "msdb.dbo.sp_add_notification", 55, "The specified notification ('al / op') already exists.")]
+    public void Procedure_RefusesFromRealsSite(string batch, int number, string procedure, int line, string message)
+    {
+        var error = new Simulation().AssertSqlError(batch, number).Errors[0];
+        AreEqual(message, error.Message);
+        AreEqual(procedure, error.Procedure);
+        AreEqual(line, error.LineNumber);
+    }
+
     [TestMethod]
     public void AddJob_RefusalAnswersOne_BindingLeavesNull_AndANullNameIsTheInserts515()
     {
@@ -468,6 +491,41 @@ public sealed class AgentProcedureTests
         simulation.AssertSqlError("use master; execute as login = 'l'; exec msdb.dbo.sp_add_job @job_name = N'theirs', @owner_login_name = N'sa'", 14515,
             "Only a member of the sysadmin server role can add a job for a different owner with @owner_login_name.");
         _ = simulation.AssertSqlError("use master; execute as login = 'l'; select count(*) from msdb.dbo.sysjobs", 229);
+    }
+
+    /// <summary>
+    /// What a principal outside sysadmin may not do with what it doesn't own,
+    /// each refused from the procedure and line real names (probed 2026-10-26
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Permissions_OwnershipRefusals_RaiseFromRealsSites()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create login l with password = 'Passw0rd!x', check_policy = off; create login r with password = 'Passw0rd!x', check_policy = off",
+            """
+            use msdb;
+            create user l for login l; alter role SQLAgentUserRole add member l;
+            create user r for login r; alter role SQLAgentReaderRole add member r;
+            exec sp_add_job @job_name = N'admins'; exec sp_add_jobserver @job_name = N'admins';
+            exec sp_add_schedule @schedule_name = N'attached', @freq_type = 1; exec sp_attach_schedule @job_name = N'admins', @schedule_name = N'attached';
+            exec sp_add_schedule @schedule_name = N'loose', @freq_type = 1
+            """);
+        void Refused(string login, string call, int number, string procedure, int line)
+        {
+            var error = simulation.AssertSqlError($"use master; execute as login = '{login}'; {call}", number).Errors[0];
+            AreEqual(procedure, error.Procedure, call);
+            AreEqual(line, error.LineNumber, call);
+        }
+        Refused("l", "exec msdb.dbo.sp_add_job @job_name = N'mine'; exec msdb.dbo.sp_add_jobstep @job_name = N'mine', @step_name = N's', @command = N'select 1', @database_user_name = N'dbo'",
+            14583, "msdb.dbo.sp_add_jobstep", 59);
+        Refused("l", "exec msdb.dbo.sp_add_schedule @schedule_name = N's', @freq_type = 1, @owner_login_name = N'sa'", 14366, "sp_verify_schedule", 59);
+        Refused("r", "exec msdb.dbo.sp_attach_schedule @job_name = N'admins', @schedule_name = N'loose'", 14377, "msdb.dbo.sp_attach_schedule", 48);
+        Refused("r", "exec msdb.dbo.sp_detach_schedule @job_name = N'admins', @schedule_name = N'attached'", 14391, "msdb.dbo.sp_detach_schedule", 74);
+        Refused("r", "exec msdb.dbo.sp_update_schedule @name = N'loose', @enabled = 0", 14394, "msdb.dbo.sp_update_schedule", 108);
+        Refused("r", "exec msdb.dbo.sp_start_job @job_name = N'admins'", 14393, "msdb.dbo.sp_start_job", 55);
+        Refused("r", "exec msdb.dbo.sp_stop_job @job_name = N'admins'", 14393, "msdb.dbo.sp_stop_job", 114);
     }
 
     [TestMethod]

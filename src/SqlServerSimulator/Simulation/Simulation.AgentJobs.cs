@@ -170,10 +170,6 @@ partial class Simulation
     private int AgentStepCount(BatchContext batch, SqlValue jobId) =>
         this.AgentScalar(batch, "select count(*) from dbo.sysjobsteps where job_id = @id", ("id", jobId))!.Value.AsInt32;
 
-    /// <summary>Bumps a job's version and modification date, as each change to it or its steps does.</summary>
-    private void TouchAgentJob(BatchContext batch, SqlValue jobId) =>
-        _ = this.AgentSql(batch, "update dbo.sysjobs set version_number = version_number + 1, date_modified = getdate() where job_id = @id", ("id", jobId));
-
     private static readonly SystemProcedureParameter[] SpUpdateJobParameters =
     [
         AgentParameter("job_id", SqlType.UniqueIdentifier),

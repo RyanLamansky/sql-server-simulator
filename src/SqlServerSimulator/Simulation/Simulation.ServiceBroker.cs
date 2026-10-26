@@ -154,9 +154,6 @@ partial class Simulation
         slot.Assign(Cast.ApplyCoercion(value, slot.DeclaredType, slot.DeclaredMaxLength));
     }
 
-    /// <summary>A sequential id as real's handles and group ids run.</summary>
-    private static Guid NewBrokerId(BatchContext batch) => batch.Connection.Simulation.Broker.NewId();
-
     // ---- BEGIN DIALOG ----
 
     /// <summary>
