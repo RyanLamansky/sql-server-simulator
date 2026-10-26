@@ -1827,6 +1827,13 @@ internal sealed partial class BatchContext
     public bool NoExecActive;
 
     /// <summary>
+    /// On a top-level batch walked under <c>SET SHOWPLAN_*</c>, the
+    /// statements it walks, in order, whose plans it answers in place of
+    /// running them; null on every other batch.
+    /// </summary>
+    public List<ShowplanStatement>? ShowplanStatements;
+
+    /// <summary>
     /// Whether a statement walked without running under <c>SET NOEXEC ON</c>
     /// still sends the DONE naming its kind: real closes each statement so —
     /// a branch control flow wouldn't reach included, since nothing runs to
@@ -2078,7 +2085,7 @@ internal sealed partial class BatchContext
         this.CallerStreams = true;
         this.StreamsResultRows = command.StreamsResultRows;
         this.DiscardsResultRows = command.DiscardsResultRows;
-        this.NoExecActive = command.Connection!.NoExec;
+        this.NoExecActive = command.Connection!.NoExec || command.Connection.Showplan != ShowplanMode.None;
         this.Variables = SeedVariables(command);
         this.Parser = new ParserContext(command, this);
         this.XmlSchemaAlterationsAtStart = Volatile.Read(ref this.Connection.Simulation.XmlSchemaCollectionAlterations);

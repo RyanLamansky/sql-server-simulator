@@ -359,7 +359,7 @@ public sealed partial class Simulation
             && !connection.NoBrowseTable
             // A replayed plan opens no implicit transaction and runs under
             // NOEXEC / PARSEONLY / FMTONLY, each of which a parse settles.
-            && !connection.ImplicitTransactions && !connection.NoExec && !connection.ParseOnly && !connection.FmtOnly
+            && !connection.ImplicitTransactions && !connection.NoExec && connection.Showplan == ShowplanMode.None && !connection.ParseOnly && !connection.FmtOnly
             // A replay reports no STATISTICS IO / TIME, and a compile that
             // reports its time has to run.
             && !connection.StatisticsIo && !connection.StatisticsTime

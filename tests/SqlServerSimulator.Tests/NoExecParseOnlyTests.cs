@@ -1,12 +1,15 @@
 using System.Data.Common;
+using System.Text.RegularExpressions;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
 
 /// <summary>
-/// <c>SET NOEXEC</c> compiles each statement without running it;
+/// <c>SET NOEXEC</c> compiles each statement without running it, and a
+/// <c>SET SHOWPLAN_*</c> switch does too, answering the statements' plans;
 /// <c>SET PARSEONLY</c> checks a batch's syntax and neither binds nor runs it.
-/// Every expectation probed 2026-09-28 against SQL Server 2025.
+/// Every expectation probed 2026-09-28 against SQL Server 2025, SHOWPLAN's
+/// 2026-10-26.
 /// </summary>
 [TestClass]
 public sealed class NoExecParseOnlyTests
@@ -70,6 +73,49 @@ public sealed class NoExecParseOnlyTests
         sim.ExecuteBatches("create procedure p as begin set noexec on; select 1; end");
         using var connection = sim.CreateOpenConnection();
         CollectionAssert.AreEqual(new object[] { 2 }, Results(connection, "exec p; select 2"));
+    }
+
+    [TestMethod]
+    public void ShowplanXml_AnswersOneDocument_AndRunsNothing()
+    {
+        using var connection = Seeded();
+        IsEmpty(Results(connection, "set showplan_xml on"));
+        var plan = Results(connection, "select a from t where a = 1; update t set a = 5; declare @x int = 1; declare @y int; if @x = 1 print 'p'; exec sp_who");
+        var document = (string)plan.Single();
+        StartsWith("<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\"", document);
+        CollectionAssert.AreEqual(
+            new[] { "SELECT", "UPDATE", "ASSIGN", "PRINT", "EXECUTE PROC" },
+            Regex.Matches(document, "StatementType=\"([^\"]+)\"").Select(match => match.Groups[1].Value).ToArray());
+        CollectionAssert.AreEqual(new object[] { 1 }, Results(connection, "set showplan_xml off; select a from t"));
+    }
+
+    [TestMethod]
+    public void ShowplanText_And_ShowplanAll_ListTheStatements()
+    {
+        using var connection = Seeded();
+        _ = Results(connection, "set showplan_text on");
+        CollectionAssert.AreEqual(
+            new object[] { "select a from t", "delete t", "select 1", "set @z = 1" },
+            Results(connection, "select a from t; delete t; select 1; declare @z int; set @z = 1"));
+        _ = Results(connection, "set showplan_text off");
+        _ = Results(connection, "set showplan_all on");
+        using (var reader = connection.CreateCommand("select a from t; select 1; insert t values (2)").ExecuteReader())
+        {
+            AreEqual(18, reader.FieldCount);
+            var types = new List<string>();
+            while (reader.Read())
+                types.Add(reader.GetString(reader.GetOrdinal("Type")));
+            CollectionAssert.AreEqual(new[] { "SELECT", "SELECT WITHOUT QUERY", "INSERT" }, types);
+        }
+        CollectionAssert.AreEqual(new object[] { 1 }, Results(connection, "set showplan_all off; select count(*) from t"));
+    }
+
+    [TestMethod]
+    public void Showplan_StillReportsCompileErrors()
+    {
+        using var connection = Seeded();
+        _ = Results(connection, "set showplan_xml on");
+        AreEqual(207, Throws<SimulatedSqlException>(() => Results(connection, "select nosuch from t")).Number);
     }
 
     [TestMethod]

@@ -341,7 +341,7 @@ partial class Simulation
         }
         return batch.PlanCacheKey is { } key
             && connection.SessionIsolationLevel == System.Data.IsolationLevel.ReadCommitted
-            && !connection.ImplicitTransactions && !connection.NoExec && !connection.ParseOnly && !connection.FmtOnly
+            && !connection.ImplicitTransactions && !connection.NoExec && connection.Showplan == ShowplanMode.None && !connection.ParseOnly && !connection.FmtOnly
             && !connection.StatisticsIo && !connection.StatisticsTime && !connection.NoBrowseTable
             && key.QuotedIdentifiers == context.QuotedIdentifiers
             && key.DateFormat == connection.DateFormat

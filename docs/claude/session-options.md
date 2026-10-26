@@ -98,6 +98,13 @@ While on, each statement compiles — the batch's compile still raises what comp
 The batch walks its statements in skip mode (`BatchContext.NoExecActive`, part of `IsSkipping`); `SET NOEXEC OFF` consults `SkipsForControlFlow`, the skip mode short of it, so one in an un-taken branch still doesn't run.
 Over TDS each statement walked still sends the DONE naming its kind, a write's with a count of 0 — see [`tds-endpoint.md`](tds-endpoint.md#per-statement-done-tokens).
 
+## `SHOWPLAN_TEXT` / `SHOWPLAN_ALL` / `SHOWPLAN_XML`
+
+While one is on, a batch compiles as under `NOEXEC` — raising what compiling raises, running nothing, its `SET SHOWPLAN_* OFF` the one statement that runs — and answers its statements' plans in place of their results (probed 2026-10-26 against SQL Server 2025), which is what SSMS's estimated plan reads.
+`SHOWPLAN_XML` answers one row in one `Microsoft SQL Server 2005 XML Showplan` column, the batch's ShowPlan document; `SHOWPLAN_TEXT` sends each statement holding a query in a `StmtText` result of its own, the statements between them gathered in one; `SHOWPLAN_ALL` sends a row each in its eighteen columns.
+A statement holding a query takes its Query Store shape's element (`Simulation.AppendShowPlanStatement`), the rest real's type read off their leading tokens (`ASSIGN`, `PRINT`, `EXECUTE PROC`, `SET ON/OFF` …), and a `DECLARE` that initializes nothing is left out as real folds it into a neighbor's text (`Simulation.Showplan.cs`).
+Which switch is on is session state (`SimulatedDbConnection.Showplan`); a batch under one records its statements as they compile (`BatchContext.ShowplanStatements`), and the plan caches stand down beside it as they do beside `NOEXEC`.
+
 ## `PARSEONLY`
 
 While on, a batch is checked for syntax alone: a syntax error (class 15) is reported, and binder errors and the batch itself are not.
@@ -164,8 +171,10 @@ While either option is on the session skips the plan cache and the compiled-batc
   The simulator settles the option from the batch's last `SET` as it parses, as it does for every other batch, and reports the Msg 208.
 - `FIPS_FLAGGER`'s warnings real's own internal statements send: a second `ALTER TABLE` at line 1 after one adding a `CHECK` constraint, the `TOP` / `ORDER` of an `UPDATE STATISTICS`'s sampling queries, the second `CONVERT` or `TOP` of a statement real parameterizes or inserts into a table variable from, and a procedure's `CREATE PROCEDURE` and name as its first call compiles it — only the body's own statements are flagged then.
   Statements outside the probed set (`DROP DATABASE`, `RESTORE`, `ALTER SCHEMA` …) aren't flagged, and a select-list alias repeated across a set operation's branches is flagged per occurrence where real flags the first (probed 2026-10-17 against SQL Server 2025).
-- `STATISTICS XML` / `PROFILE` and the `SHOWPLAN_*` family return plans; they parse and are discarded, so no result set arrives and a `SHOWPLAN` batch runs where real only describes it.
-  Not chased: the plan rows are the optimizer's (`|--Table Scan(OBJECT:(…), WHERE:(… = CONVERT_IMPLICIT(int,[@1],0)))`, costs and estimates in `SHOWPLAN_ALL` / `_XML`); only the statement-text rows — one per statement holding a query, the statements without one gathered in one result set — and `SHOWPLAN_ALL`'s `SELECT WITHOUT QUERY` rows are deterministic, which leaves the plan result sets real interleaves with them out (probed 2026-10-06 against SQL Server 2025).
+- `STATISTICS XML` / `PROFILE` return plans beside each statement's results; they parse and are discarded, so no plan result set arrives.
+- The `SHOWPLAN_*` plans carry no operator tree: real's operator rows and elements are its optimizer's (`|--Table Scan(OBJECT:(…), WHERE:(… = CONVERT_IMPLICIT(int,[@1],0)))`, costs and estimates in `SHOWPLAN_ALL` / `_XML`), so `SHOWPLAN_TEXT` leaves out the plan result set real sends after each query's text, `SHOWPLAN_ALL` the operator rows and `SHOWPLAN_XML` the `RelOp` tree and `StmtCond`'s nesting, its statements listed flat (probed 2026-10-06 and 2026-10-26 against SQL Server 2025).
+  Not chased either: the slice of the batch text real reports as a statement's, which takes in a neighbor's separator or a `DECLARE` with no initializer, and a procedure call's `StoredProc` element listing the body's statements.
+- A statement under `SHOWPLAN_*` reading a table its batch creates is planned here, where real compiles it without the table — the `CREATE` doesn't run — and raises Msg 208 for the batch (probed 2026-10-26 against SQL Server 2025).
 - `STATISTICS IO` lists nothing for a catalog view, where real lists the system base tables it read (`sysschobjs` …), and a system procedure's statements report nothing, where real's report each of its own (`sp_help`'s compile and a Msg 3612 per statement).
 - `STATISTICS IO` orders a hash join's, an `EXCEPT`'s and a foreign-key check's tables by the simulator's own read order, which is not always real's (a hash join's build side first, a referenced table ahead of the written one), lists no `Worktable` for an `UPDATE` of a key column, where real's split-sort lists one, and lists one ahead of a `FAST_FORWARD` cursor's live read, where real lists the table alone.
   These follow real's plan: not chased.

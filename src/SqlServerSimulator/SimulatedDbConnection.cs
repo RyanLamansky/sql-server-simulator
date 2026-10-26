@@ -1131,6 +1131,14 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool NoExec;
 
     /// <summary>
+    /// Session-scoped <c>SET SHOWPLAN_TEXT</c> / <c>_ALL</c> / <c>_XML</c>:
+    /// while one is on, a batch compiles as under <see cref="NoExec"/> —
+    /// running nothing but the <c>SET</c> turning it off — and answers its
+    /// statements' plans in place of their results.
+    /// </summary>
+    internal ShowplanMode Showplan;
+
+    /// <summary>
     /// Session-scoped <c>SET PARSEONLY</c>: while on, a batch is only checked
     /// for syntax — nothing binds and nothing runs. Applied while the batch
     /// parses, as <c>QUOTED_IDENTIFIER</c> is, so it governs the whole batch
@@ -1277,6 +1285,7 @@ public sealed class SimulatedDbConnection : DbConnection
         public readonly bool AnsiNullDefaultOn = connection.AnsiNullDefaultOn;
         public readonly bool AnsiNullDefaultOff = connection.AnsiNullDefaultOff;
         public readonly bool NoExec = connection.NoExec;
+        public readonly ShowplanMode Showplan = connection.Showplan;
         public readonly int DeadlockPriority = connection.DeadlockPriority;
         public readonly bool StatisticsIo = connection.StatisticsIo;
         public readonly bool StatisticsTime = connection.StatisticsTime;
@@ -1314,6 +1323,7 @@ public sealed class SimulatedDbConnection : DbConnection
             connection.AnsiNullDefaultOn = this.AnsiNullDefaultOn;
             connection.AnsiNullDefaultOff = this.AnsiNullDefaultOff;
             connection.NoExec = this.NoExec;
+            connection.Showplan = this.Showplan;
             connection.DeadlockPriority = this.DeadlockPriority;
             connection.StatisticsIo = this.StatisticsIo;
             connection.StatisticsTime = this.StatisticsTime;

@@ -101,6 +101,12 @@ partial class Simulation
         private readonly bool compound;
 
         /// <summary>
+        /// The ShowPlan type of a simple statement a batch walks under
+        /// <c>SET SHOWPLAN_*</c>, recorded once it has parsed; null otherwise.
+        /// </summary>
+        private readonly string? showplanType;
+
+        /// <summary>
         /// Whether the statement sends what its statements produce as each
         /// produces it (<see cref="BatchContext.StreamingFrames"/>): a block, a
         /// <c>TRY</c>, an <c>IF</c>, a <c>WHILE</c> or a procedure or
@@ -257,6 +263,7 @@ partial class Simulation
             this.IsCall = this.FramesStatement && IsProcedureCall(batch.Parser, atBatchStart);
             this.compound = batch.Parser.Token is ReservedKeyword { Keyword: Keyword.If or Keyword.While }
                 || (batch.Parser.Token is ReservedKeyword { Keyword: Keyword.Begin } && StatementDoneKindOf(batch.Parser) is null);
+            this.showplanType = batch.ShowplanStatements is not null && batch.NoExecActive && !this.compound ? ShowplanStatementType(batch.Parser) : null;
             // An atomic block's work commits or rolls back as one, and only a
             // natively compiled module, whose call gathers its outcomes, holds one.
             this.Streams = !batch.IsSkipping && batch.SendsAsStatementsEnd
@@ -415,6 +422,8 @@ partial class Simulation
                     ends.Incomplete = true;
                 }
             }
+            if (this.showplanType is { } planned && this.Error is null && connection.Showplan != ShowplanMode.None && this.StatementStart.Token is { } planStart)
+                NoteShowplanStatement(batch, planStart, planned);
             batch.ReleaseStatementSchemaLocks();
             connection.CurrentExecutingThreadId = this.savedThreadId;
             connection.RunningBatch = this.savedRunningBatch;

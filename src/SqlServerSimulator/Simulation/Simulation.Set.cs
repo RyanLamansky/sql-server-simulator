@@ -404,7 +404,28 @@ partial class Simulation
         if (name.Equals("NOEXEC", StringComparison.OrdinalIgnoreCase))
         {
             if (!batch.SkipsForControlFlow)
-                context.Connection.NoExec = batch.NoExecActive = on;
+            {
+                context.Connection.NoExec = on;
+                batch.NoExecActive = on || context.Connection.Showplan != ShowplanMode.None;
+            }
+            return;
+        }
+        // A SHOWPLAN switch applies as NOEXEC's does, its OFF the one
+        // statement still running under it.
+        if (IsShowplanOption(name))
+        {
+            if (!batch.SkipsForControlFlow)
+            {
+                var connection = context.Connection;
+                var mode = name.Equals("SHOWPLAN_XML", StringComparison.OrdinalIgnoreCase) ? ShowplanMode.Xml
+                    : name.Equals("SHOWPLAN_ALL", StringComparison.OrdinalIgnoreCase) ? ShowplanMode.All
+                    : ShowplanMode.Text;
+                if (on)
+                    connection.Showplan = mode;
+                else if (connection.Showplan == mode)
+                    connection.Showplan = ShowplanMode.None;
+                batch.NoExecActive = connection.NoExec || connection.Showplan != ShowplanMode.None;
+            }
             return;
         }
         if (name.Equals("PARSEONLY", StringComparison.OrdinalIgnoreCase))

@@ -1911,6 +1911,7 @@ public sealed partial class Simulation
             YieldsBetweenStatements = command.YieldsBetweenStatements,
             CachedPlanOrigin = CachedPlanOrigin.ClientBatch,
             CachedPlanDatabase = command.Connection?.CurrentDatabase,
+            ShowplanStatements = command.Connection?.Showplan is null or ShowplanMode.None ? null : [],
         };
         // Stash the prepared cache-key components on the batch so the SELECT
         // arm can promote inline (the iterator's post-foreach code is
@@ -1993,6 +1994,7 @@ public sealed partial class Simulation
             context.MoveNextOptional();
             var batchAborted = false;
             var endedSilently = false;
+            var raised = false;
             using (var statements = DispatchStatementsUntil(batch, endKeyword: null).GetEnumerator())
             {
                 while (true)
@@ -2011,6 +2013,7 @@ public sealed partial class Simulation
                         break;
                     }
                     batchAborted |= statements.Current is SimulatedErrorOutcome { Exception: var ended } && EndsBatch(ended);
+                    raised |= statements.Current is SimulatedErrorOutcome;
                     yield return statements.Current;
                 }
             }
@@ -2019,6 +2022,13 @@ public sealed partial class Simulation
                 if (EndedSilently(batch.Connection) is { } underXactAbort)
                     yield return underXactAbort;
                 yield break;
+            }
+            // A batch walked under SHOWPLAN answers its plans, unless compiling
+            // it raised.
+            if (batch.ShowplanStatements is { Count: > 0 } planned && !raised)
+            {
+                foreach (var plan in this.ShowplanResults(batch, planned))
+                    yield return plan;
             }
             // A transaction an XACT_ABORT-caught error doomed can survive to
             // here: the CATCH ran, the batch carried on, and nothing rolled it
