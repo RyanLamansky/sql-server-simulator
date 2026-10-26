@@ -3114,6 +3114,7 @@ internal abstract class BooleanExpression : ExpressionNode
 
         protected readonly Expression left, right;
         private readonly StringCoercionMemo leftPromotion = new(), rightPromotion = new();
+        private readonly ComparisonTypeMemo comparisonType = new();
 
         private protected CompareExpression(Expression left, Expression right)
         {
@@ -3148,7 +3149,8 @@ internal abstract class BooleanExpression : ExpressionNode
                 this.leftPromotion,
                 this.rightPromotion,
                 this.leftIsConstant ??= IsRuntimeConstant(this.left),
-                this.rightIsConstant ??= IsRuntimeConstant(this.right));
+                this.rightIsConstant ??= IsRuntimeConstant(this.right),
+                this.comparisonType);
 
         private bool? leftIsConstant, rightIsConstant;
 
@@ -3215,7 +3217,8 @@ internal abstract class BooleanExpression : ExpressionNode
         StringCoercionMemo? leftMemo = null,
         StringCoercionMemo? rightMemo = null,
         bool leftIsConstant = false,
-        bool rightIsConstant = false)
+        bool rightIsConstant = false,
+        ComparisonTypeMemo? typeMemo = null)
     {
         // Either operand sql_variant: real converts a base-typed side UP to
         // sql_variant (probe-confirmed as CONVERT_IMPLICIT(sql_variant, …) in
@@ -3263,11 +3266,15 @@ internal abstract class BooleanExpression : ExpressionNode
         // call memoized rather than one parse per row; see
         // <see cref="StringCoercionMemo"/> for why identity is the right key and
         // why a missing memo just means the old behavior.
-        if (SqlType.PairError(TypePairOperation.Compare, l.Type, r.Type, operatorName) is { } error)
-            throw error;
-        if (ExactDateTimeOrder(l, r) is { } order)
-            return compare(SqlValue.FromInt32(order), SqlValue.FromInt32(0));
-        var common = ComparisonType(l.Type, r.Type, leftIsConstant, rightIsConstant);
+        if (typeMemo?.Find(l.Type, r.Type) is not { } common)
+        {
+            if (SqlType.PairError(TypePairOperation.Compare, l.Type, r.Type, operatorName) is { } error)
+                throw error;
+            if (ExactDateTimeOrder(l, r) is { } order)
+                return compare(SqlValue.FromInt32(order), SqlValue.FromInt32(0));
+            common = ComparisonType(l.Type, r.Type, leftIsConstant, rightIsConstant);
+            typeMemo?.Keep(l.Type, r.Type, common);
+        }
         return compare(
             leftMemo is null ? l.CoerceTo(common) : leftMemo.Coerce(l, common),
             rightMemo is null ? r.CoerceTo(common) : rightMemo.Coerce(r, common));

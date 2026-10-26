@@ -907,6 +907,24 @@ public sealed class IndexSeekTests
         }
     }
 
+    // An UPDATE leaving a row's key alone leaves the entry's key order as the
+    // last ordered read listed it, so a loop updating each row it reads by
+    // that order doesn't list every key again at each step; one changing the
+    // key drops the order, and the next read lists it again.
+    [TestMethod]
+    [DataRow("update t set v = 1 where id = 1", false, 2)]
+    [DataRow("update t set id = 100 where id = 1", true, 2)]
+    public void UpdateLeavingTheKeyAlone_KeepsTheKeyOrder(string update, bool listsAgain, int first)
+    {
+        var (trace, rows) = WarmMutateProbe(
+            "create table t (id int not null primary key, v int not null); insert t select value, 0 from generate_series(1, 50)",
+            "select top (1) id from t where v = 0 order by id",
+            update,
+            "select top (1) id from t where v = 0 order by id");
+        AreEqual(listsAgain, trace.Contains("KeyOrderBuild"));
+        AreEqual(first, rows[0]);
+    }
+
     // A bounded ordered read walks the entry's sorted keys until the walks
     // since the table's last write have visited as many keys as the entry
     // holds; from then on until a write it cuts its run from the cached key

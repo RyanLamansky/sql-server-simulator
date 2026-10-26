@@ -596,6 +596,7 @@ internal sealed class HeapSeekCache
         {
             if (this.keyOrder is null)
             {
+                IndexSeekDiagnostics.Sink?.Add("KeyOrderBuild");
                 this.keyOrder = [.. this.OrderedCandidates(null, false, null, false)];
                 (this.keyOrderStart, this.keyOrderEnd) = (0, this.keyOrder.Length);
             }
@@ -754,15 +755,20 @@ internal sealed class HeapSeekCache
                         break;
                     case Heap.SeekJournalKind.Update:
                         var hadOldKey = TryComputeEntryKey(e.OldImage, this.Ordinals, this.Commons, schema, lobStore, out var oldKey);
+                        var hasNewKey = TryComputeEntryKey(e.NewImage, this.Ordinals, this.Commons, schema, lobStore, out var newKey);
+                        // A row keeps its address across an UPDATE, so one
+                        // leaving the key alone leaves the entry as it was —
+                        // its key order included, which a loop updating each
+                        // row it reads by that order would otherwise rebuild
+                        // at every step — and only a changed key can put the
+                        // heap out of order.
+                        if (hadOldKey && hasNewKey && KeyTupleComparer.Instance.Compare(oldKey, newKey) == 0)
+                            break;
                         if (hadOldKey)
                             this.RemoveRid(oldKey, (e.Page, e.Slot));
-                        var hasNewKey = TryComputeEntryKey(e.NewImage, this.Ordinals, this.Commons, schema, lobStore, out var newKey);
                         if (hasNewKey)
                             this.AddRid(newKey, (e.Page, e.Slot));
-                        // A row keeps its address across an UPDATE, so only a
-                        // changed key can put it out of order.
-                        if (!hadOldKey || !hasNewKey || KeyTupleComparer.Instance.Compare(oldKey, newKey) != 0)
-                            this.HeapOrdered = false;
+                        this.HeapOrdered = false;
                         break;
                 }
             }

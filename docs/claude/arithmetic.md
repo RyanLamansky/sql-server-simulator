@@ -120,6 +120,9 @@ A failed conversion is never memoized, so Msg 241 still surfaces from the row th
 Like the [LIKE pattern memo](collations.md#the-pattern-compilation-is-memoized-per-node) the entry is immutable and published through `Volatile`, since a cached plan shares the node across sessions.
 `InExpression` doesn't carry one — a list of literals would thrash a single entry.
 
+The pair's legality check and its comparison type are kept the same way (`ComparisonTypeMemo`, one per `CompareExpression`), for the first pair of operand types that passed — keyed by both types' identity, which a column and a literal or variable hold for a whole scan — so later rows skip `SqlType.PairError` and the promotion.
+`COUNT(*)` over 200,000 rows filtered by a `bit`, a `smallint` and a `varchar` column each beside a literal went from 52 to 46 ms (Release, measured 2026-10-26).
+
 ## `bit` operand pairs
 
 A `bit` paired with a `bit` has no arithmetic on real, and the rejection splits by operator the same way the binary pair does: `*` / `/` raise **Msg 8117** (`"Operand data type bit is invalid for multiply operator."`), while `+` / `-` / `%` raise **Msg 402** (`"The data types bit and bit are incompatible in the add operator."`, and the subtract / modulo wordings).
