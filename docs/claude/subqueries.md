@@ -46,7 +46,7 @@ A deterministic plan handed the same values takes the same path through its rows
 Measured 2026-10-25 (Release, the faster of two runs): over 4,000 rows, `WHERE a.x > (SELECT AVG(b.x) FROM t b WHERE b.g = a.g)` across 10 groups took 1.7 s and takes 23 ms, and `WHERE a.id = (SELECT MAX(b.id) FROM t b WHERE b.s = a.s)` across 13 groups 2.6 s and 46 ms.
 A correlation reading a unique column gains nothing: every row is a new key, filed until the site's capacity.
 A quantified comparison's ordering operators answer a replayed result from its bounds — its least and greatest value and whether one is NULL, settled once for each result — rather than comparing the row with each value: `WHERE a.x >= ALL (SELECT b.x FROM t b WHERE b.g = a.g)` over 64,000 rows in 10 groups took 5.2 s and takes 0.6 s, and 1.3 s on real (2026-10-25, Release).
-Its equality operators compare the row with each value (see the backlog).
+Its equality operators answer a result read a second time from its distinct non-NULL values, hashed at the type the pair compares in as an `IN` subquery's probe set is — `= ANY` asks whether one equals the row, `<> ANY` whether one doesn't, and `ALL` the negation of the other's question — while a result read once is walked, which is cheaper than hashing it: `WHERE a.x = ANY (SELECT b.x + 200 FROM t b WHERE b.g = a.g)` over 64,000 rows in 10 groups took 2.5 s and takes 0.2 s, and 30–70 ms on real, and the same with `<> ALL` beside it 8.5 s and 0.3 s, where real's plan for the pair takes 20 s (2026-10-26, Release).
 
 ### An unindexed correlation reads its table once
 

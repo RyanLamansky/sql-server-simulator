@@ -354,6 +354,48 @@ public sealed class QuantifiedComparisonTests
             select count(*) from t a where a.x >= all (select b.x from t b where b.g = a.g)
             """));
 
+    /// <summary>
+    /// An equality operator over values its rows share answers from their
+    /// distinct values once a second row reads them, three-valued as comparing
+    /// each value is: 1 is true, 0 false, -1 UNKNOWN (probed 2026-10-26
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("= any", "", "1:1,2:1,3:-1,4:-1")]
+    [DataRow("<> all", "", "1:0,2:0,3:-1,4:-1")]
+    [DataRow("= all", "", "1:0,2:0,3:0,4:-1")]
+    [DataRow("<> any", "", "1:1,2:1,3:1,4:-1")]
+    [DataRow("= any", " where x is not null", "1:1,2:1,3:0,4:-1")]
+    [DataRow("<> all", " where x is not null", "1:0,2:0,3:1,4:-1")]
+    [DataRow("= all", " where x = 1", "1:1,2:0,3:0,4:-1")]
+    [DataRow("<> any", " where x = 1", "1:0,2:1,3:1,4:-1")]
+    [DataRow("= any", " where x = 9", "1:0,2:0,3:0,4:0")]
+    [DataRow("= all", " where x = 9", "1:1,2:1,3:1,4:1")]
+    public void EqualityOperator_OverSharedValues_AnswersThreeValued(string op, string filter, string expected)
+    {
+        var predicate = $"v {op} (select x from qv{filter})";
+        AreEqual(expected, new Simulation().ExecuteScalar($"""
+            create table qo (id int primary key, v int); insert qo values (1, 1), (2, 2), (3, 5), (4, null);
+            create table qv (x bigint); insert qv values (1), (2), (null);
+            select string_agg(r, ',') within group (order by id)
+            from (select id, concat(id, ':', case when {predicate} then 1 when not ({predicate}) then 0 else -1 end) r from qo) d
+            """));
+    }
+
+    /// <summary>
+    /// A correlated equality whose rows share their group's values costs a
+    /// lookup per row, where comparing each row with every value cost the
+    /// group's size.
+    /// </summary>
+    [TestMethod]
+    [Timeout(20000)]
+    public void EqualityOperator_OverLargeGroups_RunsInLinearTime() =>
+        AreEqual(99800, new Simulation().ExecuteScalar("""
+            create table t (id int primary key, g int, x int);
+            insert t select value, value % 10, value from generate_series(1, 100000);
+            select count(*) from t a where a.x = any (select b.x + 200 from t b where b.g = a.g)
+            """));
+
     [TestMethod]
     public void TypeMismatch_StringLhs_IntInner_ConversionError()
     {

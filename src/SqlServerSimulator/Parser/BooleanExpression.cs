@@ -2825,7 +2825,7 @@ internal abstract class BooleanExpression : ExpressionNode
         /// So is a <c>datetime</c> beside a <c>datetime2</c> or
         /// <c>datetimeoffset</c> (<see cref="ComparesAtExactDateTime"/>).
         /// </summary>
-        private static bool QualifiesForHashing(SqlType source, SqlType column) =>
+        internal static bool QualifiesForHashing(SqlType source, SqlType column) =>
             source.Category == column.Category
                 && source.Category != SqlTypeCategory.Other
                 && !source.IsLob
@@ -2838,7 +2838,7 @@ internal abstract class BooleanExpression : ExpressionNode
         /// a value the promoted type can't hold has to raise where the
         /// row-order walk would raise it, not while a probe set is being built.
         /// </summary>
-        private static HashSet<SqlValue>? BuildProbeSet(SqlValue[] values, SqlType promoted)
+        internal static HashSet<SqlValue>? BuildProbeSet(SqlValue[] values, SqlType promoted)
         {
             var set = new HashSet<SqlValue>(values.Length);
             foreach (var value in values)
@@ -2911,13 +2911,17 @@ internal abstract class BooleanExpression : ExpressionNode
         /// other, since it is their UNKNOWN result that taints the fold. An
         /// ordering operator over values of the left operand's own type reads
         /// the answer off their bounds instead (<see cref="CombineBounds"/>),
-        /// which the comparisons can't contradict.
+        /// and an equality operator over a result read again off its distinct
+        /// values (<see cref="CombineMembership"/>), which the comparisons
+        /// can't contradict.
         /// </summary>
         private bool? Combine(SubqueryValues subquery, SqlValue lhs, string operatorName, Func<SqlValue, SqlValue, bool> compare)
         {
             var values = subquery.Values;
             if (values.Length != 0 && op is not (ComparisonOp.Equal or ComparisonOp.NotEqual) && subquery.Type is { } type && lhs.Type == type)
                 return this.CombineBounds(subquery, lhs);
+            if (values.Length != 0 && op is ComparisonOp.Equal or ComparisonOp.NotEqual && subquery.ProbeFor(lhs.Type) is { } probe)
+                return this.CombineMembership(subquery, probe, lhs, operatorName);
 
             var sawUnknown = false;
             var sawDefinitiveTrue = false;
@@ -2968,6 +2972,28 @@ internal abstract class BooleanExpression : ExpressionNode
         }
 
         /// <summary>
+        /// <see cref="Combine"/>'s answer for <c>=</c> or <c>&lt;&gt;</c> from
+        /// the distinct non-NULL values: <c>ANY</c> holds when some value
+        /// meets the operator, <c>ALL</c> fails when some value doesn't, and a
+        /// NULL value — or a NULL left operand — leaves UNKNOWN what the rest
+        /// don't settle. A group's rows each reading the values the keyed memo
+        /// replays then cost a lookup rather than the group's size.
+        /// </summary>
+        private bool? CombineMembership(SubqueryValues subquery, SubqueryValues.Probe probe, SqlValue lhs, string operatorName)
+        {
+            // The comparisons the walk makes owe this gate, a NULL left operand
+            // included.
+            RequireResolvableCollation(lhs.Type, subquery.Type!, operatorName);
+            if (lhs.IsNull)
+                return null;
+            var equalOne = probe.Set.Contains(lhs.Type == probe.Promoted ? lhs : lhs.CoerceTo(probe.Promoted));
+            var unequalOne = probe.Set.Count > (equalOne ? 1 : 0);
+            return kind == QuantifiedKind.All
+                ? ((op == ComparisonOp.Equal ? unequalOne : equalOne) ? false : subquery.HasNull ? null : true)
+                : ((op == ComparisonOp.Equal ? equalOne : unequalOne) ? true : subquery.HasNull ? null : false);
+        }
+
+        /// <summary>
         /// The values a quantified comparison's subquery returned, with the
         /// bounds an ordering operator reads of them, settled once for each
         /// result: the keyed memo hands the same result back to every row
@@ -2976,6 +3002,14 @@ internal abstract class BooleanExpression : ExpressionNode
         private sealed class SubqueryValues
         {
             public readonly SqlValue[] Values;
+
+            /// <summary>Whether a left operand has read these values, which a second read builds <see cref="probe"/> on.</summary>
+            private bool read;
+
+            private Probe? probe;
+
+            /// <summary>Whether no probe serves these values: their type pair declined it, or a value wouldn't sit at the promoted type.</summary>
+            private bool probeDeclined;
 
             /// <summary>
             /// The type every value has, for which <see cref="Least"/> and
@@ -3010,6 +3044,49 @@ internal abstract class BooleanExpression : ExpressionNode
                         this.Greatest = value;
                 }
                 this.Type = type;
+            }
+
+            /// <summary>
+            /// The distinct non-NULL values hashed at the type they compare with
+            /// a left operand of <paramref name="lhsType"/> in, as an <c>IN</c>
+            /// subquery's probe set is (<see cref="InnerColumnValues"/>) — or
+            /// null where the walk decides: on the first read, since a result
+            /// read once is cheaper walked than hashed, for another left
+            /// operand type than the one the probe was built for, and wherever
+            /// the IN probe set declines.
+            /// </summary>
+            public Probe? ProbeFor(SqlType lhsType)
+            {
+                if (this.probe is { } built)
+                    return built.For == lhsType ? built : null;
+                if (!this.read)
+                {
+                    this.read = true;
+                    return null;
+                }
+                if (this.probeDeclined || this.Type is not { } type || !InnerColumnValues.QualifiesForHashing(lhsType, type))
+                    return null;
+                var promoted = SqlType.Promote(lhsType, type);
+                var nonNull = new List<SqlValue>(this.Values.Length);
+                foreach (var value in this.Values)
+                {
+                    if (!value.IsNull)
+                        nonNull.Add(value);
+                }
+                if (InnerColumnValues.BuildProbeSet([.. nonNull], promoted) is not { } set)
+                {
+                    this.probeDeclined = true;
+                    return null;
+                }
+                return this.probe = new Probe(set, promoted, lhsType);
+            }
+
+            /// <summary>The values a <see cref="ProbeFor"/> hashed, the type they sit at and the left operand type that type was promoted with.</summary>
+            public sealed class Probe(HashSet<SqlValue> set, SqlType promoted, SqlType forType)
+            {
+                public readonly HashSet<SqlValue> Set = set;
+                public readonly SqlType Promoted = promoted;
+                public readonly SqlType For = forType;
             }
         }
 
