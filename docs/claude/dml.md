@@ -459,6 +459,7 @@ Probe-confirmed schema-inference rules:
   A CTE prefix inside the parens is **Msg 156** (`Incorrect syntax near the keyword 'with'.`), matching real — the prefix belongs ahead of the MERGE (`WITH c AS (…) MERGE … USING c`), which ships.
 - bare-table / view / `#temp` / `@tablevar` / `schema.table` reference — alias is optional and defaults to the source's leaf name.
   Optional `WITH (hint [, …])` table hints sit alias-then-hint (same placement as FROM source); the trailing column-rename `(c1, c2)` list isn't legal here and parses as a hint clause (probe-confirmed Msg 321 on the first column name).
+- a joined table source — `USING b JOIN c ON c.id = b.cid ON a.id = b.id` — read as a joined FROM is, its join's `ON` first, then the merge's own (`ParseJoinedMergeSource`).
 
 `<when-clause>` is one of:
 
@@ -583,6 +584,5 @@ EF Core's `ExecuteUpdate` / `ExecuteDelete` for batched single-statement DML emi
 - MERGE into a view ships for a single-base updatable view (`MergeViewTests`), its `OUTPUT` reading the view's columns, for any view whose INSTEAD OF triggers take its actions, and for a join view whose actions each land in one base table — see [`programmable.md`](programmable.md#dml-through-a-join-view).
 - Multi-statement WHEN-clause bodies (real SQL Server only allows the one DML action per WHEN — same restriction here).
 - **An `OUTPUT` naming a source column in a MERGE whose only clauses are `WHEN NOT MATCHED BY SOURCE`** is Msg 4104 on real, which binds no source there; here it reads NULL (probed 2026-09-28).
-- **A joined table source after `USING`** — `MERGE a USING b JOIN c ON … ON a.id = b.id …`, which real runs (probed 2026-10-08 against SQL Server 2025), is Msg 156 at the `JOIN` here; a parenthesized query over the join is the shape that ships.
 - **Composable DML** — a nested `INSERT` / `UPDATE` / `DELETE` / `MERGE` with `OUTPUT` as an `INSERT … SELECT`'s source (`INSERT a SELECT … FROM (MERGE … OUTPUT …) x`), with real's Msg 355 for a triggered target and Msg 8156 for a duplicate column name — raises `NotSupportedException` here (probed 2026-10-01 against SQL Server 2025).
   A nested statement anywhere else is real's Msg 10729, and one without `OUTPUT` Msg 10716 ahead of it, both refused while the batch parses (probed 2026-10-19).

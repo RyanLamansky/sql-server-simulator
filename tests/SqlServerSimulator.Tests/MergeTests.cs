@@ -41,6 +41,24 @@ public sealed class MergeTests
         CollectionAssert.AreEqual(new[] { (1, 11), (2, 200), (3, 33) }, rows);
     }
 
+    /// <summary>
+    /// A joined table source after <c>USING</c> reads as a joined FROM does,
+    /// its join's <c>ON</c> ahead of the merge's own (probed 2026-10-08
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void JoinedSource_MatchesThroughItsJoin()
+        => AreEqual("1:100,2:200,3:0", new Simulation().ExecuteScalar("""
+            create table a (id int primary key, v int);
+            create table b (id int primary key, cid int);
+            create table c (id int primary key, w int);
+            insert a values (1, 0), (2, 0), (3, 0);
+            insert b values (1, 10), (2, 20), (3, 30);
+            insert c values (10, 100), (20, 200);
+            merge a using b join c on c.id = b.cid on a.id = b.id when matched then update set v = c.w;
+            select string_agg(concat(id, ':', v), ',') within group (order by id) from a
+            """));
+
     [TestMethod]
     public void Matched_Delete_RemovesMatchedRows()
     {
