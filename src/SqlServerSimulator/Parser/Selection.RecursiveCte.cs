@@ -59,8 +59,6 @@ internal sealed partial class Selection
         while (current.Count > 0)
         {
             iteration++;
-            if (maxRecursion > 0 && iteration > maxRecursion)
-                throw SimulatedSqlException.MaxRecursionExceeded(maxRecursion);
             // MAXRECURSION 0 lets a recursion run without end, which a
             // cancel is the one way out of; an iteration's rows are few, so
             // each one looks rather than riding the row poll's stride.
@@ -83,6 +81,11 @@ internal sealed partial class Selection
                 binding.CurrentIterationRows = null;
             }
 
+            // A level past the limit is Msg 530 only once it produces rows,
+            // the levels within it sent: one that comes back empty ends the
+            // recursion (probed 2026-10-26 against SQL Server 2025).
+            if (next.Count > 0 && maxRecursion > 0 && iteration > maxRecursion)
+                throw SimulatedSqlException.MaxRecursionExceeded(maxRecursion);
             foreach (var rowBytes in next)
                 yield return rowBytes;
 

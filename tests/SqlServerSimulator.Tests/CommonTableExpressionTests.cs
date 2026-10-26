@@ -248,6 +248,33 @@ public sealed class CommonTableExpressionTests
         => new Simulation().AssertSqlError("with c as (select 1 as n union all select n+1 from c) select count(*) from c option (maxrecursion 5)", 530,
             "The statement terminated. The maximum recursion 5 has been exhausted before statement completion.");
 
+    /// <summary>
+    /// MAXRECURSION n allows n levels that produce rows: a level past it that
+    /// comes back empty ends the recursion, and one that produces rows is
+    /// Msg 530 after the levels within the limit were sent (probed 2026-10-26
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("where n < 101", "", 101)]
+    [DataRow("where n < 3", "option (maxrecursion 2)", 3)]
+    [DataRow("where n < 4", "option (maxrecursion 3)", 4)]
+    public void Cte_Recursive_ALevelPastTheLimitThatProducesNothing_Ends(string where, string option, int count)
+        => AreEqual(count, new Simulation().ExecuteScalar($"with c as (select 1 as n union all select n+1 from c {where}) select count(*) from c {option}"));
+
+    [TestMethod]
+    public void Cte_Recursive_ALevelPastTheLimitThatProducesRows_RaisesAfterTheRowsWithin()
+    {
+        using var reader = new Simulation().ExecuteReader("with c as (select 1 as n union all select n+1 from c where n < 3) select n from c option (maxrecursion 1)");
+        var values = new List<int>();
+        var ex = Throws<SimulatedSqlException>(() =>
+        {
+            while (reader.Read())
+                values.Add(reader.GetInt32(0));
+        });
+        AreEqual(530, ex.Number);
+        CollectionAssert.AreEqual(new[] { 1, 2 }, values);
+    }
+
     [TestMethod]
     public void Cte_Recursive_OptionMaxRecursionZero_Unlimited()
         => AreEqual(200, new Simulation().ExecuteScalar("with c as (select 1 as n union all select n+1 from c where n < 200) select count(*) from c option (maxrecursion 0)"));

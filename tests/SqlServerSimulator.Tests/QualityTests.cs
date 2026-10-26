@@ -635,7 +635,7 @@ public partial class QualityTests
     /// the error log (a failed backup's Msg 3041 and 18204).
     /// </summary>
     private static readonly int[] CitedButNotRaised = [
-        223, 355, 608, 1724, 1784,
+        223, 246, 355, 608, 1724, 1784,
         1789, 1969, 2023, 2390, 2503, 3041, 3604, 3624, 3920, 3964,
         4624, 4628, 5508, 6378, 6589, 6947,
         8711, 9341, 9802, 9937, 10525, 10537,

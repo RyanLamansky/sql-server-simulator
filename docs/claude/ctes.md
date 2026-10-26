@@ -9,6 +9,8 @@ Multiple comma-separated CTEs cascade — later ones see earlier ones.
 
 **Recursive form**: anchor branches (no self-ref) run once into a seed rowset; recursive branches (one self-ref each) iterate against the previous rowset until empty or `MaxRecursion` trips Msg 530.
 Default 100; `OPTION (MAXRECURSION N)` overrides; `0` disables.
+The limit counts levels that produce rows: a level past it that comes back empty ends the recursion, and one that produces rows is Msg 530 after the levels within the limit were sent, so `n < 101` under the default answers 101 rows (probed 2026-10-26 against SQL Server 2025).
+**Not modeled yet**: a statement's `OPTION (MAXRECURSION N)` reaching a recursive CTE in a view it reads, which real applies — the view's CTE keeps the default 100 here; and a body whose every branch reads itself (`SELECT i FROM n UNION ALL SELECT 1`, the self-reference first) is Msg 252 here where real reports Msg 246, no anchor member (probed 2026-10-26 against SQL Server 2025).
 
 Errors:
 - **Msg 240**: anchor and recursive parts produce different per-column types (strict type-equality, no Promote-style widening — must explicitly cast).
