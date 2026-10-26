@@ -696,6 +696,7 @@ internal sealed class BindErrorReport(string command)
 
         var reported = new List<SimulatedSqlException>(keyed.Count + 1);
         List<(int Rank, int Anchor)>? firstKept = null;
+        var collided = false;
         foreach (var (key, entry, _) in keyed)
         {
             if (entry.Tier == 1 && this.ChainOf(entry.SortPosition) is [.., var own] && keyed.Exists(other => other.Entry.PrecedesGrouping && this.ChainOf(other.Entry.SortPosition) is [.., var otherOwn] && otherOwn == own))
@@ -716,14 +717,20 @@ internal sealed class BindErrorReport(string command)
             entry.Error.Errors[0].LineNumber = parameterized ? statementLine : Token.LineAt(this.Command, entry.LinePosition) + lineOffset;
             reported.Add(entry.Error);
             if (entry.Ends)
+            {
+                collided = entry.Error.Number is 1011 or 1012 or 1013;
                 break;
+            }
         }
 
         // What the stopper carries follows, when it is more of the same: an
         // unbindable name the parse raised rather than recorded — a second
         // read of one already reported repeats its message — or a structural
-        // error real meets once the names have bound.
-        if (stopper is not null)
+        // error real meets once the names have bound. A FROM clause's name
+        // collision binds ahead of all of it, so the parse raised the stopper
+        // past the collision, where real binds nothing (probed 2026-10-26:
+        // `SELECT a FROM t d1 JOIN t d1 ON …` is the Msg 1011 alone).
+        if (stopper is not null && !collided)
         {
             var gathered = stopper.Errors.Count > 1;
             foreach (var error in stopper.Errors)

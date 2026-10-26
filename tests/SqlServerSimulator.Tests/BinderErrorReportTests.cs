@@ -66,6 +66,8 @@ public sealed partial class BinderErrorReportTests
     [DataRow("select a\nfrom t\norder by\nx1,\nx2", "207:4:x1 207:5:x2")]
     [DataRow("select x1 from t join u on x2 = 1 join u on x3 = 1 where x4 = 1", "207:1:x2 1013:1:u")]
     [DataRow("select x1 from t, t where x2 = 1", "1013:1:t")]
+    [DataRow("select a from t d1 join t d1 on d1.a = d1.a", "1011:1:d1")]
+    [DataRow("select x1 from t d1 join u d1 on d1.a = 1 where x2 = 1", "1011:1:d1")]
     public void Report_FollowsTheBindersClauseOrder(string statement, string expected)
         => AreEqual(expected, Report(statement));
 

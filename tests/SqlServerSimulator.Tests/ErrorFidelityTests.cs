@@ -118,6 +118,8 @@ public sealed class ErrorFidelityTests
     [DataRow("select len(x) from t2", 8116)]
     [DataRow("select a from t2 order by x", 305)]
     [DataRow("select distinct x from t2", 421)]
+    [DataRow("select a from t2 where a in (select a, d from t2)", 116)]
+    [DataRow("select * from (select a, a from t2) x", 8156)]
     public void DeferredCompileError_EndsTheBatchPastItsOwnTry(string statement, int number)
     {
         var simulation = new Simulation();
