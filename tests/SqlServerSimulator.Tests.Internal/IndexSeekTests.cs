@@ -1449,6 +1449,26 @@ public sealed class IndexSeekTests
         Contains(3, rows);
     }
 
+    /// <summary>
+    /// A range whose comparison reads a <c>datetime</c> at its exact value —
+    /// a <c>datetime</c> column bounded by a <c>datetime2</c>, or the reverse —
+    /// seeks on the column's own values rather than scanning.
+    /// </summary>
+    [TestMethod]
+    [DataRow("datetime", "datetime2(7)", "2024-01-01 00:00:00.0033333", ">", "2,3,4")]
+    [DataRow("datetime", "datetime2(7)", "2024-01-01 00:00:00.0033334", "<=", "1,2")]
+    [DataRow("datetime2(7)", "datetime", "2024-01-01 00:00:00.003", ">=", "2,3,4")]
+    [DataRow("datetime2(7)", "datetime", "2024-01-01 00:00:00.003", "<", "1")]
+    public void ExactDateTimeBound_RangeSeeks(string columnType, string boundType, string bound, string op, string expected)
+    {
+        var (trace, rows) = Run(
+            $"create table t (id int primary key, d {columnType} index ix_d); insert t select id, cast(d as datetime2(7)) from (values (1, '2024-01-01 00:00:00.000'), (2, '2024-01-01 00:00:00.0033334'), (3, '2024-01-01 00:00:00.007'), (4, '2024-01-01 00:00:00.010')) v (id, d)",
+            $"declare @x {boundType} = '{bound}'; select id from t where d {op} @x");
+        Contains("RangeSeek(t)", trace);
+        DoesNotContain("Scan(t)", trace);
+        AreEqual(expected, string.Join(",", rows));
+    }
+
     [TestMethod]
     public void GreaterOrEqual_OnPrimaryKey_RangeSeeks()
     {

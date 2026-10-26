@@ -3382,7 +3382,8 @@ internal abstract class BooleanExpression : ExpressionNode
     internal static bool ComparesAtExactDateTime(SqlType left, SqlType right) =>
         (left, right) is (DateTimeSqlType, DateTime2SqlType or DateTimeOffsetSqlType) or (DateTime2SqlType or DateTimeOffsetSqlType, DateTimeSqlType);
 
-    private static Int128 ThirdTicks(SqlValue value) => value.Type switch
+    /// <summary>The instant <paramref name="value"/> holds, exactly, in thirds of a tick since 0001-01-01: a <c>datetimeoffset</c>'s at UTC.</summary>
+    internal static Int128 ThirdTicks(SqlValue value) => value.Type switch
     {
         DateTimeSqlType => ((Int128)value.AsDateTime.Date.Ticks * 3) + (DateTimeSqlType.UnitsFromTicks(value.AsDateTime.TimeOfDay.Ticks) * 100_000),
         DateTimeOffsetSqlType => (Int128)value.AsDateTimeOffset.UtcTicks * 3,

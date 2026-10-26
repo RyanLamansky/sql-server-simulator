@@ -1276,6 +1276,63 @@ public sealed class CastTests
             {query}
             """));
 
+    /// <summary>
+    /// A range or equality over an indexed column that reads a <c>datetime</c>
+    /// at its exact value seeks on the column's own values — the nearest one
+    /// each operator keeps — rather than on the bound converted, so every
+    /// operator keeps real's rows; a <c>datetimeoffset</c> compares at UTC
+    /// (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("td", "d > @lo", "2,3,4,5")]
+    [DataRow("td", "d >= @lo", "2,3,4,5")]
+    [DataRow("td", "d > @hi", "3,4,5")]
+    [DataRow("td", "d >= @hi", "3,4,5")]
+    [DataRow("td", "d < @lo", "1")]
+    [DataRow("td", "d <= @lo", "1")]
+    [DataRow("td", "d < @hi", "1,2")]
+    [DataRow("td", "d <= @hi", "1,2")]
+    [DataRow("td", "d = @lo", "")]
+    [DataRow("td", "d = @ex", "4")]
+    [DataRow("td", "d >= @ex", "4,5")]
+    [DataRow("td", "d > @ex", "5")]
+    [DataRow("td", "d between @hi and @ex", "3,4")]
+    [DataRow("t2", "d > @a", "2,3,4,5")]
+    [DataRow("t2", "d >= @a", "2,3,4,5")]
+    [DataRow("t2", "d < @a", "1")]
+    [DataRow("t2", "d <= @a", "1")]
+    [DataRow("t2", "d = @a", "")]
+    [DataRow("t2", "d > @b", "4,5")]
+    [DataRow("t2", "d <= @b", "1,2,3")]
+    [DataRow("t2", "d = @c", "5")]
+    [DataRow("t2", "d >= @c", "5")]
+    [DataRow("t2", "d between @a and @b", "2,3")]
+    [DataRow("t3", "d > @a", "2,3,4")]
+    [DataRow("t3", "d >= @a", "2,3,4")]
+    [DataRow("t3", "d < @a", "1")]
+    [DataRow("t3", "d <= @a", "1")]
+    [DataRow("t3", "d = @a", "")]
+    [DataRow("t3", "d = @c", "4")]
+    [DataRow("tz", "d > @a", "2,3,4")]
+    [DataRow("tz", "d >= @a", "2,3,4")]
+    [DataRow("tz", "d <= @a", "1")]
+    [DataRow("tz", "d = @c", "3,4")]
+    [DataRow("tz", "d < @c", "1,2")]
+    public void DateTimeAgainstDateTime2_IndexedBoundsKeepRealsRows(string table, string predicate, string expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($"""
+            create table td (id int primary key, d datetime index ix_d);
+            insert td values (1, '2024-01-01 00:00:00.000'), (2, '2024-01-01 00:00:00.003'), (3, '2024-01-01 00:00:00.007'), (4, '2024-01-01 00:00:00.010'), (5, '2024-01-02');
+            create table t2 (id int primary key, d datetime2(7) index ix_d);
+            insert t2 values (1, '2024-01-01 00:00:00.0033333'), (2, '2024-01-01 00:00:00.0033334'), (3, '2024-01-01 00:00:00.0066666'), (4, '2024-01-01 00:00:00.0066667'), (5, '2024-01-01 00:00:00.0100000');
+            create table t3 (id int primary key, d datetime2(3) index ix_d);
+            insert t3 values (1, '2024-01-01 00:00:00.003'), (2, '2024-01-01 00:00:00.004'), (3, '2024-01-01 00:00:00.007'), (4, '2024-01-01 00:00:00.010');
+            create table tz (id int primary key, d datetimeoffset(7) index ix_d);
+            insert tz values (1, '2024-01-01 00:00:00.0033333 +00:00'), (2, '2024-01-01 05:00:00.0033334 +05:00'), (3, '2024-01-01 00:00:00.0100000 +00:00'), (4, '2023-12-31 19:00:00.0100000 -05:00');
+            declare @lo datetime2(7) = '2024-01-01 00:00:00.0033333', @hi datetime2(7) = '2024-01-01 00:00:00.0033334', @ex datetime2(7) = '2024-01-01 00:00:00.0100000';
+            declare @a datetime = '2024-01-01 00:00:00.003', @b datetime = '2024-01-01 00:00:00.007', @c datetime = '2024-01-01 00:00:00.010';
+            select isnull(string_agg(id, ',') within group (order by id), '') from {table} where {predicate}
+            """));
+
     /// <summary>A CONVERT style the conversion can't take names the target's own family.</summary>
     [TestMethod]
     [DataRow("select convert(nvarchar(30), cast('2024-03-05' as date), 8)", 8114, "Error converting data type date to nvarchar.")]

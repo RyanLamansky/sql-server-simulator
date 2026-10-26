@@ -233,7 +233,8 @@ The sorted view is built on the first range seek for that column and thereafter 
 Measured: 2000 selective `BETWEEN` (11-row) point-ranges over a 100 000-row table dropped from ~12.0 ms/query (full scan) to ~0.07 ms/query (~180×).
 
 Bounds promote against the column type the same way equality probes do (upward, so an out-of-domain bound like `int_col < 9999999999` is exact, not truncated); a NULL bound makes every comparison UNKNOWN, so the range matches nothing — a valid empty seek, not a scan.
-A promotion / collation-conflict failure declines to the scan, and so does a `datetime` bound on a `datetime2` or `datetimeoffset` column or the reverse: the comparison reads the `datetime` at its exact 1/300-second value, which the converted bound rounds, so `d < @datetime` would lose the `datetime2` row the value rounds onto, a row real returns (probed 2026-10-26 against SQL Server 2025).
+A promotion / collation-conflict failure declines to the scan.
+A `datetime` bound on a `datetime2` or `datetimeoffset` column, or the reverse, compares at the `datetime`'s exact 1/300-second value, which the bound converted to the column's type would round, so `d < @datetime` would lose the `datetime2` row the value rounds onto, a row real returns (probed 2026-10-26 against SQL Server 2025); the seek instead takes the column value nearest the bound that the operator keeps — the first at or above it for `>=` and the strict `<`, the last at or below it for `<=` and the strict `>` — which reads exactly the rows the comparison keeps, and an equality no column value meets exactly seeks to nothing (`ExactDateTimeBound`, the ordered scan's bounds alike).
 This leading-column form is the no-equality fallback; an equality-prefix continued by a range takes the extended equality seek instead (next section).
 A range on a column that is neither a leading key column nor the continuation column stays residual.
 

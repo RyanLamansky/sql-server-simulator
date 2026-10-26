@@ -1411,7 +1411,7 @@ internal sealed partial class Selection
         SqlType? unified = null;
         if (bound.Lower is { } lowerExpr)
         {
-            switch (EvaluateBound(lowerExpr, columnType, batch, outerResolver, out lowerValue, out var lowerCommon))
+            switch (EvaluateBound(lowerExpr, columnType, batch, outerResolver, out lowerValue, out var lowerCommon, LowerRounding(bound.LowerInclusive)))
             {
                 case BoundEval.Decline: return BoundEval.Decline;
                 case BoundEval.Null: return BoundEval.Null;
@@ -1420,7 +1420,7 @@ internal sealed partial class Selection
         }
         if (bound.Upper is { } upperExpr)
         {
-            switch (EvaluateBound(upperExpr, columnType, batch, outerResolver, out upperValue, out var upperCommon))
+            switch (EvaluateBound(upperExpr, columnType, batch, outerResolver, out upperValue, out var upperCommon, UpperRounding(bound.UpperInclusive)))
             {
                 case BoundEval.Decline: return BoundEval.Decline;
                 case BoundEval.Null: return BoundEval.Null;
@@ -1603,14 +1603,33 @@ internal sealed partial class Selection
         Value,
     }
 
+    /// <summary>
+    /// Where a bound the comparison reads at a <c>datetime</c>'s exact value
+    /// lands among the column's own values (<see cref="ExactDateTimeBound"/>):
+    /// an equality's on the one value equal to it, a range bound's on the
+    /// nearest value its comparison keeps; a site with neither declines.
+    /// </summary>
+    private enum ExactRounding
+    {
+        Decline,
+        Equal,
+        Down,
+        Up,
+    }
+
+    private static ExactRounding LowerRounding(bool inclusive) => inclusive ? ExactRounding.Up : ExactRounding.Down;
+
+    private static ExactRounding UpperRounding(bool inclusive) => inclusive ? ExactRounding.Down : ExactRounding.Up;
+
     // Evaluates a bound expression and promotes it against the column type.
     // Decline → fall back to the scan (collation / promotion failure, a
     // SimulatedSqlException while evaluating, or a datetime the comparison
-    // reads at its exact value, which the coerced bound rounds). Null → the
+    // reads at its exact value where `rounding` places no bound). Null → the
     // bound is NULL, so the range matches nothing. Value → `value` (coerced to
     // `common`) is usable.
     private static BoundEval EvaluateBound(
-        Expression expr, SqlType columnType, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, out SqlValue value, out SqlType common)
+        Expression expr, SqlType columnType, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, out SqlValue value, out SqlType common,
+        ExactRounding rounding = ExactRounding.Decline)
     {
         value = default;
         common = columnType;
@@ -1629,10 +1648,12 @@ internal sealed partial class Selection
         if (evaluated.IsNull)
             return BoundEval.Null;
 
-        if ((columnType.Category == SqlTypeCategory.String
-                && evaluated.Type.Category == SqlTypeCategory.String
-                && Collation.Resolve(columnType, evaluated.Type) is null)
-            || BooleanExpression.ComparesAtExactDateTime(columnType, evaluated.Type))
+        if (BooleanExpression.ComparesAtExactDateTime(columnType, evaluated.Type))
+            return rounding == ExactRounding.Decline ? BoundEval.Decline : ExactDateTimeBound(evaluated, columnType, rounding, out value);
+
+        if (columnType.Category == SqlTypeCategory.String
+            && evaluated.Type.Category == SqlTypeCategory.String
+            && Collation.Resolve(columnType, evaluated.Type) is null)
         {
             return BoundEval.Decline;
         }
@@ -1647,6 +1668,55 @@ internal sealed partial class Selection
             return BoundEval.Decline;
         }
 
+        return BoundEval.Value;
+    }
+
+    /// <summary>
+    /// A bound read at a <c>datetime</c>'s exact value
+    /// (<see cref="BooleanExpression.ComparesAtExactDateTime"/>), placed on the
+    /// column's own values in its own type: <c>col &gt;= X</c> holds exactly
+    /// where <c>col</c> reaches the first column value at or above <c>X</c>,
+    /// <c>col &gt; X</c> where it passes the last at or below it, and the upper
+    /// bounds alike, so the seek reads exactly the rows the comparison keeps,
+    /// and an equality with no column value at <c>X</c> keeps none. A bound
+    /// past the column type's range declines.
+    /// </summary>
+    private static BoundEval ExactDateTimeBound(SqlValue bound, SqlType columnType, ExactRounding rounding, out SqlValue value)
+    {
+        value = default;
+        // Thirds of a tick, which divide a datetime's 1/300 second and every
+        // datetime2 / datetimeoffset precision alike; a day is a whole number
+        // of either.
+        var instant = BooleanExpression.ThirdTicks(bound);
+        Int128 step = columnType switch
+        {
+            DateTimeSqlType => 100_000,
+            DateTime2SqlType dateTime2 => dateTime2.ticksPerUnit * 3,
+            _ => ((DateTimeOffsetSqlType)columnType).ticksPerUnit * 3,
+        };
+        var below = instant - (instant % step);
+        Int128 onColumn;
+        if (below == instant)
+            onColumn = instant;
+        else if (rounding == ExactRounding.Equal)
+            return BoundEval.Null;
+        else
+            onColumn = rounding == ExactRounding.Down ? below : below + step;
+        if (columnType is DateTimeSqlType)
+        {
+            var perDay = (Int128)TimeSpan.TicksPerDay * 3;
+            var dayCount = (long)(onColumn / perDay) - (DateTimeSqlType.BaseDate.Ticks / TimeSpan.TicksPerDay);
+            if (dayCount is < DateTimeSqlType.MinDayCount or > DateTimeSqlType.MaxDayCount)
+                return BoundEval.Decline;
+            value = SqlValue.FromDateTime(DateTimeSqlType.FromParts((int)dayCount, (long)(onColumn % perDay / 100_000)));
+            return BoundEval.Value;
+        }
+        if (onColumn / 3 > DateTime.MaxValue.Ticks)
+            return BoundEval.Decline;
+        var ticks = (long)(onColumn / 3);
+        value = columnType is DateTime2SqlType
+            ? SqlValue.FromDateTime2(columnType, new DateTime(ticks))
+            : SqlValue.FromDateTimeOffset(columnType, new DateTimeOffset(ticks, TimeSpan.Zero));
         return BoundEval.Value;
     }
 
@@ -1900,7 +1970,7 @@ internal sealed partial class Selection
         for (var i = 0; i < pinnedLength; i++)
         {
             var ord = fullPrefix[i];
-            switch (EvaluateBound(pins[ord], source.StoredSchema[ord].Type, batch, outerResolver, out var pinnedValue, out var pinnedCommon))
+            switch (EvaluateBound(pins[ord], source.StoredSchema[ord].Type, batch, outerResolver, out var pinnedValue, out var pinnedCommon, ExactRounding.Equal))
             {
                 case BoundEval.Decline: return false;
                 case BoundEval.Null: orderedSources = SeekedSource(source, [], seekOrdinals); return true;
@@ -1916,7 +1986,7 @@ internal sealed partial class Selection
         SqlValue lowerValue = default, upperValue = default;
         if (orderColumnBounds.Lower is { } lowerExpr)
         {
-            switch (EvaluateBound(lowerExpr, orderColumnType, batch, outerResolver, out lowerValue, out var lowerCommon))
+            switch (EvaluateBound(lowerExpr, orderColumnType, batch, outerResolver, out lowerValue, out var lowerCommon, LowerRounding(orderColumnBounds.LowerInclusive)))
             {
                 case BoundEval.Decline: return false;
                 case BoundEval.Null: orderedSources = SeekedSource(source, [], seekOrdinals); return true;
@@ -1925,7 +1995,7 @@ internal sealed partial class Selection
         }
         if (orderColumnBounds.Upper is { } upperExpr)
         {
-            switch (EvaluateBound(upperExpr, commons[pinnedLength], batch, outerResolver, out upperValue, out var upperCommon))
+            switch (EvaluateBound(upperExpr, commons[pinnedLength], batch, outerResolver, out upperValue, out var upperCommon, UpperRounding(orderColumnBounds.UpperInclusive)))
             {
                 case BoundEval.Decline: return false;
                 case BoundEval.Null: orderedSources = SeekedSource(source, [], seekOrdinals); return true;
