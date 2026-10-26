@@ -3392,9 +3392,10 @@ public sealed partial class Simulation
             // subquery's second select item (Msg 116), a derived table's
             // repeated column name (Msg 8156), a window's constant key and
             // invalid frame (Msg 4193, 4194, 4195, 5308, 5309), STRING_AGG's
-            // separator (Msg 8733) and an identity value without a column list
-            // (Msg 8101) (probed 2026-10-26 against SQL Server 2025).
-            || ex.Number is 116 or 257 or 305 or 402 or 421 or 468 or 4193 or 4194 or 4195 or 5308 or 5309 or 8101 or 8116 or 8156 or 8733);
+            // separator (Msg 8733), an identity value without a column list
+            // (Msg 8101) and a MERGE action its clause can't take (Msg 10710,
+            // 10711, 10714) (probed 2026-10-26 against SQL Server 2025).
+            || ex.Number is 116 or 257 or 305 or 402 or 421 or 468 or 4193 or 4194 or 4195 or 5308 or 5309 or 8101 or 8116 or 8156 or 8733 or 10710 or 10711 or 10714);
 
     /// <summary>
     /// Whether a TRY frame catches <paramref name="ex"/> where it is raised:

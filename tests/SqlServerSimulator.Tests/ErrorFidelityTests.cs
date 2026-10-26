@@ -127,6 +127,9 @@ public sealed class ErrorFidelityTests
     [DataRow("select ntile(a) over (order by a) from t2", 4195)]
     [DataRow("select string_agg(ci, ci) from t2", 8733)]
     [DataRow("create table t3 (id int identity, a int); insert t3 values (1, 1)", 8101)]
+    [DataRow("merge t2 t using (select 1 a) s on t.a = s.a when not matched then delete;", 10710)]
+    [DataRow("merge t2 t using (select 1 a) s on t.a = s.a when not matched by source then insert (a) values (1);", 10711)]
+    [DataRow("merge t2 t using (select 1 a) s on t.a = s.a when matched then delete when matched and s.a = 2 then delete;", 10714)]
     public void DeferredCompileError_EndsTheBatchPastItsOwnTry(string statement, int number)
     {
         var simulation = new Simulation();
