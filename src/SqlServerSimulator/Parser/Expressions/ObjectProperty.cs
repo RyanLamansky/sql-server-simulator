@@ -261,16 +261,6 @@ internal sealed class ObjectProperty : Expression
     }
 
     /// <summary>
-    /// Resolves a constraint's object id through <see cref="ConstraintLookup"/>
-    /// — the ids <c>sys.objects</c> projects as its <c>C</c> / <c>D</c> /
-    /// <c>PK</c> / <c>UQ</c> / <c>F</c> rows, none of which is a
-    /// <see cref="SchemaObject"/> so <see cref="FindObject(Database, int)"/>
-    /// can't reach them.
-    /// </summary>
-    internal static bool TryFindConstraint(Database database, int id, out ConstraintLookup.ConstraintReference constraint) =>
-        ConstraintLookup.TryResolveById(database, id, out constraint);
-
-    /// <summary>
     /// OBJECTPROPERTY's answers for a constraint object id (probed 2026-09-26
     /// against SQL Server 2025): every object-kind discriminator answers 0 but
     /// the constraint's own kind and <c>IsConstraint</c>, the <c>Cnst*</c>

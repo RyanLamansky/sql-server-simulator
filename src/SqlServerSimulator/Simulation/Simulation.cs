@@ -5789,11 +5789,16 @@ public sealed partial class Simulation
             ? statementVersionEntries
             : context.Connection.TriggerStatementVersionEntries;
         var scope = new MutationScope(context, tx, log, marker, tableVarLog, versionEntriesMarker, statementVersionEntries);
+        var settled = false;
         try
         {
             var outcome = RunMutationBodyUntilSettled();
             if (outcome is SimulatedSqlResultSet { WritesAsItSends: true } writing)
-                return SendAsWritten(context.Batch, writing, scope);
+            {
+                var sent = SendAsWritten(context.Batch, writing, scope);
+                settled = true;
+                return sent;
+            }
             // OUTPUT rows past what real gets ahead of its client go out as the
             // client reads them, the statement — its atomicity, its locks —
             // ending only after its last (see ResultStream).
@@ -5803,18 +5808,21 @@ public sealed partial class Simulation
                 stream.AffectedRows = output.RecordsAffected;
                 stream.PendingWrite = new PendingStatementWrite(scope.Complete, scope.Rewind);
                 context.Batch.CurrentStatement.StreamingResult = stream;
+                settled = true;
                 return outcome;
             }
             scope.Complete();
+            settled = true;
             return outcome;
-        }
-        catch
-        {
-            scope.Rewind();
-            throw;
         }
         finally
         {
+            // An error rewinds the statement here rather than in a catch that
+            // rethrows it: a rethrow dispatches the exception a second time,
+            // which a write to a table its batch creates pays on every compile
+            // (its deferral is a Msg 208 thrown through here).
+            if (!settled)
+                scope.Rewind();
             context.Batch.CurrentUndoLog = savedLog;
             context.Batch.CurrentTableVarUndoLog = savedTableVarLog;
             context.Batch.CurrentStatementVersionEntries = savedStatementVersionEntries;

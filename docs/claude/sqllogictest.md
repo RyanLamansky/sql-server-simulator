@@ -107,6 +107,8 @@ What carries over from them:
 - **An existing test is not evidence of real's behavior.**
   EF Core's suite corrected two of this repo's tests that had pinned unprobed behavior (a table after `APPLY` refused, `ALTER COLUMN` keeping a declared collation); hand-written tests had agreed with the simulator there.
 - **Two runs sharing one database or one endpoint wedge each other on locks**, which reads exactly like a simulator blocking bug — run the two sides one at a time.
+- **A missing later result doesn't show the batch stopped.**
+  A client that throws on the first error stops reading the batch's later results — SqlClient's reader and the in-process one alike — so whether a batch went on past an error needs a side effect that outlives it, such as a row written to a permanent table and read back by the next batch — read off the result stream alone, a deferred compile error, which ends the batch, and a procedure argument's Msg 206, which doesn't, look the same.
 
 Standing results, each the last full run:
 
