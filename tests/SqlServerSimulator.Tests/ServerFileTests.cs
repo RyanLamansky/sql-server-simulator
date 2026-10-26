@@ -144,16 +144,18 @@ public sealed class ServerFileTests
     [TestMethod]
     public void FileProcedures_ShortOfSysadmin()
     {
-        var simulation = new Simulation();
+        var opened = 0;
+        var simulation = new Simulation { OpenBackupFile = (_, _) => { opened++; return null; } };
         _ = simulation.ExecuteNonQuery("create login low with password = 'Zq!8vWm#2pLr', check_policy = off");
         using var connection = simulation.CreateOpenConnection();
         _ = connection.CreateCommand("use master; execute as login = 'low'").ExecuteNonQuery();
         var denied = Throws<SimulatedSqlException>(() => connection.CreateCommand("exec master.dbo.xp_create_subdir N'/var/opt/mssql/data/x'").ExecuteNonQuery());
         AreEqual((229, "The EXECUTE permission was denied on the object 'xp_create_subdir', database 'mssqlsystemresource', schema 'sys'."), (denied.Number, denied.Errors[0].Message));
         AreEqual("0|0|0", Row(connection, "exec xp_fileexist N'/var/opt/mssql/data'"));
-        AreEqual("0|1|1", Row(connection, "select * from sys.dm_os_file_exists(N'/var/opt/mssql/data')"));
+        AreEqual("0|0|0", Row(connection, "select * from sys.dm_os_file_exists(N'/var/opt/mssql/data')"));
         using var reader = connection.CreateCommand("exec xp_dirtree N'/var/opt/mssql/data', 1").ExecuteReader();
         IsFalse(reader.Read());
+        AreEqual(0, opened);
     }
 
     private static string Dirtree(string arguments) => $"""

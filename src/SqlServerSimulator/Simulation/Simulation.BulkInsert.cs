@@ -123,10 +123,12 @@ partial class Simulation
             // A partitioned view, or a view over one, takes no bulk load once
             // its members qualify (Msg 4437), which real settles as it compiles
             // the statement, a file it can't read deferring that (probed
-            // 2026-10-01 against SQL Server 2025).
+            // 2026-10-01 against SQL Server 2025). A login that may reach no
+            // file defers it too, its file unopened: the simulator's own rule.
             if (view.PartitionedBase is { } partitioned)
             {
-                if (batch.Connection.Simulation.ReadBulkFile(path) is null)
+                if (!batch.Connection.Simulation.SessionHoldsServerPermission(batch.Connection, Permission.ControlServer)
+                    || batch.Connection.Simulation.ReadBulkFile(path) is null)
                 {
                     if (batch.IsSkipping)
                         yield break;

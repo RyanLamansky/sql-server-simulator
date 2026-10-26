@@ -419,6 +419,21 @@ public sealed class BackupRestoreTests
     }
 
     [TestMethod]
+    [DataRow("restore headeronly from disk = N'd.bak'", "RESTORE HEADERONLY")]
+    [DataRow("restore filelistonly from disk = N'd.bak'", "RESTORE FILELIST")]
+    [DataRow("restore labelonly from disk = N'd.bak'", "RESTORE LABELONLY")]
+    [DataRow("restore verifyonly from disk = N'd.bak'", "VERIFY DATABASE")]
+    public void ReadingADevice_ByALoginWithoutCreateDatabase_IsMsg262_WithTheDeviceUnopened(string sql, string verb)
+    {
+        var opened = 0;
+        var simulation = new Simulation { OpenBackupFile = (_, _) => { opened++; return null; } };
+        _ = simulation.ExecuteNonQuery("create login l with password = 'Xx!12345678'; create user l for login l");
+        var refusal = simulation.AssertSqlError($"execute as login = 'l'; {sql}", 262);
+        AreEqual(("CREATE DATABASE permission denied in database 'master'.", $"{verb} is terminating abnormally."), (refusal.Errors[0].Message, refusal.Errors[1].Message));
+        AreEqual(0, opened);
+    }
+
+    [TestMethod]
     public void SingleUser_WithRollbackImmediate_EndsTheOtherSessionsUsingTheDatabase()
     {
         var simulation = WithDatabase();

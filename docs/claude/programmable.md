@@ -701,6 +701,7 @@ The walk runs the level's body once per member with `BatchContext.PartitionedMem
 Naming the partitioned view itself while the cursor reads it — directly, through a view, a derived table or a join, opened or not — ends the session on real (Msg 596 then the severity-20 Msg 0, its transaction rolled back, probed 2026-10-01 against SQL Server 2025), and here too (`Cursor.PartitionedViewsRead`).
 
 **`BULK INSERT`** into a partitioned view or a view over one is Msg 4437 state 4 naming the partitioned view, once its members qualify; real settles it while the batch compiles when the file can be read, so an untaken branch holding it ends the batch, and a missing file is Msg 4860 first (probed 2026-10-01).
+A login without `CONTROL SERVER` meets the load's run-time refusals instead, its file unopened — a rule of the simulator's own.
 Into a union that is no partitioned view the load meets the refusal an `INSERT` naming every column does — Msg 4406, naming the view as written.
 
 Real's session-ending answer sends nothing ahead of its Msg 596, so the DONE of the statement before it, which real holds until the next token, goes down unsent — the row count a client was owed included (probed 2026-10-06 against SQL Server 2025); the TDS endpoint takes that DONE back (`TdsSession.TakeBackDoneAheadOfKill`).

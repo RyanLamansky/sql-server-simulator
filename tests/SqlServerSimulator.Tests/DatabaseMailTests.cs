@@ -372,7 +372,8 @@ public sealed class DatabaseMailTests
     [TestMethod]
     public void DatabaseMailUserRole_SendsThroughPublicProfiles_AndSeesOnlyItsOwnItems()
     {
-        var simulation = Mail(path => new MemoryStream([1]));
+        var opened = 0;
+        var simulation = Mail(_ => { opened++; return new MemoryStream([1]); });
         _ = simulation.ExecuteNonQuery("""
             create login l with password = 'Pa55word!x';
             create login m with password = 'Pa55word!x';
@@ -389,6 +390,7 @@ public sealed class DatabaseMailTests
         AreEqual(141, ex.Errors[0].LineNumber);
         simulation.AssertSqlError("use msdb; execute as login = 'l'; exec msdb.dbo.sp_send_dbmail @recipients = 'x', @subject = N's', @file_attachments = N'/f.txt'", 22051,
             "The client connection security context could not be impersonated. Attaching files require an integrated client login");
+        AreEqual(0, opened);
         AreEqual("2:l|2|STARTED", simulation.ExecuteScalar("""
             use msdb;
             execute as login = 'l';

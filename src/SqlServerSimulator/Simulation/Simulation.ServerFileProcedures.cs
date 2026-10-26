@@ -16,13 +16,18 @@ partial class Simulation
     /// <c>sys.dm_os_file_exists(path)</c>'s one row: whether the path is a
     /// file, whether it is a directory, and whether the directory above it
     /// is; a relative path is none of the three, and a NULL or empty one
-    /// Msg 2561 state 102.
+    /// Msg 2561 state 102. A caller short of <c>sysadmin</c> sees no path at
+    /// all, as through <c>xp_fileexist</c> — a rule of the simulator's own,
+    /// since what real asks here is unprobed and the stricter rule stands.
     /// </summary>
     internal static List<SqlValue[]> FileExistsRows(BatchContext batch, SqlValue path)
     {
         if (path.IsNull || path.CoerceTo(SqlType.NVarchar).AsString.Length == 0)
             throw SimulatedSqlException.ParameterIncorrectForStatement(0, state: 102);
-        var (file, directory, parent) = batch.Connection.Simulation.PathKind(path.CoerceTo(SqlType.NVarchar).AsString);
+        var simulation = batch.Connection.Simulation;
+        var (file, directory, parent) = simulation.SessionHoldsServerPermission(batch.Connection, Permission.ControlServer)
+            ? simulation.PathKind(path.CoerceTo(SqlType.NVarchar).AsString)
+            : (false, false, false);
         return [[SqlValue.FromByte(file ? (byte)1 : (byte)0), SqlValue.FromByte(directory ? (byte)1 : (byte)0), SqlValue.FromByte(parent ? (byte)1 : (byte)0)]];
     }
 

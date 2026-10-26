@@ -120,14 +120,17 @@ partial class Simulation
         if (call.Text(9) is { Length: > 0 } files)
         {
             var prohibited = (this.MailSetting(batch, "ProhibitedExtensions") ?? "").Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            // A caller outside sysadmin is refused before any file is opened,
+            // whether or not it exists: the simulator's own rule.
+            var sysadmin = AgentIsSysadmin(batch);
             foreach (var path in files.Split(';', StringSplitOptions.RemoveEmptyEntries))
             {
                 var extension = Path.GetExtension(path).TrimStart('.');
                 if (Array.Exists(prohibited, entry => string.Equals(entry, extension, StringComparison.OrdinalIgnoreCase)))
                     throw MailRefusal(SimulatedSqlException.MailExtensionProhibited(path), 62, 1, "sp_GetAttachmentData");
-                var content = this.ReadBulkFile(path);
-                var refusal = content is null ? SimulatedSqlException.MailAttachmentInvalid(path)
-                    : !AgentIsSysadmin(batch) ? SimulatedSqlException.MailAttachmentNeedsIntegratedLogin()
+                var content = sysadmin ? this.ReadBulkFile(path) : null;
+                var refusal = !sysadmin ? SimulatedSqlException.MailAttachmentNeedsIntegratedLogin()
+                    : content is null ? SimulatedSqlException.MailAttachmentInvalid(path)
                     : content.Length > maxFileSize ? SimulatedSqlException.MailAttachmentTooLarge(maxFileSize)
                     : null;
                 if (refusal is not null)

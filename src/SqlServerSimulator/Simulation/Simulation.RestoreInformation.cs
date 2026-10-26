@@ -21,7 +21,10 @@ partial class Simulation
     /// <c>RESTORE DATABASE</c> raises, Msg 3013 naming the statement (<c>VERIFY
     /// DATABASE</c>, <c>RESTORE HEADERONLY</c>, <c>RESTORE FILELIST</c>,
     /// <c>RESTORE LABELONLY</c>), and <c>FILE = n</c> past the last set Msg
-    /// 4038. Only <c>VERIFYONLY</c> refuses a transaction (Msg 3021).
+    /// 4038. Only <c>VERIFYONLY</c> refuses a transaction (Msg 3021). Before
+    /// a device is opened the login needs the authority a restore creating a
+    /// database needs (Msg 262 naming <c>master</c>), a rule of the
+    /// simulator's own: real's gate is unprobed, so the stricter one stands.
     /// </remarks>
     private bool TryParseRestoreInformation(ParserContext context, BatchContext batch, out List<SimulatedStatementOutcome> outcomes)
     {
@@ -52,6 +55,8 @@ partial class Simulation
             return true;
         if (form == "VERIFYONLY" && batch.Connection.CurrentTransaction is not null)
             throw SimulatedSqlException.BackupInTransaction(verb);
+        if (!PermissionEnforcement.HasDatabaseDdlAuthority(batch, Permission.CreateAnyDatabase))
+            throw SimulatedSqlException.BackupPermissionDenied("CREATE DATABASE", MasterDatabaseName, verb);
         var device = SingleDevice(devices, verb);
         var media = this.ReadMediaForRestore(batch, device, verb, options.MediaName);
         switch (form)

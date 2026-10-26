@@ -395,6 +395,21 @@ public sealed class PartitionedViewTests
         AreEqual(0, simulation.ExecuteScalar("select count(*) from pv"));
     }
 
+    /// <summary>A login that may reach no file meets the load's own refusals, its file never opened.</summary>
+    [TestMethod]
+    public void BulkInsert_ByALoginThatMayReachNoFile_OpensNone()
+    {
+        var opened = 0;
+        var simulation = new Simulation { OpenBulkFile = _ => { opened++; return new MemoryStream("1,1\n"u8.ToArray()); } };
+        simulation.ExecuteBatches(
+            "create table m1 (k int not null check (k < 10), v int, primary key (k)); create table m2 (k int not null check (k >= 10), v int, primary key (k)); create login l with password = 'Xx!12345678'; create user l for login l",
+            "create view pv as select k, v from m1 union all select k, v from m2");
+        using var connection = simulation.CreateOpenConnection();
+        _ = connection.CreateCommand("execute as login = 'l'").ExecuteNonQuery();
+        AreEqual(4834, Throws<SimulatedSqlException>(() => connection.CreateCommand("bulk insert pv from '/rows.csv'").ExecuteNonQuery()).Number);
+        AreEqual(0, opened);
+    }
+
     /// <summary>
     /// Each member's CHECK constraints over the partitioning column count one
     /// at a time: a member qualifies when one of them keeps it apart from the

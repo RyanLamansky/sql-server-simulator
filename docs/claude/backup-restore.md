@@ -27,7 +27,7 @@ A `MEDIANAME` is held against the media's own name without regard to case — by
 
 The simulator models the disk of SQL Server 2025 on Linux as the surfaces that ask about paths see it (probed 2026-10-16): a path is read case aside, `C:\` as the root, `.` and `..` settled and repeated `/` collapsed, and a relative path names nothing.
 Its directories are the root, `/tmp` and `/var/opt/mssql` with its `data` and `log`, those `xp_create_subdir` creates and those a backup creates above its device; its files are every database's, the error log and its archives, and the backup devices, with `OpenBackupFile` set the paths the host opens for reading.
-`sys.dm_os_file_exists`, `xp_fileexist` (a row, or with an output argument the file flag alone), `xp_dirtree` (depth first, to a depth, files on request), `xp_create_subdir` and `xp_delete_file` read and change it; the last two are `sysadmin`'s alone (Msg 229), the first open to any login, and the other two answer a caller short of `sysadmin` as though nothing existed.
+`sys.dm_os_file_exists`, `xp_fileexist` (a row, or with an output argument the file flag alone), `xp_dirtree` (depth first, to a depth, files on request), `xp_create_subdir` and `xp_delete_file` read and change it; the last two are `sysadmin`'s alone (Msg 229), and the first three answer a caller short of `sysadmin` as though nothing existed — for `sys.dm_os_file_exists` a rule of the simulator's own, as real's is unprobed.
 A refusal of `xp_create_subdir` (Msg 22048) or `xp_delete_file` (Msg 22049) is an error the batch runs past, neither entering a `CATCH` nor setting `@@ERROR`, the procedure answering 1: severity 15 for an argument it can't read, 16 naming the operating system's error for a path it can't use.
 `xp_delete_file 0, folder, extension, date[, subfolders]` deletes the backup files whose last set finished before the date, in the folder and with `subfolders` the folders directly inside it; `xp_delete_file 0, file` deletes one.
 
@@ -77,6 +77,7 @@ A committed transaction `BEGIN TRAN name WITH MARK ['description']` began writes
 
 `RESTORE VERIFYONLY` (Msg 3262 for the set it reads, `FILE = 1` unless named), `HEADERONLY` (every set, or the one `FILE` names), `FILELISTONLY` and `LABELONLY` return real's columns and types (probed 2026-10-16 against SQL Server 2025).
 An option that would change a database is Msg 3032 state 2 with no Msg 3013 after it, `STATS` one for all but `VERIFYONLY`; a missing set is Msg 4038, and only `VERIFYONLY` refuses a transaction.
+Each needs the authority a restore creating a database needs before it opens a device — Msg 262 naming `master`, then Msg 3013 — a rule of the simulator's own, as real's is unprobed.
 
 ## What a backup carries
 
@@ -189,7 +190,7 @@ Real's `DatabaseBackup` checks that the root `@Directory` exists and relies on `
 ## Not modeled yet
 
 - File and filegroup backups.
-- `REWINDONLY`, `PARTIAL` and piecemeal restores, `STOPATMARK = 'lsn:…'`, and `VERIFYONLY`'s permission check.
+- `REWINDONLY`, `PARTIAL` and piecemeal restores, and `STOPATMARK = 'lsn:…'`.
 - A stop inside a log set with a definition change on both sides of it, or inside a span its database's log stopped recording; both raise `NotSupportedException`.
 - `RESTORE … WITH RECOVERY` alone combined with `NORECOVERY`, `STANDBY` or a stop point, and `RESTORE LOG` of a full or differential set its LSNs don't refuse.
 - Striped media (more than one device), `TAPE` and `URL` devices written as such (a registered tape device is refused as real's Linux server refuses it), `MIRROR TO`, encryption, `BACKUP`'s `EXPIREDATE` / `RETAINDAYS` / `FILE_SNAPSHOT` / `RESTART`, `BACKUP LOG … WITH STANDBY`, `METADATA_ONLY`, and `RESTORE`'s `PASSWORD` / `MEDIAPASSWORD` / `RESTART` / `FILESTREAM`.
