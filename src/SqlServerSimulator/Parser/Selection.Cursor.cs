@@ -814,25 +814,157 @@ internal sealed partial class Selection
         EnumerateCursorRows(plan, batch, outerResolver: null, applyRowLimit);
 
     /// <summary>
-    /// KEYSET member <paramref name="member"/>'s live row read at its own
-    /// address, rather than found in a walk of every live row
-    /// (<see cref="EnumerateForCursor"/>), for a cursor over one table whose
-    /// identity no two live rows share: the row there, passing the cursor's
-    /// WHERE under the member's identity, is the one the walk would match.
-    /// Null when that doesn't settle it — another shape, a row gone from the
-    /// address or no longer the member's, a WHERE it no longer passes, a
-    /// <c>STATISTICS IO</c> report counting the walk's reads — and the caller
-    /// walks.
+    /// KEYSET member <paramref name="member"/>'s row as a fetch reads it: each
+    /// base row by its identity — at its address while the row there is still
+    /// the member's, else wherever a delete and insert of its key put it — and
+    /// the select list over them, the WHERE and ON predicates that chose the
+    /// member left unjudged, save a view body's, which a fetch judges again
+    /// over the view's rows; a side an outer join NULL-extended stays NULL,
+    /// whatever it would join now (probed 2026-10-26 against SQL Server 2025).
+    /// Null when a row is gone — deleted, its key changed, filtered out by
+    /// row-level security, no longer one its view returns.
     /// </summary>
-    internal static CursorRow? TryReadKeysetMember(CursorSourcePlan plan, BatchContext batch, CursorRow member)
+    internal static CursorRow? ReadKeysetMember(CursorSourcePlan plan, BatchContext batch, CursorRow member)
     {
-        if (plan.Slots.Length != 1 || plan.Slots[0].Table is not { } table || member.Rids[0] is null
-            || batch.Connection.StatementIo is not null || !IdentityIsUnique(table, plan.IdentityKeys[0]))
+        if (plan.InstallsRowAddresses)
+            batch.CurrentStatement.RowAddresses ??= new();
+        var row = ReadMemberRow(plan, batch, member, offset: 0, outerResolver: null);
+        // The keyset's work table, which real lists ahead of the tables read.
+        batch.Connection.StatementIo?.UseWorktable();
+        return row;
+    }
+
+    /// <summary>
+    /// <see cref="ReadKeysetMember"/> over <paramref name="plan"/>, whose
+    /// identity entries begin at <paramref name="offset"/> of the member's;
+    /// <paramref name="outerResolver"/> is the enclosing tuple's resolver, as
+    /// <see cref="EnumerateCursorRows"/> takes it.
+    /// </summary>
+    private static CursorRow? ReadMemberRow(CursorSourcePlan plan, BatchContext batch, CursorRow member, int offset, Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        var sources = plan.Sources;
+        var current = new byte[]?[sources.Length];
+        var memo = new SourceColumnMemo();
+        SqlValue resolve(MultiPartName name) => ResolveAcrossTuple(sources, current, name, batch, outerResolver, memo);
+        var width = plan.IdentityTables.Length;
+        var rids = new (int Page, int Slot)?[width];
+        var identityKeys = new SqlValue[]?[width];
+        var uniquifiers = new long[width];
+        for (var i = 0; i < sources.Length; i++)
         {
-            return null;
+            var start = plan.SlotIdentityOffset[i];
+            var span = plan.SlotIdentityWidth[i];
+            if (span > 0 && Array.FindIndex(member.Rids, offset + start, span, static rid => rid is not null) < 0)
+                continue; // NULL-extended, as the member was
+            var slot = plan.Slots[i];
+            if (slot.Table is { } table)
+            {
+                if (ReadMemberBaseRow(table, plan.IdentityKeys[start], member, offset + start, batch) is not var (bytes, address))
+                    return null;
+                current[i] = bytes;
+                rids[start] = address;
+                identityKeys[start] = member.IdentityKeys[offset + start];
+                uniquifiers[start] = member.Uniquifiers[offset + start];
+                continue;
+            }
+            // An APPLY body reads the tuple left of it, as it does in the walk.
+            var bodyResolver = IsApplySlot(plan, i) ? resolve : outerResolver;
+            var body = slot.ThroughView is null
+                ? ReadMemberRow(slot.Nested!, batch, member, offset + start, bodyResolver)
+                : ReadViewMemberRow(slot.Nested!, batch, member, offset + start, bodyResolver);
+            if (body is null)
+                return null;
+            if (body.ProjectionError is { } error)
+                throw error;
+            current[i] = EncodeDeferredRow(sources[i].StoredSchema, body.Values);
+            Array.Copy(body.Rids, 0, rids, start, span);
+            Array.Copy(body.IdentityKeys, 0, identityKeys, start, span);
+            Array.Copy(body.Uniquifiers, 0, uniquifiers, start, span);
         }
-        var rows = EnumerateCursorRows(plan, batch, outerResolver: null, applyRowLimit: false, onlyAddresses: member.Rids);
-        return rows.Count == 1 && CursorIdentityMatches(plan, rows[0], member) ? rows[0] : null;
+        var values = ProjectCursorRow(plan, new RuntimeContext(resolve, batch), out var projectionError);
+        return new CursorRow(values, [], identityKeys, uniquifiers, rids, projectionError);
+    }
+
+    /// <summary>
+    /// <see cref="ReadMemberRow"/> under a view, whose body a fetch judges
+    /// again: the body's row at the member's addresses, joining and passing
+    /// its WHERE, or where a row moved, a NULL-extended side could join now or
+    /// a row limit picks rows from all of them, the walk of the body's rows.
+    /// </summary>
+    private static CursorRow? ReadViewMemberRow(CursorSourcePlan body, BatchContext batch, CursorRow member, int offset, Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        var end = offset + body.IdentityTables.Length;
+        var own = new CursorRow([], [], member.IdentityKeys[offset..end], member.Uniquifiers[offset..end], member.Rids[offset..end]);
+        if (!body.HasRowLimit && Array.TrueForAll(own.Rids, static rid => rid is not null)
+            && EnumerateCursorRows(body, batch, outerResolver, applyRowLimit: true, onlyAddresses: own.Rids) is [var read]
+            && CursorIdentityMatches(body, read, own))
+        {
+            return read;
+        }
+        return EnumerateCursorRows(body, batch, outerResolver, applyRowLimit: true).Find(row => CursorIdentityMatches(body, row, own));
+    }
+
+    /// <summary>
+    /// The live row of <paramref name="table"/> that is the member's at
+    /// identity entry <paramref name="entry"/>, and its address: the row at
+    /// the member's address while it is still the member's, else, for a key
+    /// no address joins, the row a delete and insert of the key put
+    /// elsewhere; null when there is none, or row-level security filters it.
+    /// </summary>
+    private static (byte[] Bytes, (int Page, int Slot) Address)? ReadMemberBaseRow(HeapTable table, CursorIdentityKey identity, CursorRow member, int entry, BatchContext batch)
+    {
+        if (member.Rids[entry] is not { } address)
+            return null;
+        var counts = batch.Connection.StatementIo?.Touch(table);
+        var lastPage = -1;
+        IEnumerable<(int Page, int Slot, byte[] Bytes)> rows;
+        if (table.Heap.ReadLiveRow(address.Page, address.Slot) is { } atAddress && IsMembersRow(table, identity, atAddress, address, member, entry))
+        {
+            rows = [(address.Page, address.Slot, atAddress)];
+        }
+        else
+        {
+            // A uniquified key, and an address, name the address alone.
+            if (identity is not { Ordinals: not null, Uniquified: false })
+                return null;
+            _ = counts?.ScanCount += 1;
+            rows = table.Heap.EnumerateRowsWithAddress();
+        }
+        foreach (var (page, slot, bytes) in RowSecurity.FilterAddressedRows(table, rows, batch))
+        {
+            counts?.Enter(page, ref lastPage);
+            if (!IsMembersRow(table, identity, bytes, (page, slot), member, entry))
+                continue;
+            batch.CurrentStatement.RowAddresses?.Record(bytes, page, slot);
+            return (bytes, (page, slot));
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Whether the row <paramref name="bytes"/> at <paramref name="address"/>
+    /// is the member's at identity entry <paramref name="entry"/>, as
+    /// <see cref="CursorIdentityMatches"/> matches one: by its key, completed
+    /// by its uniquifier and address for a non-unique clustered key, or by
+    /// its address alone.
+    /// </summary>
+    private static bool IsMembersRow(HeapTable table, CursorIdentityKey identity, byte[] bytes, (int Page, int Slot) address, CursorRow member, int entry)
+    {
+        var ordinals = identity.Ordinals;
+        if (ordinals is null || identity.Uniquified)
+        {
+            if (!Nullable.Equals(member.Rids[entry], address)
+                || (identity.Uniquified && table.Heap.UniquifierOf(address) != member.Uniquifiers[entry]))
+            {
+                return false;
+            }
+            if (ordinals is null)
+                return true;
+        }
+        var live = new SqlValue[ordinals.Length];
+        for (var k = 0; k < ordinals.Length; k++)
+            live[k] = RowDecoder.DecodeColumn(table.StoredColumns, bytes, ordinals[k], table.Heap);
+        return CompareKeyTuples(live, member.IdentityKeys[entry]!) == 0;
     }
 
     /// <summary>
@@ -1123,30 +1255,6 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Whether no two live rows of <paramref name="table"/> share an identity
-    /// under <paramref name="identity"/>: an address, a key a uniquifier and
-    /// an address join, or a key an enabled key constraint or unique index
-    /// enforces — a disabled unique index can be a cursor's identity (see
-    /// <see cref="CursorIdentityKey.For"/>) without keeping it unique.
-    /// </summary>
-    private static bool IdentityIsUnique(HeapTable table, CursorIdentityKey identity)
-    {
-        if (identity.Ordinals is not { } ordinals || identity.Uniquified)
-            return true;
-        foreach (var key in table.KeyConstraints)
-        {
-            if (!key.IsDisabled && key.StorageOrdinals.AsSpan().SequenceEqual(ordinals))
-                return true;
-        }
-        foreach (var index in table.Indexes)
-        {
-            if (index.IsUnique && !index.IsDisabled && index.KeyStorageOrdinals.AsSpan().SequenceEqual(ordinals))
-                return true;
-        }
-        return false;
-    }
-
-    /// <summary>
     /// The recursive body of <see cref="EnumerateForCursor"/>. A deferred
     /// slot re-enters here on its own plan, so its rows carry the addresses of
     /// the base tables its body read; <paramref name="outerResolver"/> is the
@@ -1243,26 +1351,7 @@ internal sealed partial class Selection
             if (!keep)
                 continue;
 
-            var values = new SqlValue[plan.Projections.Length];
-            SimulatedSqlException? projectionError = null;
-            for (var i = 0; i < values.Length; i++)
-            {
-                if (projectionError is not null)
-                {
-                    values[i] = SqlValue.Null(SqlType.Int32);
-                    continue;
-                }
-                try
-                {
-                    values[i] = plan.Projections[i].Run(runtime);
-                }
-                catch (SimulatedSqlException error)
-                {
-                    projectionError = error;
-                    values[i] = SqlValue.Null(SqlType.Int32);
-                }
-            }
-
+            var values = ProjectCursorRow(plan, runtime, out var projectionError);
             var orderKey = orderBy.Count == 0
                 ? []
                 : ComputeOrderKeys(orderBy, values, plan.ColumnNames, projectionSources: null, distinct: false, batch, resolve);
@@ -1272,6 +1361,35 @@ internal sealed partial class Selection
 
         rows.Sort((a, b) => CompareCursorRows(plan, a, b));
         return applyRowLimit && plan.RowLimit is { } limit ? ApplyCursorRowLimit(plan, rows, limit, batch) : rows;
+    }
+
+    /// <summary>
+    /// The plan's select list over the tuple <paramref name="runtime"/> reads,
+    /// and the error it raised, if any: the columns from the one that raised
+    /// on read NULL, the error waiting for a fetch to land on the row.
+    /// </summary>
+    private static SqlValue[] ProjectCursorRow(CursorSourcePlan plan, RuntimeContext runtime, out SimulatedSqlException? projectionError)
+    {
+        var values = new SqlValue[plan.Projections.Length];
+        projectionError = null;
+        for (var i = 0; i < values.Length; i++)
+        {
+            if (projectionError is not null)
+            {
+                values[i] = SqlValue.Null(SqlType.Int32);
+                continue;
+            }
+            try
+            {
+                values[i] = plan.Projections[i].Run(runtime);
+            }
+            catch (SimulatedSqlException error)
+            {
+                projectionError = error;
+                values[i] = SqlValue.Null(SqlType.Int32);
+            }
+        }
+        return values;
     }
 
     /// <summary>
@@ -1382,17 +1500,26 @@ internal sealed partial class Selection
         {
             if (row.ProjectionError is { } error)
                 throw error;
-            var values = row.Values;
-            for (var c = 0; c < values.Length; c++)
-            {
-                if (values[c].Type != storedSchema[c].Type)
-                    values[c] = values[c].CoerceTo(storedSchema[c].Type);
-            }
-            scan.Bytes.Add(RowEncoder.EncodeRow(storedSchema, values));
+            scan.Bytes.Add(EncodeDeferredRow(storedSchema, row.Values));
             scan.Rids.AddRange(row.Rids);
             scan.IdentityKeys.AddRange(row.IdentityKeys);
             scan.Uniquifiers.AddRange(row.Uniquifiers);
         }
+    }
+
+    /// <summary>
+    /// A deferred body's projected <paramref name="values"/> encoded as the
+    /// source's declared <paramref name="storedSchema"/> lays a row out, which
+    /// the outer plan's column resolution decodes.
+    /// </summary>
+    private static byte[] EncodeDeferredRow(HeapColumn[] storedSchema, SqlValue[] values)
+    {
+        for (var c = 0; c < values.Length; c++)
+        {
+            if (values[c].Type != storedSchema[c].Type)
+                values[c] = values[c].CoerceTo(storedSchema[c].Type);
+        }
+        return RowEncoder.EncodeRow(storedSchema, values);
     }
 
     /// <summary>

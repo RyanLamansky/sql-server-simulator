@@ -941,12 +941,11 @@ internal sealed class Cursor(
 
         var member = this.keysetIdentities[this.position];
         var plan = this.Plan!;
-        var row = Selection.TryReadKeysetMember(plan, batch, member)
-            ?? Selection.EnumerateForCursor(plan, batch).Find(live => Selection.CursorIdentityMatches(plan, live, member));
+        var row = Selection.ReadKeysetMember(plan, batch, member);
         // Member deleted out from under the keyset (or its key columns
-        // changed, making the row no longer findable by the snapshotted key —
-        // on a join, either side going away is enough): status -2, no current
-        // row.
+        // changed, making the row no longer findable by the snapshotted key,
+        // or its view no longer returns it — on a join, either side going
+        // away is enough): status -2, no current row.
         if (row is null)
         {
             this.CurrentRids = null;
