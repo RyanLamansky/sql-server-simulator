@@ -859,9 +859,11 @@ The method form (`Location.STAsText()`) has always worked everywhere, scope or n
 Where no query scope is installed, the parser asks what the site does know (probed 2026-10-06 against SQL Server 2025):
 
 - a **computed column** or **CHECK** asks the table's declared columns (`ParserContext.DeclaredColumnTypes`) — a spatial column declared anywhere in a `CREATE TABLE` list, read ahead of it so `lat AS loc.Lat, loc geography` and an inline `loc geography CHECK (loc.Lat > 0)` bind, and the table's columns for `ALTER TABLE … ADD`; a qualifier naming the table itself stays the column reading;
-- an **UPDATE**'s SET values and a **MERGE**'s actions ask the resolver their target's columns bind through (`ParserContext.OuterTypeResolver`);
-- an **OUTPUT** clause asks its `inserted` / `deleted` columns, so `inserted.loc.STSrid` reads the property.
+- an **UPDATE**'s SET values and a **MERGE**'s actions ask the resolver their target's columns bind through (`ParserContext.OuterTypeResolver`), asking whether the whole dotted name is a column first, so the common `alias.column` there never asks the qualifier as a column at all;
+- an **OUTPUT** clause asks its `inserted` / `deleted` columns, and a `MERGE`'s its source's too, so `inserted.loc.STSrid` and `s.loc.Lat` read the property.
 
+A `hierarchyid` column takes the property form the same way, for its one property `IsNull` ([`hierarchyid.md`](hierarchyid.md)).
+A member name written on a value of another type is refused by that type, while compiling (probed 2026-10-26 against SQL Server 2025): `hierarchyid` reports Msg 6506 / 6592, `xml` Msg 227 and every other type Msg 258 or Msg 4121 ([`schemas.md`](schemas.md#members-written-on-a-column)).
 A SET target written `loc.STSrid = …` is the [mutator](#members--parserexpressionsspatialmethodcallcs) rather than a property read.
 A dotted name that binds neither way reports **Msg 207** where real reports **Msg 4104** for any unbindable multi-part name, which is a general column-resolution difference rather than a spatial one.
 

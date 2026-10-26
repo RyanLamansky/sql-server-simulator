@@ -6,7 +6,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 
 /// <summary>
 /// Member access on a <c>geography</c> or <c>geometry</c> value — both the
-/// method form <c>expr.STPointN(2)</c> and the property form <c>expr.STX</c>.
+/// method form <c>expr.STPointN(2)</c> and the property form <c>expr.STX</c> —
+/// and the one property a <c>hierarchyid</c> has, <c>IsNull</c>.
 /// </summary>
 /// <remarks>
 /// <para>Real distinguishes the two forms strictly: a method name written
@@ -248,8 +249,8 @@ internal sealed class SpatialMethodCall : Expression
 
     /// <summary>
     /// Decides whether <c>&lt;qualifier&gt;.&lt;member&gt;</c> written over a
-    /// FROM source is a spatial <i>column</i>'s property read rather than an
-    /// <c>alias.column</c> reference. Nothing in the syntax separates them, so
+    /// FROM source is a spatial or <c>hierarchyid</c> <i>column</i>'s property
+    /// read rather than an <c>alias.column</c> reference. Nothing in the syntax separates them, so
     /// real settles it against the scope — and reports <b>Msg 326</b> when both
     /// readings bind, which is the case a source aliased like the spatial
     /// column and carrying a column named like the member produces.
@@ -276,12 +277,13 @@ internal sealed class SpatialMethodCall : Expression
             return false;
         if (context.ScopeSources is not { Length: > 0 } sources)
             return BindsWithoutScope(qualifier, member, context);
-        // Every `alias.column` reaches here, so a scope holding no spatial
-        // column — nearly every scope — answers without the name search.
-        if (!Array.Exists(sources, static source => source.HasSpatialColumn()))
+        // Every `alias.column` reaches here, so a scope holding no column
+        // with properties — nearly every scope — answers without the name
+        // search.
+        if (!Array.Exists(sources, static source => source.HasPropertyColumn()))
             return false;
         var (columnSource, columnIndex) = TryFind(sources, qualifier);
-        if (columnSource < 0 || sources[columnSource].Columns[columnIndex].Type is not SpatialSqlType)
+        if (columnSource < 0 || !HasProperties(sources[columnSource].Columns[columnIndex].Type))
             return false;
         if (TryFind(sources, qualifier.WithAddedPart(member)).SourceIndex < 0)
             return true;
@@ -295,12 +297,25 @@ internal sealed class SpatialMethodCall : Expression
     private static bool BindsWithoutScope(MultiPartName qualifier, string member, ParserContext context)
     {
         if (context.DeclaredColumnTypes is { } declared)
-            return qualifier.Count == 1 && declared(qualifier) is SpatialSqlType;
-        if (context.OuterTypeResolver is not { } resolve || TryResolve(resolve, qualifier) is not SpatialSqlType)
+            return qualifier.Count == 1 && declared(qualifier) is { } declaredType && HasProperties(declaredType);
+        if (context.OuterTypeResolver is not { } resolve)
             return false;
-        return TryResolve(resolve, qualifier.WithAddedPart(member)) is null
-            || (IsKnownMemberName(member) ? throw SimulatedSqlException.AmbiguousSpatialPropertyOrColumn(qualifier.ToString(), member) : false);
+        // The column reading is asked first: where it binds and the member
+        // names nothing spatial, the qualifier's reading can't change the
+        // answer, and asking it would throw a miss for every `alias.column`
+        // written here (a MERGE's actions, an OUTPUT list).
+        var bindsAsColumn = TryResolve(resolve, qualifier.WithAddedPart(member)) is not null;
+        if ((bindsAsColumn && !IsKnownMemberName(member)) || TryResolve(resolve, qualifier) is not { } qualifierType || !HasProperties(qualifierType))
+            return false;
+        return bindsAsColumn ? throw SimulatedSqlException.AmbiguousSpatialPropertyOrColumn(qualifier.ToString(), member) : true;
     }
+
+    /// <summary>
+    /// Whether a column of <paramref name="type"/> reads a dotted name after
+    /// it as its own property: a spatial one's, and <c>hierarchyid</c>'s one,
+    /// <c>IsNull</c> — the node refusing any other name as real does.
+    /// </summary>
+    private static bool HasProperties(SqlType type) => type is SpatialSqlType or HierarchyIdSqlType;
 
     private static SqlType? TryResolve(Func<MultiPartName, SqlType> resolve, MultiPartName name)
     {
@@ -348,14 +363,37 @@ internal sealed class SpatialMethodCall : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var receiver = this.target.Run(runtime);
-        var type = receiver.Type as SpatialSqlType
-            ?? throw new NotSupportedException($"'.{this.memberName}' is not a member of {receiver.Type}.");
+        if (this.ReceiverRefusal(receiver.Type, runtime.Batch) is { } refusal)
+            throw refusal;
+        if (receiver.Type is not SpatialSqlType type)
+            return receiver.IsNull ? SqlValue.Null(SqlType.Bit) : SqlValue.FromBoolean(false);
         var member = ValidateMember(type);
 
         return receiver.IsNull
             ? SqlValue.Null(ResultType(member.Result, type, runtime.Batch))
             : Evaluate(runtime, receiver.AsSpatial, type, member);
     }
+
+    /// <summary>
+    /// Real's refusal of a receiver that isn't spatial, or null: a
+    /// <c>hierarchyid</c> one has its own members, of which this node takes
+    /// only the <c>IsNull</c> property (Msg 6506 / 6592 for the rest), an
+    /// <c>xml</c> one its five methods (Msg 227), and any other system type
+    /// none at all (<see cref="Expression.MemberlessReceiverRefusal"/>)
+    /// (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    private SimulatedSqlException? ReceiverRefusal(SqlType receiverType, BatchContext batch) => receiverType switch
+    {
+        SpatialSqlType => null,
+        HierarchyIdSqlType when !this.writtenAsMethod && this.memberName == "IsNull" => null,
+        HierarchyIdSqlType => this.writtenAsMethod
+            ? SimulatedSqlException.ClrMethodNotFound(this.memberName, HierarchyIdSqlType.ClrTypeName, "Microsoft.SqlServer.Types", state: 10)
+            : SimulatedSqlException.ClrPropertyNotFound(this.memberName, HierarchyIdSqlType.ClrTypeName),
+        XmlSqlType => SimulatedSqlException.NotAValidFunctionPropertyOrField(this.memberName),
+        _ => this.writtenAsMethod
+            ? MemberlessReceiverRefusal(this.target, this.memberName, receiverType, batch)
+            : SimulatedSqlException.CannotCallMethodsOn(SimulatedSqlException.FamilyRootName(receiverType)),
+    };
 
     /// <summary>
     /// Enforces the form and owning type real enforces, reporting Msg 6592 for
@@ -1137,9 +1175,11 @@ internal sealed class SpatialMethodCall : Expression
     /// </summary>
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var receiver = this.target.GetSqlType(batch, resolveColumnType);
+        var receiver = MemberReceiverType(this.target, this.memberName, batch, resolveColumnType);
+        if (receiver is not null && this.ReceiverRefusal(receiver, batch) is { } refusal)
+            throw refusal;
         if (receiver is not SpatialSqlType spatial)
-            return NVarcharSqlType.Get(-1, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
+            return SqlType.Bit;
         var result = ResultType(ValidateMember(spatial).Result, spatial, batch);
         // No member takes the other spatial type: an argument of it is
         // Msg 206 while the statement compiles (probed 2026-10-05 against

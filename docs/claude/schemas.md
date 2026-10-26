@@ -50,6 +50,18 @@ The compile-time walk also **downgrades**: a scope whose own sources expose the 
 
 Not yet: the SET list's own **left-hand side** (`UPDATE t SET zz.id = 5`) drops its qualifier at the parse, and an `INSERT … VALUES (zz.id)` expression reports 207 — both are Msg 4104 on real.
 
+### Members written on a column
+
+A name whose leading parts bind a column and whose rest binds nothing reads as **members written on that column**, judged by the column's type before their names (probed 2026-10-26 against SQL Server 2025):
+
+- a source's column of a type with no members — every system type but the spatial pair, `hierarchyid` and `xml` — is **Msg 258** (`Cannot call methods on int.`), for `t.id.m`, `t.id.m()` and `t.id.m.n` alike, in a query, an `UPDATE`'s SET values, an `OUTPUT` list and a `MERGE`'s actions; a source's missing column (`t.nosuch.m`) is that column's Msg 207, while an unqualified `id.m` stays Msg 4104, as does a four-part `dbo.t.id.m`;
+- an unqualified column's call, `id.m()`, reads as a function named `id.m`, **Msg 4121**, raised as a missing function's is, only once the statement runs: the statements ahead of it run, an un-taken branch never raises it, a procedure body defers it and a view's or inline function's binding refuses it — and so does a call on a receiver naming no column (`nosuch.m()`, or `x.nosuch.m()` where `x` names no source);
+- a spatial, `hierarchyid` or `xml` column has its own members and refuses any other ([`spatial.md`](spatial.md#the-property-form-of-a-spatial-column), [`hierarchyid.md`](hierarchyid.md#errors), [`xml.md`](xml.md)), as any expression of those types does, while any other expression is Msg 258 (`CAST(1 AS int).STAsText()`, `(id).Lat`, a variable).
+
+Msg 4121 names the name's first part as its column — the schema of a two-part name, the database of a three-part one.
+Every other member refusal stops the batch as it compiles, even in an un-taken branch, unless its statement reads a table that doesn't exist yet, when it waits for the statement as that statement's binder errors do; within a statement's binder report each reports as a type check ([`errors.md`](errors.md#a-statements-whole-binder-report)).
+A column reference re-reads its name this way only once the name has failed (`Reference.GetSqlType`), so binding pays nothing for it, and the member nodes ask for their receiver's type through `Expression.MemberReceiverType`.
+
 ## Default schemas and unqualified names
 
 Probed 2026-10-04 against SQL Server 2025 (677 differential cases, users without logins switched with `EXECUTE AS USER`, one login through `EXECUTE AS LOGIN`, application roles).

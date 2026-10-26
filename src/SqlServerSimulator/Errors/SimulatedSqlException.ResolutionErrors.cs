@@ -269,16 +269,18 @@ partial class SimulatedSqlException
     /// call (<c>SELECT schema.fn(x)</c>) names something that isn't a known
     /// UDF / aggregate / column. Verbatim wording probe-confirmed against
     /// SQL Server 2025: the message references the dotted name in the
-    /// "or the user-defined function or aggregate" slot and shows the schema
-    /// qualifier in the "column" slot. Distinct from Msg 195 ("not a
-    /// recognized built-in function name") which fires for bare 1-part
-    /// calls. A four-part name is Msg 344 instead, a remote function being
-    /// no function real calls (probed 2026-10-06 against SQL Server 2025).
+    /// "or the user-defined function or aggregate" slot and shows its first
+    /// part in the "column" slot — the schema of a two-part name, the
+    /// database of a three-part one (probed 2026-10-26). Distinct from
+    /// Msg 195 ("not a recognized built-in function name") which fires for
+    /// bare 1-part calls. A four-part name is Msg 344 instead, a remote
+    /// function being no function real calls (probed 2026-10-06 against SQL
+    /// Server 2025).
     /// </summary>
     internal static SimulatedSqlException CannotFindUserDefinedFunction(MultiPartName name) =>
         name.Count == 4
             ? new($"Remote function reference '{name}' is not allowed, and the column name '{name[0]}' could not be found or is ambiguous.", 344, 16, 1)
-            : new($"Cannot find either column \"{name.ImmediateQualifier}\" or the user-defined function or aggregate \"{name}\", or the name is ambiguous.", 4121, 16, 1);
+            : new($"Cannot find either column \"{name[0]}\" or the user-defined function or aggregate \"{name}\", or the name is ambiguous.", 4121, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 317: a column-alias list after a user

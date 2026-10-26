@@ -2148,17 +2148,24 @@ partial class Simulation
             {
                 return sourceSchema[sourceOrdinal];
             }
-            throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
+            // No name binds unqualified here, and a side's missing column is
+            // that column's Msg 207 (probed 2026-10-26 against SQL Server 2025).
+            throw name.Count == 1 || (name.Count == 2 && (BuiltInToken.EqualsAny(name.ImmediateQualifier, "INSERTED", "DELETED")
+                    || NamesMergeSource(context.Batch.CurrentDatabase.Collation, name, sourceAlias, sourceColumnNames)))
+                ? SimulatedSqlException.InvalidColumnName(name.Leaf)
+                : SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
         }
 
-        // A spatial column's property (`inserted.loc.STSrid`) tells itself
-        // apart from a three-part column name by the pseudo-tables' types.
+        // A spatial column's property (`inserted.loc.STSrid`, `s.loc.Lat`)
+        // tells itself apart from a three-part column name by the pseudo-tables'
+        // and the source's types.
         var collation = context.Batch.CurrentDatabase.Collation;
         using var pseudoColumns = ParserScope.Enter(ref context.OuterTypeResolver, name =>
-            name.Count == 2 && BuiltInToken.EqualsAny(name.ImmediateQualifier, "INSERTED", "DELETED")
-                && Array.Find(targetColumns, column => collation.Equals(column.Name, name.Leaf)) is { } column
-                ? column.Type
-                : throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString()));
+            name.Count != 2 ? throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString())
+            : BuiltInToken.EqualsAny(name.ImmediateQualifier, "INSERTED", "DELETED")
+                ? Array.Find(targetColumns, column => collation.Equals(column.Name, name.Leaf))?.Type ?? throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString())
+            : MergeSourceOrdinal(collation, name, sourceAlias, sourceColumnNames) is var ordinal and >= 0 ? sourceSchema[ordinal]
+            : throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString()));
 
         do
         {

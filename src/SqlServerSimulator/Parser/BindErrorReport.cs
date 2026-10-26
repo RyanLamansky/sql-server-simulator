@@ -77,8 +77,8 @@ internal sealed class BindErrorReport(string command)
     /// it first is worth reading the statement again for the whole report.
     /// </summary>
     public static bool StartsReport(SimulatedSqlException error) =>
-        error.Number is 109 or 110 or 130 or 147 or 157 or 206 or 207 or 209 or 213 or 257 or 264 or 273 or 402 or 417 or 468 or 476 or 477 or 479 or 482 or 489 or 497 or 529 or 1011 or 1012 or 1013 or 1015
-            or 4101 or 4104 or 4403 or 4405 or 4406 or 4436 or 4438 or 4439 or 4440 or 4442 or 4443 or 4444 or 4445 or 4448 or 5308 or 5309 or 5310 or 5319 or 5324 or 5333 or 5334 or 8116 or 8117 or 8120 or 8121 or 8124 or 8127 or 8155 or 10709 or 13536;
+        error.Number is 109 or 110 or 130 or 147 or 157 or 206 or 207 or 209 or 213 or 227 or 257 or 258 or 264 or 273 or 402 or 417 or 468 or 476 or 477 or 479 or 482 or 489 or 497 or 529 or 1011 or 1012 or 1013 or 1015
+            or 4101 or 4104 or 4403 or 4405 or 4406 or 4436 or 4438 or 4439 or 4440 or 4442 or 4443 or 4444 or 4445 or 4448 or 5308 or 5309 or 5310 or 5319 or 5324 or 5333 or 5334 or 6506 or 6592 or 8116 or 8117 or 8120 or 8121 or 8124 or 8127 or 8155 or 8173 or 10709 or 13536;
 
     /// <summary>
     /// Whether <paramref name="error"/> is a type check real reports where it
@@ -90,10 +90,14 @@ internal sealed class BindErrorReport(string command)
     /// SQL Server 2025: <c>SELECT a + d, x1</c> is Msg 206 then Msg 207,
     /// <c>SELECT x1, a + d</c> the Msg 207 alone, <c>SELECT a + d, a + d</c> one
     /// Msg 206). An illegal explicit conversion (Msg 529) is the exception real
-    /// stops binding at; see <see cref="RecordTypeError"/>.
+    /// stops binding at; see <see cref="RecordTypeError"/>. A member its
+    /// receiver's type lacks — Msg 227, 258, 6506, 6592 and 8173 — reports
+    /// the same way (probed 2026-10-26: <c>SELECT t.id.Lat, t.nosuch</c> is
+    /// Msg 258 then Msg 207, <c>SELECT t.nosuch, t.id.Lat</c> the Msg 207 alone,
+    /// <c>SELECT t.h.Foo, t.id.Lat</c> the Msg 6592 alone).
     /// </summary>
     public static bool IsTypeCheck(SimulatedSqlException error) =>
-        error.Number is 206 or 257 or 402 or 468 or 8116 or 8117;
+        error.Number is 206 or 227 or 257 or 258 or 402 or 468 or 6506 or 6592 or 8116 or 8117 or 8173;
 
     /// <summary>
     /// Whether the re-read carries on past <paramref name="error"/>, raised

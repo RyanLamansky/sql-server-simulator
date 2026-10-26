@@ -247,21 +247,22 @@ internal sealed class FromSource(
     public readonly HeapColumn[] Columns = columns;
 
     /// <summary>
-    /// Whether a <see cref="Columns"/> entry is <c>geography</c> or
-    /// <c>geometry</c>: 0 not yet asked, 1 yes, 2 no, settled as
+    /// Whether a <see cref="Columns"/> entry is spatial or <c>hierarchyid</c>:
+    /// 0 not yet asked, 1 yes, 2 no, settled as
     /// <see cref="columnNamesOrdinal"/> is.
     /// </summary>
-    private int spatialColumn;
+    private int propertyColumn;
 
     /// <summary>
-    /// Whether a column is spatial, which every <c>alias.name</c> in scope
-    /// asks before reading the name as a spatial member.
+    /// Whether a column's type has properties — spatial or
+    /// <c>hierarchyid</c> — which every <c>alias.name</c> in scope asks
+    /// before reading the name as a column's property.
     /// </summary>
-    public bool HasSpatialColumn()
+    public bool HasPropertyColumn()
     {
-        if (this.spatialColumn == 0)
-            this.spatialColumn = Array.Exists(this.Columns, static column => column.Type is SpatialSqlType) ? 1 : 2;
-        return this.spatialColumn == 1;
+        if (this.propertyColumn == 0)
+            this.propertyColumn = Array.Exists(this.Columns, static column => column.Type is SpatialSqlType or HierarchyIdSqlType) ? 1 : 2;
+        return this.propertyColumn == 1;
     }
     public readonly HeapColumn[] StoredSchema = storedSchema;
 

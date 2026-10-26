@@ -130,10 +130,10 @@ internal sealed class Reference : Expression
         // A FROM source's own argument keeps throwing: the source's parse
         // turns a miss on a sibling into Msg 4104 from the Msg 207 it sees.
         if (batch.BindErrors is not { } report || batch.Parser.FromSourceColumnSink is not null)
-            return resolveColumnType(this.ReferencedName);
+            return this.Resolve(resolveColumnType);
         try
         {
-            return resolveColumnType(this.ReferencedName);
+            return this.Resolve(resolveColumnType);
         }
         catch (SimulatedSqlException error) when (report.TryRecordNameError(error, this.SourceToken))
         {
@@ -141,6 +141,57 @@ internal sealed class Reference : Expression
             // so any type lets the rest of it bind.
             return SqlType.Int32;
         }
+    }
+
+    /// <summary>
+    /// Resolves the name, reading one that binds no column (Msg 4104) as
+    /// members written on the column its leading parts bind, which is how
+    /// real reports it: a source's column without members (<c>t.id.m</c>,
+    /// <c>t.id.m.n</c>) is Msg 258, a source's missing column
+    /// (<c>t.nosuch.m</c>) that column's Msg 207, and anything written on an
+    /// <c>xml</c> column Msg 227 — or Msg 8173 for one of its scalar methods
+    /// named as a property; an unqualified <c>id.m</c> stays Msg 4104 (probed
+    /// 2026-10-26 against SQL Server 2025). Spatial and <c>hierarchyid</c>
+    /// columns read their members before a name is built
+    /// (<see cref="SpatialMethodCall.BindsAsColumnProperty"/>).
+    /// </summary>
+    private SqlType Resolve(Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        try
+        {
+            return resolveColumnType(this.ReferencedName);
+        }
+        catch (SimulatedSqlException miss) when (miss.Number == 4104 && this.ReferencedName.Count >= 2)
+        {
+            if (this.MemberRefusal(resolveColumnType) is { } refusal)
+                throw refusal;
+            throw;
+        }
+    }
+
+    private SimulatedSqlException? MemberRefusal(Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var name = this.ReferencedName;
+        var qualified = name.Count > 2;
+        var receiver = qualified ? new MultiPartName(name[0]).WithAddedPart(name[1]) : new MultiPartName(name[0]);
+        var member = name[qualified ? 2 : 1];
+        SqlType receiverType;
+        try
+        {
+            receiverType = resolveColumnType(receiver);
+        }
+        catch (SimulatedSqlException receiverMiss)
+        {
+            return qualified && receiverMiss.Number == 207 ? receiverMiss : null;
+        }
+        return receiverType switch
+        {
+            XmlSqlType => XmlMethodCall.IsKnownMethodName(member) && member != "nodes"
+                ? SimulatedSqlException.XmlMethodWithoutArguments(member)
+                : SimulatedSqlException.NotAValidFunctionPropertyOrField(member),
+            SpatialSqlType or HierarchyIdSqlType or ClrUdtSqlType => null,
+            _ => qualified ? SimulatedSqlException.CannotCallMethodsOn(SimulatedSqlException.FamilyRootName(receiverType)) : null,
+        };
     }
 
     internal override string DebugDisplay() => this.ReferencedName.ToString();

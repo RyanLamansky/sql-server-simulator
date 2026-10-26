@@ -60,6 +60,31 @@ public sealed class SpatialColumnMemberTests
         _ = sim.AssertSqlError(update, number);
     }
 
+    /// <summary>
+    /// A qualifier naming both the target and a spatial column of it, where no
+    /// query scope is installed: the column reading answers a member no spatial
+    /// type has, and real reports Msg 326 where both readings bind — while a
+    /// target aliased otherwise leaves the column's property alone.
+    /// </summary>
+    [TestMethod]
+    public void A_Target_Named_Like_Its_Spatial_Column()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table pt (id int, pt geography, x int);
+            insert pt values (5, null, 0);
+            create table q (Lat int, q geography, x float);
+            insert q values (7, geography::Point(1, 2, 4326), 0);
+            """);
+        AreEqual(5, sim.ExecuteScalar("update pt set x = pt.id; select x from pt"));
+        _ = sim.AssertSqlError("update q set x = q.Lat", 326);
+        _ = sim.AssertSqlError("merge q as q using (select 1 k) s on 1 = 1 when matched then update set x = q.Lat;", 326);
+        AreEqual(1.0, sim.ExecuteScalar("merge q as t using (select 1 k) s on 1 = 1 when matched then update set x = q.Lat; select x from q"));
+        AreEqual(2.0, sim.ExecuteScalar("update q set x = 3 output inserted.q.Long"));
+        AreEqual(1.0, sim.ExecuteScalar("merge q as t using (select 1 k) s on 1 = 1 when matched then update set x = t.q.Lat output inserted.q.Lat;"));
+        _ = sim.AssertSqlError("merge q using (select 1 k) s on 1 = 1 when matched then update set x = 4 output q.Lat;", 4104);
+    }
+
     [TestMethod]
     public void A_Row_Count_Top_Stops_Before_A_Later_Rows_Set_Value()
         => AreEqual(55, new Simulation().ExecuteScalar(PointTable + """

@@ -483,18 +483,24 @@ internal abstract class Expression : ExpressionNode
                             // XmlMethodCall.Run).
                             // The json type has one method, the mutator
                             // `.modify`, which only an UPDATE's or a SET's
-                            // assignment reaches. Elsewhere real refuses a
-                            // json variable's method call as Msg 258 and a
-                            // json column's as Msg 4121 (probed 2026-09-27
-                            // against SQL Server 2025).
+                            // assignment reaches. Elsewhere real refuses the
+                            // call as it does any member of a type without
+                            // them (MemberlessReceiverRefusal): a json
+                            // variable's or qualified column's as Msg 258,
+                            // an unqualified column's as the missing function
+                            // Msg 4121 once the statement runs (probed
+                            // 2026-09-27 and 2026-10-26 against SQL Server
+                            // 2025).
                             if (XmlMethodCall.IsKnownMethodName(name.Value) && JsonModify.IsJsonReceiver(expression, context))
                             {
                                 var checkpoint = context.SaveCheckpoint();
                                 if (context.GetNextOptional() is Operator { Character: '(' })
                                 {
-                                    throw expression is Reference column
-                                        ? SimulatedSqlException.CannotFindUserDefinedFunction(column.ReferencedName.WithAddedPart(name.Value))
-                                        : SimulatedSqlException.CannotCallMethodsOn("json");
+                                    if (MemberlessReceiverRefusal(expression, name.Value, SqlType.Json, context.Batch) is { } refusal)
+                                        throw refusal;
+                                    context.MoveNextRequired();
+                                    expression = ParseDeferredCallAndDiscard(context);
+                                    continue;
                                 }
                                 context.RestoreCheckpoint(checkpoint);
                             }
@@ -840,6 +846,8 @@ internal abstract class Expression : ExpressionNode
                     _ => throw SimulatedSqlException.CannotFindUserDefinedFunction(reference.ReferencedName),
                 };
             }
+            if (reference.ReferencedName.Count == 3 && MethodOnSourceColumn(reference.ReferencedName, context) is { } refusal)
+                throw refusal;
             // Skip mode: real SQL Server defers user-function binding, so
             // an un-taken branch calling a missing schema-qualified
             // function compiles and is discarded. Parse-and-discard the
@@ -853,6 +861,33 @@ internal abstract class Expression : ExpressionNode
                 : throw SimulatedSqlException.CannotFindUserDefinedFunction(reference.ReferencedName);
         }
         return ResolveBuiltIn(reference.Name, context);
+    }
+
+    /// <summary>
+    /// The refusal real raises for <c>t.c.m(…)</c>, naming no function, where
+    /// <c>t</c> names a source in scope: Msg 258 when <c>c</c> is its column
+    /// — a spatial, <c>hierarchyid</c> or <c>xml</c> one never reaches here,
+    /// its members dispatching off its type — and the column's own Msg 207
+    /// when it isn't (probed 2026-10-26 against SQL Server 2025). Null where
+    /// <c>t</c> names no source, which leaves the missing function, and for a
+    /// CLR type's column, whose members bind before a name is built.
+    /// </summary>
+    private static SimulatedSqlException? MethodOnSourceColumn(MultiPartName name, ParserContext context)
+    {
+        var resolve = context.ScopeSources is { Length: > 0 } sources
+            ? Selection.ColumnTypeResolverFor(sources, context.OuterTypeResolver)
+            : context.OuterTypeResolver;
+        if (resolve is null)
+            return null;
+        try
+        {
+            var type = resolve(new MultiPartName(name[0]).WithAddedPart(name[1]));
+            return type is ClrUdtSqlType ? null : SimulatedSqlException.CannotCallMethodsOn(SimulatedSqlException.FamilyRootName(type));
+        }
+        catch (SimulatedSqlException miss)
+        {
+            return miss.Number == 207 ? miss : null;
+        }
     }
 
     /// <summary>
@@ -992,6 +1027,46 @@ internal abstract class Expression : ExpressionNode
     /// <param name="batch">The active batch context, used to resolve database-affine defaults like the active collation.</param>
     /// <param name="resolveColumnType">Callback that, given a multi-part column name, returns its declared type or throws if unresolvable.</param>
     public abstract SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType);
+
+    /// <summary>
+    /// The type of the receiver <paramref name="member"/> is called on, or null
+    /// where there is none to refuse the member over: a statement read for its
+    /// whole binder report recorded the receiver's own name as a miss and
+    /// carries it on as <c>int</c>, or a skip-mode parse met a receiver
+    /// naming no column. Real reads such a receiver — <c>nosuch.m()</c>, or
+    /// <c>x.nosuch.m()</c> where <c>x</c> names no source — as the qualifier
+    /// of a missing function's name, Msg 4121, raised once the statement runs
+    /// (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    private protected static SqlType? MemberReceiverType(Expression receiver, string member, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var recorded = batch.BindErrors?.Count ?? 0;
+        SqlType type;
+        try
+        {
+            type = receiver.GetSqlType(batch, resolveColumnType);
+        }
+        catch (SimulatedSqlException miss) when (receiver is Reference { ReferencedName: { Count: 1 or 2 } name } && miss.Number == (name.Count == 1 ? 207 : 4104))
+        {
+            return batch.IsSkipping ? null : throw SimulatedSqlException.CannotFindUserDefinedFunction(name.WithAddedPart(member));
+        }
+        return (batch.BindErrors?.Count ?? 0) == recorded ? type : null;
+    }
+
+    /// <summary>
+    /// Real's refusal of <paramref name="member"/> called on
+    /// <paramref name="receiver"/>, whose <paramref name="receiverType"/> has no
+    /// members at all: Msg 258, or for an unqualified column the missing
+    /// function its dotted name reads as (Msg 4121). Real raises that one as
+    /// it does a missing function's, only once the statement runs — a
+    /// procedure body defers it, a view's binding refuses it — so a parse in
+    /// skip mode answers null (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    private protected static SimulatedSqlException? MemberlessReceiverRefusal(Expression receiver, string member, SqlType receiverType, BatchContext batch) =>
+        receiver is not Reference { ReferencedName.Count: 1 } column
+            ? SimulatedSqlException.CannotCallMethodsOn(SimulatedSqlException.FamilyRootName(receiverType))
+            : batch.IsSkipping ? null
+            : SimulatedSqlException.CannotFindUserDefinedFunction(column.ReferencedName.WithAddedPart(member));
 
     /// <summary>
     /// <see cref="GetSqlType"/> for a clause's own term: while a statement is

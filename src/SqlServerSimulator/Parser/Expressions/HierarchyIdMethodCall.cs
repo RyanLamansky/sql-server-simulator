@@ -91,19 +91,17 @@ internal sealed class HierarchyIdMethodCall : Expression
     /// Real's refusal of a receiver that isn't a <c>hierarchyid</c> (a spatial
     /// one's <c>ToString</c> aside), or null: an <c>xml</c> one has its five
     /// methods alone (Msg 227), a spatial one lacks the hierarchyid members
-    /// (Msg 6506), and any other system type has no methods at all — Msg 258,
-    /// or for an unqualified column the missing function its dotted name
-    /// reads as (Msg 4121) (probed 2026-10-07 against SQL Server 2025).
+    /// (Msg 6506), and any other system type has no methods at all
+    /// (<see cref="Expression.MemberlessReceiverRefusal"/>) (probed 2026-10-07
+    /// against SQL Server 2025).
     /// </summary>
-    private SimulatedSqlException? ReceiverRefusal(SqlType receiverType) => receiverType switch
+    private SimulatedSqlException? ReceiverRefusal(SqlType receiverType, BatchContext batch) => receiverType switch
     {
         HierarchyIdSqlType => null,
         SpatialSqlType when this.method == HierarchyIdMethod.ToStringMethod => null,
         SpatialSqlType spatial => SimulatedSqlException.ClrMethodNotFound(MethodName(this.method), spatial.ClrTypeName, "Microsoft.SqlServer.Types", state: 10),
         XmlSqlType => SimulatedSqlException.NotAValidFunctionPropertyOrField(MethodName(this.method)),
-        _ => this.target is Reference { ReferencedName.Count: 1 } column
-            ? SimulatedSqlException.CannotFindUserDefinedFunction(column.ReferencedName.WithAddedPart(MethodName(this.method)))
-            : SimulatedSqlException.CannotCallMethodsOn(SimulatedSqlException.FamilyRootName(receiverType)),
+        _ => MemberlessReceiverRefusal(this.target, MethodName(this.method), receiverType, batch),
     };
 
     private static string MethodName(HierarchyIdMethod method) => method == HierarchyIdMethod.ToStringMethod ? "ToString" : method.ToString();
@@ -121,7 +119,7 @@ internal sealed class HierarchyIdMethodCall : Expression
             var text = NVarcharSqlType.Get(-1, runtime.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
             return receiver.IsNull ? SqlValue.Null(text) : SqlValue.FromNVarchar(text, receiver.AsString);
         }
-        if (this.ReceiverRefusal(receiver.Type) is { } refusal)
+        if (this.ReceiverRefusal(receiver.Type, runtime.Batch) is { } refusal)
             throw refusal;
         if (receiver.IsNull)
             return SqlValue.Null(this.ResultType(runtime.Batch));
@@ -315,8 +313,8 @@ internal sealed class HierarchyIdMethodCall : Expression
     /// </summary>
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var receiverType = this.target.GetSqlType(batch, resolveColumnType);
-        if (this.ReceiverRefusal(receiverType) is { } refusal)
+        var receiverType = MemberReceiverType(this.target, MethodName(this.method), batch, resolveColumnType);
+        if (receiverType is not null && this.ReceiverRefusal(receiverType, batch) is { } refusal)
             throw refusal;
         SqlType parameter = this.method == HierarchyIdMethod.GetAncestor ? SqlType.Int32 : SqlType.HierarchyId;
         foreach (var argument in this.arguments)

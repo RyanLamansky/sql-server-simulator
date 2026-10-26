@@ -663,6 +663,14 @@ partial class SimulatedSqlException
         new($"\"{name}\" is not a valid function, property, or field.", 227, 15, 1);
 
     /// <summary>
+    /// Msg 8173: an <c>xml</c> column's scalar method named without its
+    /// argument list, as though it were a property (probed 2026-10-26
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XmlMethodWithoutArguments(string method) =>
+        new($"Incorrect syntax was used to invoke the XML data type method '{method}'.", 8173, 15, 1);
+
+    /// <summary>
     /// Msg 9500: an <c>xml</c> <c>.value()</c> target type the method can't
     /// produce, named as written.
     /// </summary>

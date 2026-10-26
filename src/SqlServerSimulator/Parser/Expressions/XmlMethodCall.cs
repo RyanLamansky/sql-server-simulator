@@ -377,6 +377,8 @@ internal sealed class XmlMethodCall : Expression
             throw new NotSupportedException($"XML instance method '.{this.methodName}()' is not modeled.");
 
         var input = this.Target.Run(runtime);
+        if (this.ReceiverRefusal(input.Type, runtime.Batch) is { } refusal)
+            throw refusal;
         switch (this.method)
         {
             case XmlMethod.Exist:
@@ -408,12 +410,27 @@ internal sealed class XmlMethodCall : Expression
     }
 
     /// <summary>
+    /// Real's refusal of a receiver that isn't <c>xml</c>, or null: a spatial
+    /// or <c>hierarchyid</c> one has no xml method (Msg 6506), and any other
+    /// system type has no methods at all (<see cref="Expression.MemberlessReceiverRefusal"/>)
+    /// (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    private SimulatedSqlException? ReceiverRefusal(SqlType receiverType, BatchContext batch) => receiverType switch
+    {
+        XmlSqlType => null,
+        SpatialSqlType spatial => SimulatedSqlException.ClrMethodNotFound(this.methodName, spatial.ClrTypeName, "Microsoft.SqlServer.Types", state: 10),
+        HierarchyIdSqlType => SimulatedSqlException.ClrMethodNotFound(this.methodName, HierarchyIdSqlType.ClrTypeName, "Microsoft.SqlServer.Types", state: 10),
+        _ => MemberlessReceiverRefusal(this.Target, this.methodName, receiverType, batch),
+    };
+
+    /// <summary>
     /// Static result type, used by projection schema inference: <c>value</c>
     /// returns its requested target type; <c>exist</c> returns <c>bit</c>;
     /// <c>nodes</c> / <c>query</c> surface as <c>xml</c>.
     /// </summary>
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        this.method switch
+        MemberReceiverType(this.Target, this.methodName, batch, resolveColumnType) is { } receiverType && this.ReceiverRefusal(receiverType, batch) is { } refusal ? throw refusal
+        : this.method switch
         {
             XmlMethod.Value => this.valueType,
             XmlMethod.Exist => SqlType.Bit,

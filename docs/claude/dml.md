@@ -561,6 +561,11 @@ The OUTPUT parser detects it by string compare and synthesizes a private `MergeA
 Surfaces through any wrapping `AS alias` thanks to `IsMergeActionRef` drilling past `NamedExpression`.
 Default column name is `$action`.
 
+### What the OUTPUT list binds
+
+Beside `$action`, the list reads `inserted` / `deleted` and the source's columns, each through its qualifier, and nothing unqualified: a bare name is Msg 207 even where the target or the source holds the column, as is a side's missing column (`inserted.nosuch`, `s.nosuch`), while a qualifier naming neither side is Msg 4104 on the whole name (probed 2026-10-26 against SQL Server 2025).
+A source's spatial column reads its members too (`s.loc.Lat`, `s.loc.STAsText()`), as a pseudo-table's does, and a source's column without members is Msg 258 ([`schemas.md`](schemas.md#members-written-on-a-column)).
+
 ### Constraint messages
 
 A MERGE's constraint refusals name the **MERGE** statement — `The MERGE statement conflicted with the CHECK constraint …`, for its inserts, updates and deletes alike, a referencing row its delete strands included — while its insert's NULL into a NOT NULL column says `UPDATE fails.`, as its update's does (probed 2026-10-01 against SQL Server 2025).

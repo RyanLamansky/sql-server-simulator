@@ -95,6 +95,9 @@ AW doesn't exercise this collision; documented limitation.
 
 `HierarchyIdMethodCall.Run` is also polymorphic on receiver type — a spatial receiver calling `.ToString()` falls through to the spatial WKT path (see [`spatial.md`](spatial.md)) rather than the hierarchyid canonical-path format.
 
+The type's one property is `IsNull` — `bit`, NULL over a NULL value, false otherwise, and Msg 6506 written as a method (probed 2026-10-26 against SQL Server 2025).
+It rides the spatial member node (`SpatialMethodCall`), whose catalog spells it too, and a `hierarchyid` column takes the property form as a spatial one does ([`spatial.md`](spatial.md#the-property-form-of-a-spatial-column)), so any other name written on the value — a spatial member, an xml method, a property form of one of its own methods (`h.GetLevel`) — is the CLR type's Msg 6592 for a property and Msg 6506 for a method.
+
 ## Errors
 
 Every refusal is **Msg 6522 state 2** in the library's own wording — `hierarchyid::Parse` / a string conversion (24001), a non-canonical binary on decode (24000), `GetAncestor(-1)` (an `ArgumentOutOfRangeException` whose 24011 text rides the `Parameter name:` line), `GetDescendant`'s non-child (24008) and out-of-order (24007) arguments, `GetReparentedValue`'s non-ancestor (24009), and the too-big ordinal (24006).
@@ -105,5 +108,6 @@ The text stops at the repeated exception-type line, before the stack frames real
 A written `varchar` constant converted to `hierarchyid` in a statement over a permanent table — `INSERT t (h) SELECT 'bad'`, `VALUES`, `UPDATE … SET`, `CAST` or `CONVERT` in a select list — fails at state 1, real folding the constant as the batch compiles as it does a CLR type's `Parse` ([`clr-assemblies.md`](clr-assemblies.md)); a Unicode constant stays at state 2 even there, as do a variable, a statement over no table or a temporary one, a subquery's constant and `hierarchyid::Parse` (probed 2026-10-17 against SQL Server 2025).
 **Not modeled yet**: a comparison's conversion (`WHERE h = 'bad'`) is state 1 on real and 2 here, where `CAST(CAST('bad' AS varchar(10)) AS hierarchyid)` is state 2 on both (probed 2026-10-19 against SQL Server 2025).
 A `hierarchyid` column's member in an `UPDATE`'s SET list (`SET n.Foo = 1`) is Msg 4104 here, where real reads it as the CLR type's member and reports Msg 6592 for a name the type lacks, as it does for a spatial column's (probed 2026-10-06 against SQL Server 2025).
+So is the read-only `IsNull`'s assignment (`SET @h.IsNull = 1`), Msg 102 here and Msg 6595 on real, and a member spelled `isnull` in lower case, Msg 102 here and real's Msg 6592, its members matching case-sensitively (probed 2026-10-26).
 
 The conversion from bytes refuses one ending in a zero byte (`0x00`, `0x0000`, `0x5800`) with that 24000 failure — a variable, a column write, `DATALENGTH` alike — and `TRY_CAST` answers NULL; other malformed bytes (`0xFF`, `0x01`) pass the conversion and fail when a method or the client decodes them (probed 2026-10-06 against SQL Server 2025).

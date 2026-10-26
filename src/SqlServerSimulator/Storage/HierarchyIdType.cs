@@ -21,6 +21,9 @@ namespace SqlServerSimulator.Storage;
 /// </remarks>
 internal sealed class HierarchyIdSqlType() : SqlType(SqlTypeCategory.Other, TypePairClass.HierarchyId)
 {
+    /// <summary>The CLR class real's member errors name the type by.</summary>
+    public const string ClrTypeName = "Microsoft.SqlServer.Types.SqlHierarchyId";
+
     public override int Precedence => 30;
 
     public override Type ClrType => typeof(byte[]);
