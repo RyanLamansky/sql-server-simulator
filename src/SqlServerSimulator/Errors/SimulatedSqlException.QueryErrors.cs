@@ -500,6 +500,13 @@ partial class SimulatedSqlException
         new($"'{word}' is not a recognized ODBC outer join option.", 155, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 155 for ODBC's <c>{fn CONVERT(value, word)}</c>
+    /// naming no ODBC type (probed 2026-10-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NotARecognizedOdbcDatatypeOption(string word) =>
+        new($"'{word}' is not a recognized ODBC datatype option.", 155, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 147 — an aggregate in a WHERE clause that reads
     /// the query's own columns (or none, as <c>COUNT(*)</c>), in a SELECT, an
     /// UPDATE or a DELETE alike; one reading only an enclosing query's columns

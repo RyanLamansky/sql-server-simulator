@@ -372,6 +372,12 @@ public sealed class SyntaxAlternativesTests
     [DataRow("datediff(millisecond, '2020-01-01', {fn TIMESTAMPADD(sql_tsi_frac_second, 1000, '2020-01-01')})", "1000")]
     [DataRow("{fn TIMESTAMPDIFF(SQL_TSI_FRAC_SECOND, '2020-01-01', '2020-01-01 00:00:01')}", "1000")]
     [DataRow("{fn TIMESTAMPDIFF(SQL_TSI_QUARTER, '2020-01-01', '2021-01-01')}", "4")]
+    [DataRow("{fn CONVERT(12.5, SQL_INTEGER)}", "12")]
+    [DataRow("{fn convert(1.23456, sql_decimal)}", "1.2346")]
+    [DataRow("sql_variant_property({fn CONVERT(1, SQL_NUMERIC)}, 'BaseType')", "numeric")]
+    [DataRow("sql_variant_property({fn CONVERT('abc', SQL_WVARCHAR)}, 'MaxLength')", "8000")]
+    [DataRow("sql_variant_property({fn CONVERT('03:04:05', SQL_TIME)}, 'BaseType')", "datetime")]
+    [DataRow("datalength({fn CONVERT('1', SQL_CHAR)})", "8000")]
     public void OdbcFn_AnswersAsRealRewritesIt(string call, string expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"select cast({call} as varchar(30))"));
 
@@ -409,6 +415,10 @@ public sealed class SyntaxAlternativesTests
     [DataRow("select {fn TIMESTAMPDIFF(SQL_TSI_NOPE, '2020-01-01', '2020-01-02')}", "'SQL_TSI_NOPE' is not a recognized TIMESTAMPDIFF option.")]
     public void OdbcTimestampFn_OtherUnit_RaisesMsg155(string sql, string message)
         => new Simulation().AssertSqlError(sql, 155, message);
+
+    [TestMethod]
+    public void OdbcConvert_OtherType_RaisesMsg155()
+        => new Simulation().AssertSqlError("select {fn CONVERT(1, SQL_INTERVAL_DAY)}", 155, "'SQL_INTERVAL_DAY' is not a recognized ODBC datatype option.");
 
     /// <summary>
     /// ODBC's outer-join escape groups its join chain as parentheses do, and

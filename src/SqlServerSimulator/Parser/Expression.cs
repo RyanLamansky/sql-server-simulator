@@ -2084,8 +2084,9 @@ internal abstract class Expression : ExpressionNode
     /// <c>ROUND(x, y, 1)</c>, <c>OCTET_LENGTH</c> and <c>BIT_LENGTH</c> as
     /// <c>DATALENGTH</c> in bytes and in bits, <c>TIMESTAMPADD</c> /
     /// <c>TIMESTAMPDIFF</c> as <c>DATEADD</c> / <c>DATEDIFF</c> of an ODBC
-    /// interval, and the clock as text (<see cref="OdbcClockText"/>). Null for
-    /// any other name.
+    /// interval, <c>CONVERT(value, SQL_type)</c> as a cast to the type the
+    /// ODBC name stands for, and the clock as text (<see cref="OdbcClockText"/>).
+    /// Null for any other name.
     /// </summary>
     private static Expression? ParseOdbcOnlyFunction(string name, ParserContext context)
     {
@@ -2095,6 +2096,8 @@ internal abstract class Expression : ExpressionNode
         {
             case "BIT_LENGTH":
                 return new Multiply(new DataLength(context), new Value(SqlValue.FromInt32(8)));
+            case "CONVERT":
+                return Expressions.Cast.OdbcConvert(context);
             case "CURDATE":
                 return context.Token is Operator { Character: ')' } ? new OdbcClockText(context, OdbcClock.Date, takesPrecision: false) : throw SimulatedSqlException.FunctionRequiresNArguments("CURDATE", 0);
             case "CURRENT_DATE":

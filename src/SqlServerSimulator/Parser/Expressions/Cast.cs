@@ -72,6 +72,66 @@ internal sealed class Cast : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
+    private Cast(Expression source, SqlType targetType, int? targetMaxLength, bool targetReportsNumeric, Token? openToken)
+    {
+        this.source = source;
+        this.targetType = targetType;
+        this.targetMaxLength = targetMaxLength;
+        this.targetReportsNumeric = targetReportsNumeric;
+        this.openToken = openToken;
+    }
+
+    /// <summary>
+    /// ODBC's <c>{fn CONVERT(value, SQL_type)}</c>, parsed from the token after
+    /// its <c>(</c> and left on its <c>)</c>: a <c>CAST</c> of the value to the
+    /// type the ODBC name stands for (probed 2026-10-26 against SQL Server
+    /// 2025) — the character and binary names their 8000-byte form, the date
+    /// and time names <c>datetime</c>, <c>SQL_DECIMAL</c> / <c>SQL_NUMERIC</c>
+    /// <c>decimal(38, 4)</c> — an unknown name being Msg 155.
+    /// </summary>
+    public static Cast OdbcConvert(ParserContext context)
+    {
+        var openToken = context.Token;
+        var source = Parse(RequireSourceBeforeAs(context, "convert"));
+        if (context.Token is not Operator { Character: ',' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var word = context.GetNextRequired() is Name name ? name.Value : throw SimulatedSqlException.SyntaxErrorNear(context);
+        Span<char> upper = stackalloc char[word.Length];
+        _ = word.ToUpperInvariant(upper);
+        (SqlType Type, int? MaxLength) target = upper switch
+        {
+            "SQL_BIGINT" => (SqlType.BigInt, null),
+            "SQL_BINARY" => (SqlType.GetBinary(8000), 8000),
+            "SQL_BIT" => (SqlType.Bit, null),
+            "SQL_CHAR" => (SqlType.GetChar(8000), 8000),
+            "SQL_DATE" => (SqlType.DateTime, null),
+            "SQL_DECIMAL" => (SqlType.GetDecimal(38, 4), null),
+            "SQL_DOUBLE" => (SqlType.Float, null),
+            "SQL_FLOAT" => (SqlType.Float, null),
+            "SQL_GUID" => (SqlType.UniqueIdentifier, null),
+            "SQL_INTEGER" => (SqlType.Int32, null),
+            "SQL_LONGVARBINARY" => (VarbinarySqlType.Get(8000), 8000),
+            "SQL_LONGVARCHAR" => (VarcharSqlType.Get(8000, Collation.Baseline, Coercibility.CoercibleDefault), 8000),
+            "SQL_NUMERIC" => (SqlType.GetDecimal(38, 4), null),
+            "SQL_REAL" => (SqlType.Real, null),
+            "SQL_SMALLINT" => (SqlType.SmallInt, null),
+            "SQL_TIME" => (SqlType.DateTime, null),
+            "SQL_TIMESTAMP" => (SqlType.DateTime, null),
+            "SQL_TINYINT" => (SqlType.TinyInt, null),
+            "SQL_TYPE_DATE" => (SqlType.DateTime, null),
+            "SQL_TYPE_TIME" => (SqlType.DateTime, null),
+            "SQL_TYPE_TIMESTAMP" => (SqlType.DateTime, null),
+            "SQL_VARBINARY" => (VarbinarySqlType.Get(8000), 8000),
+            "SQL_VARCHAR" => (VarcharSqlType.Get(8000, Collation.Baseline, Coercibility.CoercibleDefault), 8000),
+            "SQL_WCHAR" => (SqlType.GetNChar(4000), 4000),
+            "SQL_WLONGVARCHAR" => (NVarcharSqlType.Get(4000, Collation.Baseline, Coercibility.CoercibleDefault), 4000),
+            "SQL_WVARCHAR" => (NVarcharSqlType.Get(4000, Collation.Baseline, Coercibility.CoercibleDefault), 4000),
+            _ => throw SimulatedSqlException.NotARecognizedOdbcDatatypeOption(word),
+        };
+        context.MoveNextRequired();
+        return new Cast(source, target.Type, target.MaxLength, upper.SequenceEqual("SQL_NUMERIC"), openToken);
+    }
+
     /// <summary>
     /// Validates a value converted to <c>xml(collection)</c> and answers its
     /// canonical form, as every typed write does. <c>TRY_CAST</c> doesn't
