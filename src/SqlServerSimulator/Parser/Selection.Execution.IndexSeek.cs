@@ -1688,6 +1688,11 @@ internal sealed partial class Selection
     /// caller that needs ties in that key's order; a direction differing from
     /// the ORDER BY's declines like any mixed-direction sort.
     /// </para>
+    /// <para>
+    /// <paramref name="skipsNullKeys"/> takes a nullable order column for a
+    /// caller passing over the rows it holds NULL in, which the ordered view
+    /// may leave out (<see cref="TryReadIndexEnds"/>).
+    /// </para>
     /// </summary>
     private static bool TryApplyOrderedScan(
         FromSource[] sources,
@@ -1699,7 +1704,8 @@ internal sealed partial class Selection
         Func<MultiPartName, SqlValue>? outerResolver,
         out FromSource[] orderedSources,
         out int skipped,
-        (int[] Ordinals, bool[] Descending)? tiebreak = null)
+        (int[] Ordinals, bool[] Descending)? tiebreak = null,
+        bool skipsNullKeys = false)
     {
         orderedSources = sources;
         skipped = 0;
@@ -1774,7 +1780,7 @@ internal sealed partial class Selection
             return false;
         foreach (var ord in effective)
         {
-            if (source.StoredSchema[ord].Nullable)
+            if (source.StoredSchema[ord].Nullable && !skipsNullKeys)
                 return false;
         }
 

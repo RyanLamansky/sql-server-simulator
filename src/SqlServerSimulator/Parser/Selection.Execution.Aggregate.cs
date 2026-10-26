@@ -109,8 +109,16 @@ internal sealed partial class Selection
         var projectionGroupingKeys = fromClause.GroupingSetsWritten ? ProjectionGroupingKeys(sources, expressions, fromClause) : null;
         ShapeKey[] currentSetKeys = [];
 
-        sources = MaybeApplyIndexSeek(sources, joins, fromClause.Excluders, batch, outerResolver, where: true);
-        (sources, joins) = NarrowJoinSources(sources, joins, fromClause.Excluders, batch, outerResolver);
+        // MIN / MAX read off an index's ends answer the one implicit group
+        // without the rows being read at all (TryReadIndexEnds).
+        var indexEnds = fromClause.GroupingSets.Count == 0 && fromClause.GroupByAllFilter is null && windows.Count == 0
+            ? TryReadIndexEnds(sources, joins, fromClause.Excluders, aggregates, batch, outerResolver)
+            : null;
+        if (indexEnds is null)
+        {
+            sources = MaybeApplyIndexSeek(sources, joins, fromClause.Excluders, batch, outerResolver, where: true);
+            (sources, joins) = NarrowJoinSources(sources, joins, fromClause.Excluders, batch, outerResolver);
+        }
 
         // Effective grouping sets: parser-built list, or a single synthesized
         // empty set when GROUP BY is absent (the implicit "all rows are one
@@ -175,7 +183,7 @@ internal sealed partial class Selection
         var groupedAnyRow = false;
         try
         {
-            foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
+            foreach (var tuple in indexEnds is null ? EnumerateJoinedRows(sources, joins, batch, outerResolver) : [])
             {
                 var rowOrdinal = enumeratedRows++;
                 if (parallel is not null)
@@ -250,6 +258,11 @@ internal sealed partial class Selection
 
             if (groupedAnyRow && GroupByAllWarns(aggregates, sources, groupAllFilter!))
                 batch.CurrentStatement.NullEliminated = true;
+            for (var i = 0; indexEnds is not null && i < indexEnds.Length; i++)
+            {
+                if (indexEnds[i] is { } end)
+                    ungroupedState!.Aggregators[i].Add(end);
+            }
         }
         catch (SimulatedSqlException accumulationError) when (parallel is null)
         {

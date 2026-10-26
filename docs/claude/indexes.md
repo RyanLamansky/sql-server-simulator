@@ -425,6 +425,14 @@ Whether it carries one is settled twice, before the walk's order is read and aft
 A write landing after the order is read reaches the walk only through the version store, which hands each row back as the snapshot found it — a row inserted since drops out, one deleted since reads as it was — at the place the order holds for it, so a statement waiting on its client reads on without the live re-read a locking ordered scan makes.
 AdventureWorks ships with `READ_COMMITTED_SNAPSHOT ON`, as Azure SQL Database sets it by default and its bacpacs carry it, so before this every paged or `TOP` read there sorted the whole table: EF Core's `Where(ListPrice > p).OrderBy(Name).Skip(n).Take(20)` over `Production.Product` went from 226 µs and 151 KB to 58 µs and 61 KB, and its `StartsWith` with `TOP (10) … ORDER BY LastName, FirstName` over `Person.Person` from 225 µs (the prefix seek and a sort of its matches) to 86 µs (Release, one worker, measured 2026-10-24).
 
+### MIN / MAX read off an index's end
+
+An ungrouped query whose every aggregate is a `MIN` or `MAX` of a column an index leads — after the columns its WHERE pins to fixed values — over one table whose WHERE that index's seek consumes whole (the pins, and a range or `BETWEEN` on the aggregated column) reads each answer as a `TOP (1)` over the ordered seek, ascending for `MIN` and descending for `MAX`, taking the first row holding a value (`Selection.TryReadIndexEnds`, through `TryApplyOrderedScan`, whose ordered view leaves NULL keys out).
+That is real's plan for one such aggregate at any table size, which meets no NULL and so sends no Msg 8153 where a scan of the same rows would; a WHERE leaving anything of the seek is real's scan, warning of the NULLs it aggregates away, and so is `MIN` beside `MAX` over a nullable column on a small table, so those keep the scan here, while several over columns holding no NULL answer alike either way (probed 2026-10-26 against SQL Server 2025, 3 to 3,000 rows).
+Real folds `MIN(k) … WHERE k IS NULL` to NULL without reading the table, sending neither the warning nor an IO line; here it scans and warns.
+A read taking locks of its own keeps the scan too.
+A loop stepping through a table by `SELECT @x = MIN(id) FROM t WHERE id > @x` over 8,000 rows took 6.6 s and takes 0.5 s, against real's 65 ms (measured 2026-10-26, Release).
+
 ### UPDATE / DELETE target seeking
 
 A single-table `UPDATE t SET … WHERE …` / `DELETE FROM t WHERE …` narrows its target scan through the same seek cache rather than walking the whole heap.
