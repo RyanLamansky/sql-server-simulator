@@ -2,6 +2,7 @@
 
 An in-process, _zero-dependency_ stand-in for `Microsoft.Data.SqlClient` and SQL Server.
 Consumers create a `Simulation`, get a `DbConnection` from `CreateDbConnection()`, and use it with Entity Framework Core or raw ADO.NET the same way they would with a real SQL Server.
+For broader compatibility, it can also create a network listener that fools most clients into thinking it's a real SQL Server.
 
 Intended for fast unit testing of SQL Server-backed applications.
 Can create and discard thousands of databases every second, enabling test scenarios with conflicting data dependencies to run concurrently.
