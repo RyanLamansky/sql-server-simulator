@@ -1,5 +1,6 @@
 ﻿using System.Globalization;
 using System.Data.Common;
+using System.Runtime.CompilerServices;
 
 namespace SqlServerSimulator;
 
@@ -260,24 +261,67 @@ static class Extensions
     /// <see cref="SimulatedSqlException"/> it raised. A stack overflow would
     /// end the process instead, so returning at all is part of the result.
     /// </summary>
+    /// <remarks>
+    /// glibc starts a new thread on a stack an ended thread left in its cache
+    /// when that one is at most four times the size asked for, so a 256 KB
+    /// thread started just after a 1 MB one ended has 1 MB, and a shape meant
+    /// to run out of stack answers instead. The command runs as far down the
+    /// stack as leaves it what a fresh thread of the size asked for has.
+    /// </remarks>
     public static (object? Result, SimulatedSqlException? Failure) ExecuteScalarOnStack(string commandText, int maxStackSize)
     {
         object? result = null;
         SimulatedSqlException? failure = null;
         var thread = new Thread(() =>
         {
-            try
+            byte top = 0;
+            var spare = Descend(ref top, int.MaxValue, null) - (maxStackSize - StackCheckReserve);
+            _ = Descend(ref top, spare, () =>
             {
-                result = new Simulation().ExecuteScalar(commandText);
-            }
-            catch (SimulatedSqlException raised)
-            {
-                failure = raised;
-            }
+                try
+                {
+                    result = new Simulation().ExecuteScalar(commandText);
+                }
+                catch (SimulatedSqlException raised)
+                {
+                    failure = raised;
+                }
+            });
         }, maxStackSize);
         thread.Start();
         Assert.IsTrue(thread.Join(TimeSpan.FromSeconds(60)), "the command did not complete on the sized-stack thread");
         return (result, failure);
+    }
+
+    /// <summary>
+    /// The stack a 64-bit runtime holds back below the line its sufficient-stack
+    /// check fails at: a fresh thread leaves a command its size less this, and
+    /// less the few KB its start takes, before the engine's probes raise Msg 8631.
+    /// </summary>
+    private const int StackCheckReserve = 128 * 1024;
+
+    /// <summary>
+    /// Goes down the stack a frame at a time from <paramref name="top"/> until
+    /// <paramref name="depth"/> bytes below it or the runtime's sufficient-stack
+    /// check fails, runs <paramref name="action"/> there and returns how far
+    /// down that is.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int Descend(ref byte top, int depth, Action? action)
+    {
+        Span<byte> frame = stackalloc byte[1024];
+        var here = (int)Unsafe.ByteOffset(ref frame[0], ref top);
+        if (here >= depth || !RuntimeHelpers.TryEnsureSufficientExecutionStack())
+        {
+            action?.Invoke();
+            return here;
+        }
+        var bottom = Descend(ref top, depth, action);
+        // Writing to the frame after the call keeps it under the callee's: a
+        // call in tail position may become a jump that reuses the frame, and
+        // the descent would go nowhere.
+        frame[0] = 1;
+        return bottom;
     }
 
     /// <summary>
