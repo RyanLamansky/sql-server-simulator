@@ -192,4 +192,27 @@ public sealed class CollationTests
         IsFalse(Latin1GeneralBin.Equals(nfc, nfd));
         IsTrue(Collation.Baseline.Equals(nfc, nfd));
     }
+
+    /// <summary>
+    /// The Latin collations fold nothing but ASCII case across printable
+    /// ASCII, which is what puts <c>LIKE</c> on its ordinal path under them:
+    /// a space alone equals the empty string by the trailing-space rule, and
+    /// that is not the weightless character the check refuses.
+    /// <c>Turkish_CI_AS</c> holds <c>I</c> and <c>i</c> apart and stays off it.
+    /// Its code page needs the code-pages provider, which loading the
+    /// CP1252 encoder registers, so the test does that first rather than
+    /// depend on another test having run.
+    /// </summary>
+    [TestMethod]
+    [DataRow("SQL_Latin1_General_CP1_CI_AS", true)]
+    [DataRow("Latin1_General_CI_AS", true)]
+    [DataRow("Latin1_General_CS_AS", true)]
+    [DataRow("Latin1_General_100_CI_AS", true)]
+    [DataRow("Latin1_General_BIN", true)]
+    [DataRow("Turkish_CI_AS", false)]
+    public void PrintableAsciiFoldsCaseOnly_HoldsForTheLatinCollations(string name, bool expected)
+    {
+        _ = Storage.CharSqlType.Cp1252Encoder;
+        AreEqual(expected, Collation.Get(name).PrintableAsciiFoldsCaseOnly);
+    }
 }

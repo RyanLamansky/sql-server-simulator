@@ -192,7 +192,10 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
             var s = c.ToString();
             // A character the collation gives no weight at all would let a
             // literal run swallow it, which ordinal comparison never does.
-            if (this.Equals(s, string.Empty))
+            // Asked with a letter after it, since alone a space equals the
+            // empty string by the trailing-space rule and not for want of a
+            // weight.
+            if (this.Equals(s + "a", "a"))
                 return false;
             var hash = this.GetHashCode(s);
             if (!buckets.TryGetValue(hash, out var bucket))
